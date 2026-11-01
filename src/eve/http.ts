@@ -1,3 +1,13 @@
+import { setGlobalDispatcher, EnvHttpProxyAgent } from 'undici';
+
+if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy) {
+  try {
+    setGlobalDispatcher(new EnvHttpProxyAgent());
+  } catch (e) {
+    // Ignore in environments where dispatcher is already locked
+  }
+}
+
 export async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs: number): Promise<Response> {
   const signal = timeoutSignal(timeoutMs, init.signal);
   return fetch(input, {
