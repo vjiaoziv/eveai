@@ -1,0 +1,75 @@
+# EVE AI Agent 源码与架构修改记录 (MODIFICATION_LOG.md)
+
+本日志详尽记录自上游主干克隆以来，在部署分支 `deploy/eve-ai-agent` 上执行的所有配置、依赖修复与中文化修改。
+
+---
+
+## 一、基础版本与分支信息
+
+- **上游源仓库**：`https://github.com/garshany/eveai.git`
+- **基准提交 (Base Commit)**：`b93bfcf1c11b593531f928e2283834b57569bab0`
+- **本地独立工作分支**：`deploy/eve-ai-agent`
+- **修改原则**：严格保护上游原有主干，所有变动集中在独立分支中受版本控制，且不破坏现有测试。
+
+---
+
+## 二、详细修改记录
+
+### 1. 2026-11-01：系统网络与 WSL 镜像环境适配
+- **变更文件**：`C:\Users\JIAOZI\.wslconfig`, `/etc/apt/apt.conf.d/proxy.conf`, `/etc/apt/sources.list.d/ubuntu.sources`
+- **修改背景**：解决 Windows 宿主机代理环境下，WSL2 内无法直连访问 EVE Online 开发者网站及 ESI 接口的问题；将 Ubuntu 虚拟磁盘迁移至 D 盘 (`D:\WSL\Ubuntu-24.04`) 以释放 C 盘空间。
+- **修改详情**：
+  - 启用 WSL2 `networkingMode=mirrored`，使子系统无缝共享宿主机网络与本地 `127.0.0.1:8033` 代理。
+  - 将 APT 软件源配置为阿里云镜像源并设置本地代理加速。
+
+### 2. 2026-11-01：前端 UI 全量简体中文化 (Commit: `9acee49`)
+- **变更文件**：
+  - `web/src/i18n.tsx`
+  - `web/src/dates.ts`
+  - `web/src/components/ChatScreen.tsx`
+  - `web/src/components/DataDock.tsx`
+  - `web/src/components/PilotProfileScreen.tsx`
+  - `web/src/components/SupportScreen.tsx`
+  - `web/src/components/map/PerimeterChat.tsx`
+  - `web/src/components/map/SystemInspector.tsx`
+- **修改详情**：
+  - 扩展 `Locale` 类型为 `'zh' | 'en' | 'ru'`，并新增包含全部 476 个词条的完整简体中文翻译字典 `ZH`。
+  - 将默认语言状态从俄语 (`ru`) 调整为简体中文 (`zh`)。
+  - 在语言切换组件 (`LocaleSwitch`) 中新增“中文”选项。
+  - 适配日期、时间、相对时间（如“昨天”）的中文展示。
+  - 修复各组件中对 `Locale` 类型的联合约束，确保前端 TypeScript 类型检查 100% 通过。
+
+### 3. 2026-11-01：AI Agent 提示词规则中文化改造 (Commit: `9acee49`)
+- **变更文件**：
+  - `src/agent/prompts.ts`
+  - `src/config.ts`
+- **修改详情**：
+  - 在 `normalizeResponseLanguage` 中增加对 `zh`, `zh-cn`, `chinese`, `中文`, `简体中文` 的识别支持，默认语言设为 `Chinese`。
+  - 在 `buildResponseLanguageBlock` 中注入专门的中文回答规范：
+    1. 默认采用自然、专业的简体中文作答；
+    2. 严格保留 EVE Online 核心专有术语体系（杜绝非专业生造改写）；
+    3. 舰船、装备、物品优先采用游戏官方中文名称（来自 SDE 数据库），缺译名的补充英文原名；
+    4. ISK、DPS、EHP、ESI、SDE、LP 等通用专业缩写不强制翻译；
+    5. 严禁编造游戏机制，必须明确区分事实、计算与推论，如实标注时效与数据源。
+  - 在 `src/config.ts` 中将默认回复语言设为 `Chinese`。
+
+### 4. 2026-11-01：官方 SDE 静态数据全量本地导入与验证
+- **生成产物**：`/home/ubuntu/projects/eveai/data/eve-agent.db` (约 640 MB)
+- **修改详情**：
+  - 成功拉取 CCP 官方最新 SDE 数据包并解包。
+  - 执行 `npm run sde:load`，将 676,965 条宇宙天体与物品数据全量写入 SQLite，验证中文道具名（如“狂怒者级”、“三钛合金”）读取正常。
+  - 执行 `npm run db:migrate` 完成业务表与关联外键初始化。
+### 5. 2026-11-01：新增 Custom 独立模型适配器与通用 Agent 工具链 (Commit: `2f8e537`)
+- **变更文件**：
+  - `src/openai-provider.ts`
+  - `src/agent/tools/sde-schema.ts`
+  - `tests/unit/config.test.ts`
+  - `scripts/eve-cli.ts`
+  - `C:\Users\JIAOZI\bin\eve-agent.cmd`
+  - `C:\Users\JIAOZI\.codex\skills\eve-agent\SKILL.md`
+  - `C:\Users\JIAOZI\.agents\skills\eve-agent\SKILL.md`
+- **修改详情**：
+  - 在 `src/openai-provider.ts` 中新增独立的 `custom` Provider，支持将模型请求通过 Responses API (HTTP SSE) 转发至本地 Antigravity 路由服务 (`http://127.0.0.1:8046/v1`)，完美支持 `claude-sonnet-5-5`、`claude-opus-5-5` 等模型的原生流式输出与多轮工具调用。
+  - 在 SQLite `sde_types`、`sde_groups` 等静态数据表中增加 `zh_name` 虚拟生成列与二级索引，彻底消除中文名模糊匹配的性能损耗，在 0 毫秒内实现中英文双向互查。
+  - 打造通用 Agent CLI 命令行工具 `eve-agent` 并加入系统用户 PATH (`C:\Users\JIAOZI\bin\eve-agent.cmd`)，支持 `eve-agent status`、`eve-agent ask`、`eve-agent item`、`eve-agent reprocess`、`eve-agent sde`。
+  - 创建并注册了标准 Agent 技能定义，使 Codex、Hermes 和 dsh (DeepSeek Harness) 均能原生直接调度本 EVE Agent 的全部能力。
