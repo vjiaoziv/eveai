@@ -16,6 +16,20 @@ afterEach(() => {
 });
 
 describe('OpenAI runtime configuration', () => {
+  it('selects the custom Responses endpoint by provider ID and env base URL', async () => {
+    setRequiredEnv();
+    process.env.OPENAI_PROVIDER = 'custom';
+    process.env.OPENAI_BASE_URL = 'http://127.0.0.1:8046/v1';
+
+    const { config } = await import('../../src/config.js');
+
+    expect(config.openai.providerId).toBe('custom');
+    expect(config.openai.providerName).toBe('Custom');
+    expect(config.openai.baseUrl).toBe('http://127.0.0.1:8046/v1');
+    expect(config.openai.responsesTransport).toBe('http_sse');
+    expect(config.openai.toolSearchExecution).toBe('client');
+  });
+
   it('defaults stored response logs off and parses the opt-in strictly', async () => {
     setRequiredEnv();
     process.env.DOTENV_CONFIG_PATH = '/private/tmp/eveai-test-no-dotenv-file';
@@ -102,7 +116,7 @@ describe('OpenAI runtime configuration', () => {
     process.env.OPENAI_PROVIDER = 'custom-gateway';
 
     await expect(import('../../src/config.js')).rejects.toThrow(
-      'OPENAI_PROVIDER must be one of: openai, modelhub',
+      'OPENAI_PROVIDER must be one of: openai, modelhub, custom',
     );
   });
 

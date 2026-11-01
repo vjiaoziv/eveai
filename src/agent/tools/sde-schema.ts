@@ -1,12 +1,12 @@
 export const SDE_SCHEMA = `Tables (all read-only, SQLite):
 sde_meta (build_number INT, loaded_at TEXT) — snapshot metadata, not freshness
-sde_types (type_id INT, name TEXT, group_id INT, data_json TEXT) — 51k items/ships/modules
-sde_groups (group_id INT, name TEXT, category_id INT, data_json TEXT)
-sde_categories (category_id INT, name TEXT, data_json TEXT)
+sde_types (type_id INT, name TEXT, zh_name TEXT, group_id INT, data_json TEXT) — 53k items/ships/modules (name is English, zh_name is official Chinese name)
+sde_groups (group_id INT, name TEXT, zh_name TEXT, category_id INT, data_json TEXT)
+sde_categories (category_id INT, name TEXT, zh_name TEXT, data_json TEXT)
 sde_market_groups (market_group_id INT, name TEXT, parent_group_id INT, data_json TEXT)
-sde_systems (system_id INT, name TEXT, constellation_id INT, data_json TEXT) — json has security
+sde_systems (system_id INT, name TEXT, zh_name TEXT, constellation_id INT, data_json TEXT) — json has security
 sde_constellations (constellation_id INT, name TEXT, region_id INT, data_json TEXT)
-sde_regions (region_id INT, name TEXT, data_json TEXT)
+sde_regions (region_id INT, name TEXT, zh_name TEXT, data_json TEXT)
 sde_stations (station_id INT, name TEXT, system_id INT, data_json TEXT)
 sde_stargates (stargate_id INT, system_id INT, destination_system_id INT, destination_stargate_id INT, data_json TEXT)
 sde_blueprints (blueprint_type_id INT, name TEXT, data_json TEXT)
@@ -33,13 +33,18 @@ Dogma lookup (resolve attributeID to name+value for a type):
   FROM sde_type_dogma d, json_each(d.data_json,'$.dogmaAttributes') j
   JOIN sde_dogma_attributes a ON a.attribute_id=json_extract(j.value,'$.attributeID')
   WHERE d.type_id=<ID> AND a.name IN ('shieldCapacity','shieldRechargeRate','shieldEmDamageResonance','shieldThermalDamageResonance','shieldKineticDamageResonance','shieldExplosiveDamageResonance','armorHP','armorEmDamageResonance','armorThermalDamageResonance','armorKineticDamageResonance','armorExplosiveDamageResonance','maxVelocity','agility','signatureRadius','droneCapacity','droneBandwidth','maxRange','falloff','trackingSpeed','capacitorCapacity','rechargeRate','cpuOutput','powerOutput','hp')
-Resonance 0-1: resist = 1 - resonance. rechargeRate is in ms.`;
+Resonance 0-1: resist = 1 - resonance. rechargeRate is in ms.
+
+Chinese / English search:
+  When searching for items/ships/modules/systems/regions, ALWAYS check both name and zh_name:
+  e.g. WHERE zh_name LIKE '%狂怒者%' OR name LIKE '%Vexor%'
+`;
 
 export const STATIC_AGGREGATE_SDE_SCHEMA = `Relevant read-only SQLite tables:
 sde_meta (build_number INT, loaded_at TEXT) - local snapshot metadata
 sde_systems (system_id INT, name TEXT, constellation_id INT, data_json TEXT)
 sde_constellations (constellation_id INT, name TEXT, region_id INT, data_json TEXT)
-sde_regions (region_id INT, name TEXT, data_json TEXT)
+sde_regions (region_id INT, name TEXT, zh_name TEXT, data_json TEXT)
 sde_stations (station_id INT, name TEXT, system_id INT, data_json TEXT)
 sde_stargates (stargate_id INT, system_id INT, destination_system_id INT, destination_stargate_id INT, data_json TEXT)
 sde_raw_records (dataset_name TEXT, record_id TEXT, name TEXT, data_json TEXT)

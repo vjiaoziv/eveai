@@ -1,4 +1,4 @@
-export const OPENAI_PROVIDER_IDS = ['openai', 'modelhub'] as const;
+export const OPENAI_PROVIDER_IDS = ['openai', 'modelhub', 'custom'] as const;
 
 export type OpenAiProviderId = typeof OPENAI_PROVIDER_IDS[number];
 
@@ -40,6 +40,17 @@ const OPENAI_PROVIDERS: Record<OpenAiProviderId, OpenAiProvider> = {
     supportsTruncation: false,
     supportsEncryptedReasoningReplay: false,
   },
+  custom: {
+    id: 'custom',
+    name: 'Custom',
+    baseUrl: 'http://127.0.0.1:8046/v1',
+    responsesTransport: 'http_sse',
+    toolSearchExecution: 'client',
+    supportsHostedProgrammaticToolCalling: false,
+    supportsLocalParallelBatch: false,
+    supportsTruncation: false,
+    supportsEncryptedReasoningReplay: false,
+  },
 };
 
 export function resolveOpenAiProvider(
@@ -49,5 +60,9 @@ export function resolveOpenAiProvider(
   if (!OPENAI_PROVIDER_IDS.includes(raw as OpenAiProviderId)) {
     throw new Error(`OPENAI_PROVIDER must be one of: ${OPENAI_PROVIDER_IDS.join(', ')}`);
   }
-  return OPENAI_PROVIDERS[raw as OpenAiProviderId];
+  const provider = { ...OPENAI_PROVIDERS[raw as OpenAiProviderId] };
+  if (raw === 'custom' && env.OPENAI_BASE_URL?.trim()) {
+    provider.baseUrl = env.OPENAI_BASE_URL.trim();
+  }
+  return provider;
 }
