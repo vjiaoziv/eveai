@@ -276,7 +276,7 @@ function ChatRow({
   onFocusSystem,
 }: {
   message: PerimeterMessage;
-  locale: 'ru' | 'en';
+  locale: 'zh' | 'zh' | 'en' | 'ru';
   onFocusSystem: (systemId: number) => void;
 }) {
   const { t } = useI18n();

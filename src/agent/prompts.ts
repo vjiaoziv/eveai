@@ -233,9 +233,12 @@ export function normalizeResponseLanguage(value: string | null | undefined): str
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 80);
-  if (!cleaned) return 'Russian';
+  if (!cleaned) return 'Chinese';
 
   const normalized = cleaned.toLowerCase();
+  if (['zh', 'zh-cn', 'zh-hans', 'chinese', '中文', '汉语', '简体中文'].includes(normalized)) {
+    return 'Chinese';
+  }
   if (['ru', 'rus', 'russian', 'русский', 'рус', 'по-русски', 'по русски'].includes(normalized)) {
     return 'Russian';
   }
@@ -247,6 +250,18 @@ export function normalizeResponseLanguage(value: string | null | undefined): str
 
 function buildResponseLanguageBlock(value: string): string {
   const language = normalizeResponseLanguage(value);
+  if (language === 'Chinese') {
+    return `\n\n<response_language>
+默认回答语言：简体中文。
+回答与专业规范要求：
+1. 默认使用专业、清晰的简体中文进行回复。
+2. 严格保留 EVE Online 专有术语体系，严禁随意口语化改写游戏术语。
+3. 舰船、装备、组件、技能与物品优先使用官方简体中文名称；对于尚未有明确中文译名的内容，同时附带英文名称。
+4. ISK、DPS、EHP、ESI、SDE、LP 等通用专业缩写不予翻译。
+5. 绝不凭空编造游戏机制，严禁猜测市场成交价或属性，必须明确标注数据来源与时效。
+6. 清晰区分【来自数据库的事实】、【数据计算结果】与【推论建议】。
+</response_language>`;
+  }
   return `\n\n<response_language>\nDefault answer language: ${language}.\nUse this language for all final user-facing responses unless the current user message explicitly asks for another language. Preserve EVE item names, system names, character/corporation/alliance names, IDs, URLs, tool names, and EFT blocks exactly as data.\n</response_language>`;
 }
 

@@ -106,7 +106,7 @@ export function SystemInspector({ system, kills, onClose, onRouteTo, onAvoid, on
   </section>;
 }
 
-function formatIsk(value: number, locale: 'ru' | 'en'): string {
+function formatIsk(value: number, locale: 'zh' | 'zh' | 'en' | 'ru'): string {
   const formatter = new Intl.NumberFormat(locale === 'ru' ? 'ru-RU' : 'en-GB', {
     maximumFractionDigits: 1,
   });
@@ -115,7 +115,7 @@ function formatIsk(value: number, locale: 'ru' | 'en'): string {
   return formatter.format(value);
 }
 
-function formatAge(timeMs: number, locale: 'ru' | 'en'): string {
+function formatAge(timeMs: number, locale: 'zh' | 'zh' | 'en' | 'ru'): string {
   const minutes = Math.max(0, Math.round((Date.now() - timeMs) / 60_000));
   if (locale === 'ru') return minutes < 60 ? `${minutes} мин назад` : `${Math.round(minutes / 60)} ч назад`;
   return minutes < 60 ? `${minutes}m ago` : `${Math.round(minutes / 60)}h ago`;

@@ -145,5 +145,5 @@ function ProfileCard({ title, availability, t, children }: { title: string; avai
 }
 
 function statusText(value: ProfileAvailability, t: (key: any) => string) { return value === 'missing_scope' ? t('missingScope') : value === 'unavailable' ? t('unavailable') : 'ESI'; }
-function formatNumber(value: number, locale: 'ru' | 'en', digits = 0) { return new Intl.NumberFormat(locale === 'ru' ? 'ru-RU' : 'en-US', { maximumFractionDigits: digits }).format(value); }
+function formatNumber(value: number, locale: 'zh' | 'zh' | 'en' | 'ru', digits = 0) { return new Intl.NumberFormat(locale === 'ru' ? 'ru-RU' : 'en-US', { maximumFractionDigits: digits }).format(value); }
 function EmptyState({ icon, title, action, onAction }: { icon: React.ReactNode; title: string; action: string; onAction: () => void }) { return <div className="workspace-empty">{icon}<h2>{title}</h2><button className="button button--primary" type="button" onClick={onAction}>{action}</button></div>; }

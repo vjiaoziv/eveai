@@ -5,7 +5,7 @@ import { LocaleSwitch, useI18n } from '../i18n';
 import { MenuIcon } from '../icons';
 import type { ModelPricing, MyTransparency, TransparencyPayload, UsageDailyRow, UsageSums } from '../types';
 
-type Locale = 'ru' | 'en';
+type Locale = 'zh' | 'zh' | 'en' | 'ru';
 
 type Props = {
   hasSession: boolean;

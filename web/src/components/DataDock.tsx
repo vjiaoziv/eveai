@@ -316,7 +316,7 @@ function PilotTab({ profile, characterId, onAsk }: { profile: PilotProfile | nul
 
 /* --- Формат --------------------------------------------------------------- */
 
-function formatIsk(value: number | null, locale: 'ru' | 'en'): string {
+function formatIsk(value: number | null, locale: 'zh' | 'zh' | 'en' | 'ru'): string {
   if (value === null || !Number.isFinite(value)) return '—';
   const abs = Math.abs(value);
   const nbsp = locale === 'ru' ? ' ' : ' ';

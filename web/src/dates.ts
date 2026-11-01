@@ -9,9 +9,10 @@
  */
 import { parseSqlUtcDate } from './sql-utc';
 
-export type DateLocale = 'ru' | 'en';
+export type DateLocale = 'zh' | 'en' | 'ru';
 
 function intlLocale(locale: DateLocale): string {
+  if (locale === 'zh') return 'zh-CN';
   return locale === 'ru' ? 'ru-RU' : 'en-US';
 }
 
@@ -40,7 +41,7 @@ export function formatRelativeDay(value: string, locale: DateLocale): string {
   if (days === 0) {
     return new Intl.DateTimeFormat(intlLocale(locale), { hour: '2-digit', minute: '2-digit' }).format(date);
   }
-  if (days === 1) return locale === 'ru' ? 'вчера' : 'yesterday';
+  if (days === 1) return locale === 'zh' ? '昨天' : (locale === 'ru' ? 'вчера' : 'yesterday');
   return new Intl.DateTimeFormat(intlLocale(locale), { day: '2-digit', month: '2-digit' }).format(date);
 }
 

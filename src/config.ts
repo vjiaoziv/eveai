@@ -240,7 +240,7 @@ export const config = {
     maxTransientRetries: boundedPositiveInt('AGENT_MAX_TRANSIENT_RETRIES', 5, 1, 10),
     // Shared read-leaf ceiling across the root turn and delegated subagents.
     maxTotalTurnReadLeaves: boundedPositiveInt('AGENT_MAX_TOTAL_TURN_READ_LEAVES', 96, 4, 512),
-    responseLanguage: optional('OPENAI_RESPONSE_LANGUAGE', 'Russian'),
+    responseLanguage: optional('OPENAI_RESPONSE_LANGUAGE', 'Chinese'),
     storeResponses,
     programmaticToolCalling: optionalBoolean('OPENAI_PROGRAMMATIC_TOOL_CALLING', false),
     readSubagentsEnabled,

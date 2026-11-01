@@ -234,7 +234,7 @@ function ToolChips({ steps, onInspect }: { steps: ActivityStep[]; onInspect: (st
   </div>;
 }
 
-function formatMessageTime(value: string, locale: 'ru' | 'en'): { iso: string; label: string } | null {
+function formatMessageTime(value: string, locale: 'zh' | 'zh' | 'en' | 'ru'): { iso: string; label: string } | null {
   const date = parseSqlUtcDate(value);
   if (Number.isNaN(date.getTime())) return null;
   return {
