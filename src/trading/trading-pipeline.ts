@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import { DataCenter } from './data-center.js';
 import { FeeEngine, ALPHA_DEFAULT_SKILLS } from './fee-engine.js';
@@ -13,33 +13,67 @@ import type {
   TradeOpportunity 
 } from './types.js';
 
-const PIPELINE_SIGNING_SECRET = 'eveai-deterministic-pipeline-signing-key-v1';
+export const PIPELINE_KEY_STORE: Record<string, string> = {
+  'v1': 'eveai-deterministic-pipeline-signing-key-v1',
+};
 
-export function signPipelineCredential(
+export function getPipelineKey(keyId: string): string | undefined {
+  return PIPELINE_KEY_STORE[keyId];
+}
+
+export function buildCanonicalCredentialPayload(
   data: Omit<PipelineVerificationCredential, 'signature'>,
-  secret = PIPELINE_SIGNING_SECRET,
 ): string {
-  const message = [
+  return [
+    'v2',
+    data.keyId,
     data.credentialId,
+    data.characterId,
+    data.opportunityId || '',
     data.typeId,
     data.strategy,
     data.buyStationId,
     data.sellStationId,
-    data.suggestedBuyPrice,
-    data.suggestedSellPrice,
+    data.suggestedBuyPrice.toFixed(2),
+    data.suggestedSellPrice.toFixed(2),
     data.suggestedQuantity,
-    data.capitalRequired,
-    data.expectedNetProfit,
+    data.capitalRequired.toFixed(2),
+    data.expectedNetProfit.toFixed(2),
     data.opportunityRating,
+    data.marketSnapshotHash,
     data.verifiedAt,
+    data.expiresAt,
+    data.nonce,
   ].join('|');
-  return createHmac('sha256', secret).update(message).digest('hex');
+}
+
+export function signPipelineCredential(
+  data: Omit<PipelineVerificationCredential, 'signature'>,
+  secretOverride?: string,
+): string {
+  const secret = secretOverride || getPipelineKey(data.keyId);
+  if (!secret) {
+    throw new Error(`【密钥未知】无法为 keyId=${data.keyId} 找到可用的签名密钥`);
+  }
+  const payload = buildCanonicalCredentialPayload(data);
+  return createHmac('sha256', secret).update(payload).digest('hex');
+}
+
+function safeCompareHex(a: string, b: string): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a, 'hex');
+  const bufB = Buffer.from(b, 'hex');
+  if (bufA.length !== bufB.length || bufA.length === 0) return false;
+  return timingSafeEqual(bufA, bufB);
 }
 
 export function validatePipelineCredential(
   opp: TradeOpportunity,
-  secret = PIPELINE_SIGNING_SECRET,
-  maxAgeMs = 15 * 60 * 1000,
+  options?: {
+    expectedCharacterId?: number;
+    secretOverride?: string;
+    nowMs?: number;
+  },
 ): { valid: boolean; reason?: string } {
   if (!opp.pipelineCredential) {
     return { valid: false, reason: '【凭证缺失】该交易机会未包含统一决策管线签发的验证凭证，严禁创建草案！' };
@@ -50,13 +84,25 @@ export function validatePipelineCredential(
     return { valid: false, reason: '【风控一票否决】D 级或被否决的高危机会不得签发或使用执行凭证！' };
   }
 
-  const verifiedTs = new Date(cred.verifiedAt.endsWith('Z') ? cred.verifiedAt : cred.verifiedAt + 'Z').getTime();
-  if (Date.now() - verifiedTs > maxAgeMs) {
-    return { valid: false, reason: '【凭证过期】该凭证已超过 15 分钟有效期，严禁使用陈旧行情创建草案！' };
+  const now = options?.nowMs ?? Date.now();
+  const expiresTs = new Date(cred.expiresAt.endsWith('Z') ? cred.expiresAt : cred.expiresAt + 'Z').getTime();
+  if (now > expiresTs) {
+    return { valid: false, reason: '【凭证过期】该凭证已超过授权有效期，严禁使用陈旧行情创建草案！' };
+  }
+
+  if (options?.expectedCharacterId && cred.characterId !== options.expectedCharacterId) {
+    return { valid: false, reason: `【跨角色越权】凭证绑定角色 (${cred.characterId}) 与当前操作角色 (${options.expectedCharacterId}) 不一致，严禁跨用户复用凭证！` };
+  }
+
+  const secret = options?.secretOverride || getPipelineKey(cred.keyId);
+  if (!secret) {
+    return { valid: false, reason: `【密钥失效】无法验证 keyId=${cred.keyId} 的签名，该密钥未注册或已轮换作废！` };
   }
 
   const expectedSig = signPipelineCredential({
     credentialId: cred.credentialId,
+    characterId: cred.characterId,
+    opportunityId: cred.opportunityId,
     typeId: cred.typeId,
     strategy: cred.strategy,
     buyStationId: cred.buyStationId,
@@ -67,10 +113,14 @@ export function validatePipelineCredential(
     capitalRequired: cred.capitalRequired,
     expectedNetProfit: cred.expectedNetProfit,
     opportunityRating: cred.opportunityRating,
+    marketSnapshotHash: cred.marketSnapshotHash,
     verifiedAt: cred.verifiedAt,
+    expiresAt: cred.expiresAt,
+    nonce: cred.nonce,
+    keyId: cred.keyId,
   }, secret);
 
-  if (cred.signature !== expectedSig) {
+  if (!safeCompareHex(cred.signature, expectedSig)) {
     return { valid: false, reason: '【凭证篡改】凭证数字签名验证失败，参数已被篡改或由未授权模块伪造！' };
   }
 
@@ -79,16 +129,42 @@ export function validatePipelineCredential(
     cred.strategy !== opp.strategy ||
     cred.buyStationId !== opp.buyStationId ||
     cred.sellStationId !== opp.sellStationId ||
-    cred.suggestedBuyPrice !== opp.suggestedBuyPrice ||
-    cred.suggestedSellPrice !== opp.suggestedSellPrice ||
+    Math.abs(cred.suggestedBuyPrice - opp.suggestedBuyPrice) > 0.01 ||
+    Math.abs(cred.suggestedSellPrice - opp.suggestedSellPrice) > 0.01 ||
     cred.suggestedQuantity !== opp.suggestedQuantity ||
-    cred.capitalRequired !== opp.capitalRequired ||
+    Math.abs(cred.capitalRequired - opp.capitalRequired) > 1.0 ||
     cred.opportunityRating !== opp.opportunityRating
   ) {
     return { valid: false, reason: '【参数篡改】机会当前参数与凭证内签章的原始计算快照不吻合！' };
   }
 
   return { valid: true };
+}
+
+export function validateAndConsumePipelineCredential(
+  db: Db,
+  opp: TradeOpportunity,
+  characterId: number,
+  draftId: string,
+): void {
+  const check = validatePipelineCredential(opp, { expectedCharacterId: characterId });
+  if (!check.valid) {
+    throw new Error(check.reason || '【凭证无效】交易机会未通过决策管线加密凭证校验');
+  }
+
+  const credId = opp.pipelineCredential!.credentialId;
+
+  // Anti-replay: single-use consumption check in SQLite
+  const existing = db.prepare('SELECT 1 FROM consumed_pipeline_credentials WHERE credential_id = ?').get(credId);
+  if (existing) {
+    throw new Error(`【凭证重放阻断】验证凭证 ${credId} 已经被消费使用过，严禁重复提交生成草案！`);
+  }
+
+  // Atomically record consumption
+  db.prepare(`
+    INSERT INTO consumed_pipeline_credentials (credential_id, character_id, draft_id, consumed_at)
+    VALUES (?, ?, ?, datetime('now'))
+  `).run(credId, characterId, draftId);
 }
 
 export interface PipelineEvaluationResult {
@@ -170,7 +246,7 @@ export class TradingPipeline {
       ? Math.min(candidate.requestedQty, maxQtyByCap, maxQtyByM3)
       : Math.min(maxQtyByCap, maxQtyByM3);
 
-    // Stage 3: Optimal quantity determination across orderbook levels (reconciling depth and multi-level simulation)
+    // Stage 3: Optimal quantity determination across orderbook levels
     const { optimalQuantity, buySim, sellSim } = OrderBookSimulator.findOptimalProfitableQuantity({
       originSells: originBook.sells,
       destBuys: destBook.buys,
@@ -243,6 +319,44 @@ export class TradingPipeline {
       rating = 'A';
     }
 
+    // Compute market snapshot hash binding
+    const snapshotContent = JSON.stringify({
+      sells: originBook.sells.slice(0, 3).map(s => ({ p: s.price, v: s.volumeRemain })),
+      buys: destBook.buys.slice(0, 3).map(b => ({ p: b.price, v: b.volumeRemain })),
+    });
+    const marketSnapshotHash = createHash('sha256').update(snapshotContent).digest('hex').slice(0, 16);
+
+    // Stage 7.5: Generate Cryptographic Pipeline Verification Credential for Approved A/B grades
+    let pipelineCredential: PipelineVerificationCredential | undefined;
+    if ((rating === 'A' || rating === 'B') && !vetoReason) {
+      const now = new Date();
+      const verifiedAt = now.toISOString();
+      const expiresAt = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
+      const unsigned = {
+        credentialId: 'CRED-' + Date.now() + '-' + randomUUID().slice(0, 8),
+        characterId: candidate.characterId || 0,
+        typeId: candidate.typeId,
+        strategy: candidate.strategy,
+        buyStationId: candidate.originStationId,
+        sellStationId: candidate.destStationId,
+        suggestedBuyPrice: buySim.weightedAvgPrice,
+        suggestedSellPrice: sellSim.weightedAvgPrice,
+        suggestedQuantity: actualQty,
+        capitalRequired: trade.netCost,
+        expectedNetProfit: trade.netProfit,
+        opportunityRating: rating,
+        marketSnapshotHash,
+        verifiedAt,
+        expiresAt,
+        nonce: randomUUID(),
+        keyId: 'v1',
+      };
+      pipelineCredential = {
+        ...unsigned,
+        signature: signPipelineCredential(unsigned),
+      };
+    }
+
     const opportunity: TradeOpportunity = {
       typeId: candidate.typeId,
       typeName: meta.en_name,
@@ -271,6 +385,7 @@ export class TradingPipeline {
       riskVetoReason: vetoReason,
       stressTest: stress,
       dataQuality,
+      pipelineCredential,
       rationale: `【管线独立评估】在 ${candidate.originStationName} 采购 ${actualQty} 件，运往 ${candidate.destStationName} 变现。加权净利润 +${trade.netProfit.toLocaleString()} ISK (+${trade.netMarginPct.toFixed(1)}%)，评级为 [${rating} 级]。`,
     };
 
@@ -330,4 +445,3 @@ export class TradingPipeline {
     };
   }
 }
-

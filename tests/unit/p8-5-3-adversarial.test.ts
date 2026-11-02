@@ -58,7 +58,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
       turnoverDays: 0.5,
       liquidityRating: 'A',
       riskScore: 1,
-      opportunityRating: 'A', // Claims to be A
+      opportunityRating: 'A',
       rationale: 'Forged opportunity',
       // pipelineCredential is intentionally MISSING
     };
@@ -95,8 +95,10 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
       rationale: 'Valid signed test',
     };
 
+    const now = new Date();
     const unsigned = {
       credentialId: 'CRED-ADV-001',
+      characterId: 4001,
       typeId: 34,
       strategy: 'station_arbitrage' as const,
       buyStationId: 60003760,
@@ -105,11 +107,13 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
       suggestedSellPrice: 5.0,
       suggestedQuantity: 1000,
       capitalRequired: 3500,
-      estimatedFees: 300,
-      haulingCost: 0,
       expectedNetProfit: 1200,
       opportunityRating: 'A' as const,
-      verifiedAt: new Date().toISOString(),
+      marketSnapshotHash: 'snaph1234567890',
+      verifiedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+      nonce: 'nonce-12345',
+      keyId: 'v1',
     };
     opp.pipelineCredential = {
       ...unsigned,
@@ -137,7 +141,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
       ...opp,
       pipelineCredential: {
         ...opp.pipelineCredential!,
-        signature: 'deadbeef1234567890abcdef',
+        signature: 'deadbeef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab',
       },
     };
     expect(() => {
@@ -145,9 +149,11 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
     }).toThrow(/【凭证篡改】/);
   });
 
-  it('Adversarial Pipeline 3: Expired credential (>15m) is strictly rejected', () => {
+  it('Adversarial Pipeline 3: Expired credential is strictly rejected', () => {
     const db = createTestDb();
-    const twentyMinsAgo = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    const now = new Date();
+    const twentyMinsAgo = new Date(now.getTime() - 20 * 60 * 1000).toISOString();
+    const expiredAt = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
 
     const opp: TradeOpportunity = {
       typeId: 34,
@@ -176,6 +182,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
 
     const unsigned = {
       credentialId: 'CRED-EXP-001',
+      characterId: 4001,
       typeId: 34,
       strategy: 'station_arbitrage' as const,
       buyStationId: 60003760,
@@ -184,11 +191,13 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
       suggestedSellPrice: 5.0,
       suggestedQuantity: 1000,
       capitalRequired: 3500,
-      estimatedFees: 300,
-      haulingCost: 0,
       expectedNetProfit: 1200,
       opportunityRating: 'A' as const,
+      marketSnapshotHash: 'snaph1234567890',
       verifiedAt: twentyMinsAgo,
+      expiresAt: expiredAt,
+      nonce: 'nonce-exp-01',
+      keyId: 'v1',
     };
     opp.pipelineCredential = {
       ...unsigned,
@@ -198,6 +207,127 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
     expect(() => {
       DraftSystem.createDraft(db, 4001, opp);
     }).toThrow(/【凭证过期】/);
+  });
+
+  it('Adversarial Pipeline 4: Anti-replay protection prevents reusing the same credential twice', () => {
+    const db = createTestDb();
+    const now = new Date();
+    const opp: TradeOpportunity = {
+      typeId: 34,
+      typeName: 'Tritanium',
+      volumeM3: 0.01,
+      strategy: 'station_arbitrage',
+      buyStationId: 60003760,
+      buyStationName: 'Jita IV-4',
+      sellStationId: 60003760,
+      sellStationName: 'Jita IV-4',
+      suggestedBuyPrice: 3.5,
+      suggestedSellPrice: 5.0,
+      suggestedQuantity: 1000,
+      capitalRequired: 3500,
+      estimatedFees: 300,
+      haulingCost: 0,
+      expectedNetProfit: 1200,
+      expectedRoiPct: 34.2,
+      dailyVolumeDest: 10000,
+      turnoverDays: 0.5,
+      liquidityRating: 'A',
+      riskScore: 1,
+      opportunityRating: 'A',
+      rationale: 'Replay test',
+    };
+
+    const unsigned = {
+      credentialId: 'CRED-REPLAY-001',
+      characterId: 4001,
+      typeId: 34,
+      strategy: 'station_arbitrage' as const,
+      buyStationId: 60003760,
+      sellStationId: 60003760,
+      suggestedBuyPrice: 3.5,
+      suggestedSellPrice: 5.0,
+      suggestedQuantity: 1000,
+      capitalRequired: 3500,
+      expectedNetProfit: 1200,
+      opportunityRating: 'A' as const,
+      marketSnapshotHash: 'snaph1234567890',
+      verifiedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+      nonce: 'nonce-replay-01',
+      keyId: 'v1',
+    };
+    opp.pipelineCredential = {
+      ...unsigned,
+      signature: signPipelineCredential(unsigned),
+    };
+
+    // First draft consumption succeeds
+    const d1 = DraftSystem.createDraft(db, 4001, opp);
+    expect(d1.draftId).toBeDefined();
+
+    // Replay with identical credential MUST FAIL
+    expect(() => {
+      DraftSystem.createDraft(db, 4001, opp);
+    }).toThrow(/【凭证重放阻断】/);
+  });
+
+  it('Adversarial Pipeline 5: Cross-character credential theft is rejected', () => {
+    const db = createTestDb();
+    const now = new Date();
+    const opp: TradeOpportunity = {
+      typeId: 34,
+      typeName: 'Tritanium',
+      volumeM3: 0.01,
+      strategy: 'station_arbitrage',
+      buyStationId: 60003760,
+      buyStationName: 'Jita IV-4',
+      sellStationId: 60003760,
+      sellStationName: 'Jita IV-4',
+      suggestedBuyPrice: 3.5,
+      suggestedSellPrice: 5.0,
+      suggestedQuantity: 1000,
+      capitalRequired: 3500,
+      estimatedFees: 300,
+      haulingCost: 0,
+      expectedNetProfit: 1200,
+      expectedRoiPct: 34.2,
+      dailyVolumeDest: 10000,
+      turnoverDays: 0.5,
+      liquidityRating: 'A',
+      riskScore: 1,
+      opportunityRating: 'A',
+      rationale: 'Cross-user test',
+    };
+
+    // Credential signed for Alice (characterId 4001)
+    const unsigned = {
+      credentialId: 'CRED-ALICE-001',
+      characterId: 4001,
+      typeId: 34,
+      strategy: 'station_arbitrage' as const,
+      buyStationId: 60003760,
+      sellStationId: 60003760,
+      suggestedBuyPrice: 3.5,
+      suggestedSellPrice: 5.0,
+      suggestedQuantity: 1000,
+      capitalRequired: 3500,
+      expectedNetProfit: 1200,
+      opportunityRating: 'A' as const,
+      marketSnapshotHash: 'snaph1234567890',
+      verifiedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+      nonce: 'nonce-alice-01',
+      keyId: 'v1',
+    };
+    opp.pipelineCredential = {
+      ...unsigned,
+      signature: signPipelineCredential(unsigned),
+    };
+
+    // Bob (characterId 9999) attempts to create a draft using Alice's credential -> MUST FAIL
+    expect(() => {
+      DraftSystem.createDraft(db, 9999, opp);
+    }).toThrow(/【跨角色越权】/);
   });
 
   it('Adversarial Idempotency: Same key with different payload is rejected with conflict', () => {
@@ -284,5 +414,3 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
     expect(cancelRes).toBe(false);
   });
 });
-
-

@@ -810,6 +810,15 @@ function ensureWebAgentRequests(db: Db): void {
     );
     CREATE INDEX IF NOT EXISTS idx_paper_journal_account
       ON paper_trading_journal(account_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS consumed_pipeline_credentials (
+      credential_id   TEXT PRIMARY KEY,
+      character_id    INTEGER NOT NULL,
+      draft_id        TEXT NOT NULL,
+      consumed_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_consumed_cred_char 
+      ON consumed_pipeline_credentials(character_id, consumed_at);
   `);
 
 }
@@ -830,6 +839,7 @@ const isMain = process.argv[1]
 if (isMain) {
   void main();
 }
+
 
 
 

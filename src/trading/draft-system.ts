@@ -1,4 +1,4 @@
-import { validatePipelineCredential } from './trading-pipeline.js';
+import { validateAndConsumePipelineCredential } from './trading-pipeline.js';
 import type { Db } from '../db/sqlite.js';
 import type { TradeDraft, TradeOpportunity } from './types.js';
 
@@ -34,13 +34,10 @@ export class DraftSystem {
     opp: TradeOpportunity,
     validHours = 24,
   ): TradeDraft {
-    // Stage 8 Guardrail: Strictly verify Cryptographic Pipeline Verification Credential
-    const verification = validatePipelineCredential(opp);
-    if (!verification.valid) {
-      throw new Error(verification.reason || '【凭证失效】该机会未通过统一交易管线加密签章核验！');
-    }
-
     const draftId = this.generateDraftId(db);
+
+    // Stage 8 Guardrail: Cryptographic verification + atomic anti-replay consumption
+    validateAndConsumePipelineCredential(db, opp, characterId, draftId);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + validHours * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19);
 
@@ -224,6 +221,7 @@ export class DraftSystem {
     }));
   }
 }
+
 
 
 

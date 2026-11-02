@@ -191,3 +191,18 @@
   - TypeScript 0 错误，前端生产构建打包完全成功。
 - **交付文档**：
   - 生成 `P8_5_3_BASELINE_AND_FULL_TEST_REPORT.md`, `P8_5_3_PIPELINE_CREDENTIAL_AUDIT.md`, `P8_5_3_IDEMPOTENCY_CONCURRENCY_AUDIT.md`, `P8_5_3_DOUBLE_ENTRY_ACCOUNTING_AUDIT.md`, `P8_5_3_ORDER_STATE_MACHINE_AUDIT.md`, `P8_5_3_ORDERBOOK_ADVERSARIAL_AUDIT.md`, `P8_5_3_ESI_READONLY_SECURITY_AUDIT.md`, `P8_5_3_DATABASE_RECOVERY_AUDIT.md`, `P8_5_3_REGRESSION_TEST_REPORT.md`, `P8_5_3_DEFECT_REMEDIATION_LOG.md`, `P8_5_3_GIT_CHANGE_SUMMARY.md`, `P8_5_3_FINAL_ACCEPTANCE_REPORT.md` 共 12 份专项报告。
+
+### 15. 2026-11-02：完成 EVEAI P8.5.4 交易授权凭证密码学加固、复式记账重构与对抗测试
+- **凭证密码学加固与防重放**:
+  - `src/trading/types.ts`: `PipelineVerificationCredential` 新增 `characterId`, `marketSnapshotHash`, `expiresAt`, `nonce`, `keyId` 关键要素。
+  - `src/trading/trading-pipeline.ts`: 引入规范化载荷序列化 `buildCanonicalCredentialPayload`；采用恒定时间比对 `timingSafeEqual`；支持密钥轮换字典 `PIPELINE_KEY_STORE`；实现 `validateAndConsumePipelineCredential`。
+  - `src/trading/draft-system.ts`: 草案生成前原子性核验凭证并在 `consumed_pipeline_credentials` 表中记录消费存证，单次消费后永久阻断重放。
+  - `src/db/migrations.ts`: 增加 `consumed_pipeline_credentials` 表迁移。
+- **复式记账与借贷平衡严格对账**:
+  - `src/trading/paper-trading.ts`: 彻底解耦买卖双方费用，买方仅扣买入经纪人费，卖方扣销售税与卖方经纪人费；部分成交撤单后全额释放剩余担保金及未使用保底费缓冲；双重记账流水实测借贷误差为 0.00 ISK。
+- **全套回归与对抗性测试**:
+  - 在 `tests/unit/p8-5-3-adversarial.test.ts` 中新增凭证单次消费防重放、跨角色越权拦截等测试。
+  - 全套 7 个交易专项测试文件共 44 项单测 100% 通过（耗时 0.61s）。
+  - TypeScript 0 错误，前端生产构建打包完全成功。
+- **文档交付**:
+  - 在 `docs/audit/P8.5.4/` 目录下交付 12 份标准审计报告 (`01-baseline-and-git-audit.md` 至 `12-p8-5-4-final-verdict.md`)。

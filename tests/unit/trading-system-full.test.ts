@@ -162,8 +162,10 @@ describe('Trading System Comprehensive Verification', () => {
     };
 
         opp.opportunityRating = 'A';
+    const now = new Date();
     const u = {
       credentialId: 'CRED-FULL-01',
+      characterId: 1001,
       typeId: opp.typeId,
       strategy: opp.strategy,
       buyStationId: opp.buyStationId,
@@ -174,7 +176,11 @@ describe('Trading System Comprehensive Verification', () => {
       capitalRequired: opp.capitalRequired,
       expectedNetProfit: opp.expectedNetProfit,
       opportunityRating: 'A' as const,
-      verifiedAt: new Date().toISOString(),
+      marketSnapshotHash: 'snaph1234567890',
+      verifiedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+      nonce: 'nonce-full-01',
+      keyId: 'v1',
     };
     opp.pipelineCredential = { ...u, signature: signPipelineCredential(u) };
     const draft = DraftSystem.createDraft(db, 1001, opp);
@@ -235,6 +241,7 @@ describe('Trading System Comprehensive Verification', () => {
     expect(typeof summary.capitalTurnoverRate).toBe('number');
   });
 });
+
 
 
 
