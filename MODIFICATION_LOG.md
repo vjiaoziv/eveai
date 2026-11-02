@@ -73,3 +73,14 @@
   - 在 SQLite `sde_types`、`sde_groups` 等静态数据表中增加 `zh_name` 虚拟生成列与二级索引，彻底消除中文名模糊匹配的性能损耗，在 0 毫秒内实现中英文双向互查。
   - 打造通用 Agent CLI 命令行工具 `eve-agent` 并加入系统用户 PATH (`C:\Users\JIAOZI\bin\eve-agent.cmd`)，支持 `eve-agent status`、`eve-agent ask`、`eve-agent item`、`eve-agent reprocess`、`eve-agent sde`。
   - 创建并注册了标准 Agent 技能定义，使 Codex、Hermes 和 dsh (DeepSeek Harness) 均能原生直接调度本 EVE Agent 的全部能力。
+### 6. 2026-11-01：解决 Node.js 原生 fetch 跨国网络代理穿透问题 (Commit: `b36b05b`)
+- **变更文件**：
+  - `src/eve/http.ts`
+  - `.env`
+- **问题定位**：
+  - 用户在浏览器完成 EVE SSO 授权后，CCP 将授权 code 重定向回 `http://localhost:3000/auth/eve/callback`。
+  - 在换取 Token 阶段，服务端需请求 `https://login.eveonline.com/v2/oauth/token` 和 `https://login.eveonline.com/oauth/jwks` 进行证书签名验证。
+  - Node.js 22 的内置全局 `fetch` (基于 undici) 默认不自动读取系统的 `http_proxy`/`https_proxy` 环境变量，导致直连 CCP 鉴权服务器时触发 `ConnectTimeoutError: The operation was aborted due to timeout`。
+- **修复方案**：
+  - 在 `src/eve/http.ts` 初始化阶段注入 `undici.EnvHttpProxyAgent`，使全局 `fetch` 与 `jose` 验签库全量无缝走本地代理网关 (`http://127.0.0.1:8033`)。
+  - 在 `.env` 中固化 `HTTPS_PROXY` 与 `NO_PROXY` 规则，实测 EVE SSO 元数据与 Token 交互耗时由超时失败降低至 1 秒以内。
