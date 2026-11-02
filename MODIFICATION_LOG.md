@@ -1,4 +1,4 @@
-# EVE AI Agent 源码与架构修改记录 (MODIFICATION_LOG.md)
+﻿# EVE AI Agent 源码与架构修改记录 (MODIFICATION_LOG.md)
 
 本日志详尽记录自上游主干克隆以来，在部署分支 `deploy/eve-ai-agent` 上执行的所有配置、依赖修复与中文化修改。
 
@@ -103,3 +103,13 @@
   - `eve-agent capital`：查询角色实时现金、20% 储备金与限额。
   - `eve-agent scan-station` / `scan-haul`：执行站内与跨区套利扫描。
   - `eve-agent drafts` / `draft-auto` / `draft-approve`：自动化生成、查看与审批订单草案。
+### 8. 2026-11-02：完成 EVEAI 交易系统第二轮独立代码与实盘风控审计
+- **审计交付文件**：
+  - `FIRST_TRADE_RECALCULATION.md`：首笔套利草案 `TR-2026-000001` 全流程数学穿透复核。揭露虚假价差（Phantom Spread）缺陷：杜迪克西 700k 买单仅剩 2 件，实盘执行导致 -85.63% 巨额亏损（亏损 860 万 ISK）。
+  - `FEE_ENGINE_AUDIT.md`：`src/trading/fee-engine.ts` 逐行审查。查出基础销售税硬编码为 8.0%（CCP 现行基准为 7.5%）、漏算 100 ISK 最低经纪人费与 Upwell 建筑 SCC 附加费。
+  - `PORTFOLIO_RISK_AUDIT.md`：`src/trading/portfolio-manager.ts` 资金风控审查。查出在途已审批草案未扣减投资资金的并发漏洞、品类 30% 上限未生效、单品 15% 上限未累计已有持仓以及代码段重复等缺陷。
+  - `MARKET_DATA_AUDIT.md`：`src/trading/data-center.ts` 与 `orderbook-simulator.ts` 审计。查出策略层完全旁路订单簿深度仿真器、两地快照时间戳存在 13.5 小时严重漂移等问题。
+  - `BACKTEST_VALIDATION.md`：`src/trading/backtesting/engine.ts` 回测审查。查出未来数据泄漏（当日最低买、次日均价卖）与最理想成交假设，将全部六大策略定级为【实验性策略】。
+  - `SECURITY_PERMISSION_AUDIT.md`：系统安全审查。确认 ESI Token 密文加密（AES-256-GCM + HKDF）安全，Agent tools 100% 只读，无游戏内写入交易能力。
+  - `DEFECT_AND_REMEDIATION_LIST.md`：汇总 12 项缺陷（7 项 P0 致命级、4 项 P1 严重级、1 项 P2 改进级）及代码级修复方案。
+  - `SECOND_AUDIT_REPORT.md`：第二轮独立审计综合评估报告，裁决该交易系统【未达实盘标准，严禁投入真实游戏资金】。
