@@ -1,5 +1,5 @@
-﻿import type { Db } from '../db/sqlite.js';
-import type { OrderBookLevel } from './types.js';
+import type { Db } from '../db/sqlite.js';
+import type { DataQualityMetrics, OrderBookLevel } from './types.js';
 
 export interface DataSourceRecord {
   source_id: string;
@@ -75,7 +75,8 @@ export class DataCenter {
   }
 
   /**
-   * Query current active orders for a type in a region, optionally scoped to a station
+   * Query current active orders for a type in a region, optionally scoped to a station.
+   * Includes issued timestamp for temporal validation.
    */
   public static getOrderBook(
     db: Db,
@@ -84,12 +85,12 @@ export class DataCenter {
     stationId?: number,
   ): { sells: OrderBookLevel[]; buys: OrderBookLevel[] } {
     let sellSql = `
-      SELECT price, volume_remain as volumeRemain, order_id as orderId, location_id as locationId
+      SELECT price, volume_remain as volumeRemain, order_id as orderId, location_id as locationId, issued
       FROM market_orders
       WHERE region_id = ? AND type_id = ? AND is_buy_order = 0
     `;
     let buySql = `
-      SELECT price, volume_remain as volumeRemain, order_id as orderId, location_id as locationId
+      SELECT price, volume_remain as volumeRemain, order_id as orderId, location_id as locationId, issued
       FROM market_orders
       WHERE region_id = ? AND type_id = ? AND is_buy_order = 1
     `;
@@ -105,6 +106,42 @@ export class DataCenter {
     const sells = db.prepare(sellSql).all(...params) as OrderBookLevel[];
     const buys = db.prepare(buySql).all(...params) as OrderBookLevel[];
     return { sells, buys };
+  }
+
+  /**
+   * Validate temporal consistency between two market datasets (e.g. cross-region hauling)
+   */
+  public static validateTemporalConsistency(
+    originOrders: OrderBookLevel[],
+    destOrders: OrderBookLevel[],
+    maxAllowedSkewMinutes = 15,
+  ): DataQualityMetrics {
+    const now = Date.now();
+    const getNewestTime = (orders: OrderBookLevel[]) => {
+      let maxTs = 0;
+      for (const o of orders) {
+        if (o.issued) {
+          const ts = new Date(o.issued.endsWith('Z') ? o.issued : o.issued + 'Z').getTime();
+          if (ts > maxTs) maxTs = ts;
+        }
+      }
+      return maxTs;
+    };
+
+    const originTs = getNewestTime(originOrders) || now;
+    const destTs = getNewestTime(destOrders) || now;
+
+    const originAgeMin = Math.round(Math.abs(now - originTs) / 60000);
+    const destAgeMin = Math.round(Math.abs(now - destTs) / 60000);
+    const skewMin = Math.round(Math.abs(originTs - destTs) / 60000);
+
+    return {
+      originSnapshotAgeMinutes: originAgeMin,
+      destSnapshotAgeMinutes: destAgeMin,
+      timestampSkewMinutes: skewMin,
+      isStale: originAgeMin > 60 || destAgeMin > 60 || skewMin > maxAllowedSkewMinutes,
+      hasDepthMismatch: false, // Populated during simulation
+    };
   }
 
   /**

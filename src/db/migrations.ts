@@ -674,13 +674,14 @@ function ensureWebAgentRequests(db: Db): void {
       expected_roi    REAL NOT NULL,
       capital_required REAL NOT NULL,
       turnover_hours  REAL,
-      status          TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'rejected', 'executed_manually', 'expired', 'closed')),
+      status          TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'rejected', 'executed_manually', 'expired', 'closed', 'audit_revoked')),
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       expires_at      TEXT NOT NULL,
       executed_at     TEXT,
       actual_buy_price REAL,
       actual_sell_price REAL,
-      actual_profit   REAL
+      actual_profit   REAL,
+      revoked_reason  TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_trade_drafts_char_status
       ON trade_drafts(character_id, status);
@@ -762,3 +763,4 @@ const isMain = process.argv[1]
 if (isMain) {
   void main();
 }
+

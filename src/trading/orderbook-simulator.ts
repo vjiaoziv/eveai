@@ -1,4 +1,4 @@
-﻿import type { FillSimulationResult, OrderBookLevel } from './types.js';
+import type { FillSimulationResult, OrderBookLevel, StressTestResults } from './types.js';
 
 export class OrderBookSimulator {
   /**
@@ -105,7 +105,7 @@ export class OrderBookSimulator {
 
     const filledQty = targetQuantity - remaining;
     const weightedAvgPrice = filledQty > 0 ? totalGrossIsk / filledQty : 0;
-    // For selling, negative slippage means realized average price is below top-of-book buy price
+    // For selling, positive slippage represents price degradation below top of book
     const slippagePct = topOfBookPrice > 0 ? ((topOfBookPrice - weightedAvgPrice) / topOfBookPrice) * 100 : 0;
 
     return {
@@ -119,6 +119,54 @@ export class OrderBookSimulator {
       slippagePct: Math.round(slippagePct * 100) / 100,
       levelsConsumed,
       effectiveOrders,
+    };
+  }
+
+  /**
+   * Run multi-scenario stress test on selling side.
+   */
+  public static runStressTest(params: {
+    buyOrders: OrderBookLevel[];
+    quantity: number;
+    netCostIsk: number;
+    effectiveSalesTaxRate: number;
+    baseSellPrice: number;
+  }): StressTestResults {
+    const { buyOrders, quantity, netCostIsk, effectiveSalesTaxRate, baseSellPrice } = params;
+
+    const calcScenario = (scenario: string, projectedPrice: number) => {
+      const grossRev = projectedPrice * quantity;
+      const netRev = grossRev * (1 - effectiveSalesTaxRate);
+      const netProfit = netRev - netCostIsk;
+      const roiPct = netCostIsk > 0 ? (netProfit / netCostIsk) * 100 : 0;
+      return {
+        scenario,
+        projectedSellPrice: Math.round(projectedPrice * 100) / 100,
+        projectedGrossRevenue: Math.round(grossRev * 100) / 100,
+        netProfit: Math.round(netProfit * 100) / 100,
+        roiPct: Math.round(roiPct * 100) / 100,
+      };
+    };
+
+    // Scenario 4: Top buy order evaporates entirely (drop top level)
+    const secondaryOrders = buyOrders.length > 1 ? buyOrders.slice(1) : [];
+    const evaporationSim = this.simulateSell(secondaryOrders, quantity);
+    const evapGrossRev = evaporationSim.totalGrossIsk;
+    const evapNetRev = evapGrossRev * (1 - effectiveSalesTaxRate);
+    const evapNetProfit = evapNetRev - netCostIsk;
+    const evapRoi = netCostIsk > 0 ? (evapNetProfit / netCostIsk) * 100 : 0;
+
+    return {
+      priceDrop5Pct: calcScenario('价格下跌 5%', baseSellPrice * 0.95),
+      priceDrop10Pct: calcScenario('价格下跌 10%', baseSellPrice * 0.90),
+      priceDrop20Pct: calcScenario('价格下跌 20%', baseSellPrice * 0.80),
+      bidEvaporation: {
+        scenario: '顶档买单完全消失（直接滑落至次级买盘）',
+        projectedSellPrice: evaporationSim.weightedAvgPrice,
+        projectedGrossRevenue: Math.round(evapGrossRev * 100) / 100,
+        netProfit: Math.round(evapNetProfit * 100) / 100,
+        roiPct: Math.round(evapRoi * 100) / 100,
+      },
     };
   }
 }

@@ -113,3 +113,17 @@
   - `SECURITY_PERMISSION_AUDIT.md`：系统安全审查。确认 ESI Token 密文加密（AES-256-GCM + HKDF）安全，Agent tools 100% 只读，无游戏内写入交易能力。
   - `DEFECT_AND_REMEDIATION_LIST.md`：汇总 12 项缺陷（7 项 P0 致命级、4 项 P1 严重级、1 项 P2 改进级）及代码级修复方案。
   - `SECOND_AUDIT_REPORT.md`：第二轮独立审计综合评估报告，裁决该交易系统【未达实盘标准，严禁投入真实游戏资金】。
+
+### 9. 2026-11-02：完成 EVEAI P8 阶段交易决策可信度重建与缺陷修复
+- **架构重构与核心修复**：
+  - `src/trading/trading-pipeline.ts`：新增 10 阶段确定性交易决策管线 (`TradingPipeline`)，集成订单簿深度截断、多档位滑点撮合、时差校验、压力测试与风控门禁，实现 A/B/C/D 机会评级与 D 级一票否决。
+  - `src/trading/fee-engine.ts`：将基准销售税修正为 CCP 现行法定 7.5%（Accounting 3 精确为 5.025%）；引入 100 ISK 最低经纪人费保底机制与 Upwell 建筑 0.5% SCC 法定附加税；新增 `getSkillsForCharacter` 动态技能读取。
+  - `src/trading/portfolio-manager.ts`：可用资金扣减在途已审批草案额度；引入单品 15% 与品类 30% 全局累计持仓风控；库存估值改用吉他现货买单市值；消除防强杀重复代码。
+  - `src/trading/draft-system.ts` & 数据库迁移：支持 `audit_revoked` 状态及原因记录；将 `TR-2026-000001` 永久封存撤销，彻底阻断其重新审批或标记执行。
+  - `src/trading/strategies/regional-hauling.ts`：全面废除粗暴 SQL 订单累加，强制调用 `OrderBookSimulator` 进行逐档深度与滑点计算，数量严限为顶档买单剩余量。
+  - `src/trading/backtesting/engine.ts`：消除“当日最低价买、次日均价卖”的未来数据泄漏；引入 1.5% 执行滑点摩擦；补充 Sortino Ratio、95% CVaR 及资金周转率指标；将全量策略定级为【实验性策略】。
+- **全量测试与构建**：
+  - 17 项交易与风控专项测试 100% 通过（`trading-fee-simulator.test.ts`, `trading-system-full.test.ts`, `trading-pipeline.test.ts`）。
+  - `tsc --noEmit` 0 错误，前端生产打包成功。
+- **交付文档**：
+  - 生成 `P8_REPAIR_PLAN.md`, `P8_IMPLEMENTATION_REPORT.md`, `P8_MARKET_DATA_VALIDATION.md`, `P8_ORDERBOOK_SIMULATION.md`, `P8_FEE_ENGINE_VALIDATION.md`, `P8_PORTFOLIO_RISK_VALIDATION.md`, `P8_BACKTEST_VALIDATION.md`, `P8_OPPORTUNITY_RATING.md`, `P8_PAPER_TRADING_GUIDE.md`, `P8_SECURITY_VALIDATION.md`, `P8_TEST_REPORT.md`, `P8_KNOWN_LIMITATIONS.md` 共 12 份交付文档。

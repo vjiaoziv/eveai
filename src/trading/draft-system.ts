@@ -1,4 +1,4 @@
-﻿import type { Db } from '../db/sqlite.js';
+import type { Db } from '../db/sqlite.js';
 import type { TradeDraft, TradeOpportunity } from './types.js';
 
 export class DraftSystem {
@@ -78,19 +78,45 @@ export class DraftSystem {
   }
 
   /**
-   * Update draft status (approve, reject, expire)
+   * Update draft status (approve, reject, expire, audit_revoked)
    */
   public static updateStatus(
     db: Db,
     draftId: string,
-    newStatus: 'approved' | 'rejected' | 'expired',
+    newStatus: 'approved' | 'rejected' | 'expired' | 'audit_revoked',
+    reason?: string,
   ): boolean {
-    const res = db.prepare('UPDATE trade_drafts SET status = ? WHERE draft_id = ?').run(newStatus, draftId);
+    const existing = db.prepare('SELECT status FROM trade_drafts WHERE draft_id = ?').get(draftId) as { status: string } | undefined;
+    if (!existing) return false;
+
+    // Security & Audit Invariant: an audit-revoked draft cannot be re-approved or altered
+    if (existing.status === 'audit_revoked' && newStatus !== 'audit_revoked') {
+      throw new Error(`【安全阻断】草案 ${draftId} 已被第二轮独立审计永久撤销 (audit_revoked)，禁止重新审批或变更状态！`);
+    }
+
+    const res = db.prepare(`
+      UPDATE trade_drafts 
+      SET status = ?, revoked_reason = COALESCE(?, revoked_reason) 
+      WHERE draft_id = ?
+    `).run(newStatus, reason || null, draftId);
+
     return res.changes > 0;
   }
 
   /**
-   * Record manual in-game execution with actual fill details
+   * Revoke a draft following independent audit findings, permanently blocking execution.
+   */
+  public static revokeDraftByAudit(
+    db: Db,
+    draftId: string,
+    revocationReason: string,
+  ): boolean {
+    return this.updateStatus(db, draftId, 'audit_revoked', revocationReason);
+  }
+
+  /**
+   * Record manual in-game execution with actual fill details.
+   * Rejects execution if draft is audit_revoked or not in approved status.
    */
   public static recordManualExecution(
     db: Db,
@@ -104,6 +130,18 @@ export class DraftSystem {
     },
   ): boolean {
     const { draftId, actualBuyPrice, actualSellPrice, actualQuantity, actualFees, notes } = params;
+
+    const existing = db.prepare('SELECT status, character_id, type_id FROM trade_drafts WHERE draft_id = ?').get(draftId) as any;
+    if (!existing) return false;
+
+    if (existing.status === 'audit_revoked') {
+      throw new Error(`【交易阻断】草案 ${draftId} 已被独立审计撤销，判定为虚假价差高危交易，严禁记录或执行！`);
+    }
+
+    if (existing.status !== 'approved' && existing.status !== 'draft') {
+      throw new Error(`【状态非法】草案 ${draftId} 当前状态为 ${existing.status}，未处于可执行状态。`);
+    }
+
     const actualProfit = (actualSellPrice - actualBuyPrice) * actualQuantity - actualFees;
 
     const res = db.prepare(`
@@ -118,35 +156,35 @@ export class DraftSystem {
 
     if (res.changes === 0) return false;
 
-    const draft = db.prepare('SELECT character_id, type_id FROM trade_drafts WHERE draft_id = ?').get(draftId) as any;
-    if (draft) {
-      db.prepare(`
-        INSERT INTO trade_ledger (draft_id, character_id, type_id, action, quantity, price, fees, notes)
-        VALUES (?, ?, ?, 'buy', ?, ?, ?, ?)
-      `).run(draftId, draft.character_id, draft.type_id, actualQuantity, actualBuyPrice, actualFees, notes || 'Manual execution buy');
+    db.prepare(`
+      INSERT INTO trade_ledger (draft_id, character_id, type_id, action, quantity, price, fees, notes)
+      VALUES (?, ?, ?, 'buy', ?, ?, ?, ?)
+    `).run(draftId, existing.character_id, existing.type_id, actualQuantity, actualBuyPrice, actualFees, notes || 'Manual execution buy');
 
-      db.prepare(`
-        INSERT INTO trade_ledger (draft_id, character_id, type_id, action, quantity, price, fees, notes)
-        VALUES (?, ?, ?, 'sell', ?, ?, ?, ?)
-      `).run(draftId, draft.character_id, draft.type_id, actualQuantity, actualSellPrice, 0, notes || 'Manual execution sell');
-    }
+    db.prepare(`
+      INSERT INTO trade_ledger (draft_id, character_id, type_id, action, quantity, price, fees, notes)
+      VALUES (?, ?, ?, 'sell', ?, ?, ?, ?)
+    `).run(draftId, existing.character_id, existing.type_id, actualQuantity, actualSellPrice, 0, notes || 'Manual execution sell');
 
     return true;
   }
 
   /**
-   * Retrieve active drafts for a character
+   * Retrieve active drafts for a character, excluding revoked drafts when requesting active ones.
    */
   public static getDrafts(
     db: Db,
     characterId: number,
-    status?: string,
+    statusFilter?: string,
   ): TradeDraft[] {
     let sql = 'SELECT * FROM trade_drafts WHERE character_id = ?';
     const params: any[] = [characterId];
-    if (status) {
+
+    if (statusFilter === 'active') {
+      sql += " AND status IN ('draft', 'approved')";
+    } else if (statusFilter) {
       sql += ' AND status = ?';
-      params.push(status);
+      params.push(statusFilter);
     }
     sql += ' ORDER BY created_at DESC LIMIT 50';
 
@@ -169,6 +207,7 @@ export class DraftSystem {
       capitalRequired: r.capital_required,
       turnoverHours: r.turnover_hours,
       status: r.status,
+      revokedReason: r.revoked_reason,
       createdAt: r.created_at,
       expiresAt: r.expires_at,
       executedAt: r.executed_at,

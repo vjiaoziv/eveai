@@ -1,4 +1,4 @@
-﻿export type CloneState = 'alpha' | 'omega';
+export type CloneState = 'alpha' | 'omega';
 
 export interface PilotTradingSkills {
   accounting: number;         // Level 0-5 (Alpha max 3)
@@ -9,9 +9,10 @@ export interface PilotTradingSkills {
 }
 
 export interface FeeRates {
-  salesTaxRate: number;       // e.g. 0.0536 (5.36%)
-  brokerFeeRate: number;      // e.g. 0.0210 (2.10%)
+  salesTaxRate: number;       // e.g. 0.05025 (5.025% for Accounting III)
+  brokerFeeRate: number;      // e.g. 0.0210 (2.10% for Broker Relations III in NPC)
   relistFeeRate: number;      // fee applied on order modification
+  sccSurchargeRate?: number;  // 0.005 (0.5% statutory SCC fee in Upwell structures)
 }
 
 export type FacilityType = 'npc_station' | 'upwell_structure';
@@ -28,6 +29,7 @@ export interface OrderBookLevel {
   volumeRemain: number;
   orderId?: number;
   locationId?: number;
+  issued?: string;
 }
 
 export interface FillSimulationResult {
@@ -72,11 +74,37 @@ export type StrategyType =
   | 'event_driven'
   | 'manufacturing_arbitrage';
 
+export interface StressTestScenario {
+  scenario: string;
+  projectedSellPrice: number;
+  projectedGrossRevenue: number;
+  netProfit: number;
+  roiPct: number;
+}
+
+export interface StressTestResults {
+  priceDrop5Pct: StressTestScenario;
+  priceDrop10Pct: StressTestScenario;
+  priceDrop20Pct: StressTestScenario;
+  bidEvaporation: StressTestScenario;
+}
+
+export interface DataQualityMetrics {
+  originSnapshotAgeMinutes: number;
+  destSnapshotAgeMinutes: number;
+  timestampSkewMinutes: number;
+  isStale: boolean;
+  hasDepthMismatch: boolean;
+}
+
+export type OpportunityRating = 'A' | 'B' | 'C' | 'D';
+
 export interface TradeOpportunity {
   typeId: number;
   typeName: string;
   zhName?: string;
   groupName?: string;
+  categoryId?: number;
   volumeM3: number;
   strategy: StrategyType;
   buyStationId: number;
@@ -96,6 +124,10 @@ export interface TradeOpportunity {
   liquidityRating: 'A' | 'B' | 'C';
   riskScore: number;
   rationale: string;
+  opportunityRating?: OpportunityRating;
+  riskVetoReason?: string;
+  stressTest?: StressTestResults;
+  dataQuality?: DataQualityMetrics;
 }
 
 export interface TradeDraft {
@@ -116,7 +148,8 @@ export interface TradeDraft {
   expectedRoi: number;
   capitalRequired: number;
   turnoverHours: number;
-  status: 'draft' | 'approved' | 'rejected' | 'executed_manually' | 'expired' | 'closed';
+  status: 'draft' | 'approved' | 'rejected' | 'executed_manually' | 'expired' | 'closed' | 'audit_revoked';
+  revokedReason?: string;
   createdAt: string;
   expiresAt: string;
   executedAt?: string;

@@ -1,7 +1,8 @@
-﻿import type { Db } from '../../db/sqlite.js';
+import type { Db } from '../../db/sqlite.js';
 import { FeeEngine, ALPHA_DEFAULT_SKILLS } from '../fee-engine.js';
 import { DataCenter } from '../data-center.js';
-import type { FeeContext, TradeOpportunity } from '../types.js';
+import { OrderBookSimulator } from '../orderbook-simulator.js';
+import type { FeeContext, OpportunityRating, TradeOpportunity } from '../types.js';
 
 export interface RegionalHaulingRoute {
   originStationId: number;
@@ -48,7 +49,7 @@ export interface RegionalHaulingOptions {
   mode: 'instant_fill' | 'listed_sell' | 'all';
   maxCapital?: number;       // default 50_000_000 ISK (Alpha safe cargo limit)
   maxCargoM3?: number;       // default 5_000 m³ (T1 Badger)
-  minNetMarginPct?: number;  // default 8% for instant, 20% for listed
+  minNetMarginPct?: number;  // default 6% for instant, 18% for listed
   minNetProfit?: number;
   feeContext?: FeeContext;
 }
@@ -64,25 +65,22 @@ export class RegionalHaulingStrategy {
       facility: 'npc_station',
     };
 
-    // 1. Get Origin Sell Orders (Buy from Origin lowest sell)
-    const originSells = db.prepare(`
+    // 1. Initial Candidate Filter (Top-of-book heuristic)
+    const originSellCandidates = db.prepare(`
       SELECT type_id, min(price) as best_sell, sum(volume_remain) as sell_vol
       FROM market_orders
       WHERE location_id = ? AND is_buy_order = 0
       GROUP BY type_id
-      HAVING best_sell BETWEEN 0.01 AND 50000000 AND sell_vol >= 5
+      HAVING best_sell BETWEEN 0.01 AND 50000000 AND sell_vol >= 1
     `).all(route.originStationId) as any[];
 
-    const originMap = new Map();
-    for (const s of originSells) originMap.set(s.type_id, s);
+    const originMap = new Map<number, any>();
+    for (const s of originSellCandidates) originMap.set(s.type_id, s);
 
-    // 2. Get Dest Orders (Buy orders for instant fill, Sell orders for listing)
-    const destOrders = db.prepare(`
+    const destCandidates = db.prepare(`
       SELECT type_id,
              max(CASE WHEN is_buy_order = 1 THEN price END) as best_buy,
-             sum(CASE WHEN is_buy_order = 1 THEN volume_remain END) as buy_vol,
-             min(CASE WHEN is_buy_order = 0 THEN price END) as best_sell,
-             sum(CASE WHEN is_buy_order = 0 THEN volume_remain END) as sell_vol
+             min(CASE WHEN is_buy_order = 0 THEN price END) as best_sell
       FROM market_orders
       WHERE location_id = ?
       GROUP BY type_id
@@ -90,7 +88,7 @@ export class RegionalHaulingStrategy {
 
     const opportunities: TradeOpportunity[] = [];
 
-    for (const d of destOrders) {
+    for (const d of destCandidates) {
       const orig = originMap.get(d.type_id);
       if (!orig) continue;
 
@@ -98,108 +96,97 @@ export class RegionalHaulingStrategy {
       if (!meta) continue;
 
       const unitM3 = meta.volume || 1;
-      const unitBuyPrice = orig.best_sell; // Buy from Jita lowest sell
 
-      // Check Mode 1: Instant Fill (Eat Dest Buy Order)
+      // Pull full discrete orderbook for rigorous simulation
+      const originBook = DataCenter.getOrderBook(db, route.originRegionId, d.type_id, route.originStationId);
+      const destBook = DataCenter.getOrderBook(db, route.destRegionId, d.type_id, route.destStationId);
+
+      // Validate temporal skew between origin and dest snapshots
+      const dataQuality = DataCenter.validateTemporalConsistency(originBook.sells, destBook.buys);
+
+      // Mode 1: Instant Fill (Eat Dest Buy Order)
       if (opts.mode === 'instant_fill' || opts.mode === 'all') {
-        if (d.best_buy && d.best_buy > unitBuyPrice * 1.06) {
-          const unitSellPrice = d.best_buy;
-          // Determine safe quantity
-          const maxUnitsByCap = Math.floor(maxCapital / unitBuyPrice);
+        if (d.best_buy && d.best_buy > orig.best_sell * 1.05 && destBook.buys.length > 0) {
+          const topDestBuy = destBook.buys[0];
+          // Rigid Depth Guard: Target qty is bounded by top buy order depth, cargo volume and capital
+          const maxUnitsByCap = Math.floor(maxCapital / orig.best_sell);
           const maxUnitsByM3 = Math.floor(maxCargoM3 / unitM3);
-          const targetQty = Math.max(1, Math.min(maxUnitsByCap, maxUnitsByM3, orig.sell_vol, d.buy_vol));
 
-          const trade = FeeEngine.calculateTrade({
-            buyType: 'immediate_buy', // Eat Jita sell: 0 broker fee
-            sellType: 'immediate_sell', // Eat Dest buy: 0 broker fee, pays sales tax
-            buyUnitPrice: unitBuyPrice,
-            sellUnitPrice: unitSellPrice,
-            quantity: targetQty,
-            buyCtx: feeCtx,
-            sellCtx: feeCtx,
-            haulingCost: 0,
-          });
+          // Capped at top buy volume to prevent phantom spread dilution
+          const safeBuyQty = Math.max(1, Math.min(topDestBuy.volumeRemain, maxUnitsByCap, maxUnitsByM3));
 
-          const minMargin = opts.minNetMarginPct ?? 6.0;
-          const minProfit = opts.minNetProfit ?? 200_000;
-          if (trade.netMarginPct >= minMargin && trade.netProfit >= minProfit) {
-            opportunities.push({
-              typeId: d.type_id,
-              typeName: meta.en_name,
-              zhName: meta.zh_name || undefined,
-              groupName: meta.group_name || undefined,
-              volumeM3: unitM3,
-              strategy: 'regional_hauling',
-              buyStationId: route.originStationId,
-              buyStationName: route.originName,
-              sellStationId: route.destStationId,
-              sellStationName: route.destName,
-              suggestedBuyPrice: unitBuyPrice,
-              suggestedSellPrice: unitSellPrice,
-              suggestedQuantity: targetQty,
-              capitalRequired: trade.netCost,
-              estimatedFees: trade.totalFees,
+          // Run rigorous orderbook walk simulation on both sides
+          const buySim = OrderBookSimulator.simulateBuy(originBook.sells, safeBuyQty);
+          const sellSim = OrderBookSimulator.simulateSell(destBook.buys, safeBuyQty);
+
+          if (buySim.isComplete && sellSim.isComplete && buySim.filledQty > 0) {
+            const actualQty = buySim.filledQty;
+
+            const trade = FeeEngine.calculateTrade({
+              buyType: 'immediate_buy',
+              sellType: 'immediate_sell',
+              buyUnitPrice: buySim.weightedAvgPrice,
+              sellUnitPrice: sellSim.weightedAvgPrice,
+              quantity: actualQty,
+              buyCtx: feeCtx,
+              sellCtx: feeCtx,
               haulingCost: 0,
-              expectedNetProfit: trade.netProfit,
-              expectedRoiPct: trade.roiPct,
-              dailyVolumeDest: d.buy_vol,
-              turnoverDays: 0, // Instant execution upon arrival
-              liquidityRating: d.buy_vol >= 50 ? 'A' : 'B',
-              riskScore: 1, // High-sec instant fill is lowest trading risk
-              rationale: `【即时秒变现】在 ${route.originName} 按卖价吃进 ${targetQty} 件，高安 ${route.highSecJumps} 跳运至 ${route.destName}，直接右键出售吃买单。零压货风险，单趟净利 +${trade.netProfit.toLocaleString()} ISK (+${trade.netMarginPct.toFixed(1)}%)，货舱占用 ${(unitM3 * targetQty).toFixed(1)} m³。`,
             });
-          }
-        }
-      }
 
-      // Check Mode 2: Listed Sell (List on Dest Sell Order)
-      if (opts.mode === 'listed_sell' || opts.mode === 'all') {
-        if (d.best_sell && d.best_sell > unitBuyPrice * 1.25) {
-          const unitSellPrice = d.best_sell;
-          const maxUnitsByCap = Math.floor(maxCapital / unitBuyPrice);
-          const maxUnitsByM3 = Math.floor(maxCargoM3 / unitM3);
-          // Limit to at most 20% of dest active stock to avoid saturating market
-          const safeSupplyQty = Math.max(1, Math.floor((d.sell_vol || 10) * 0.2));
-          const targetQty = Math.max(1, Math.min(maxUnitsByCap, maxUnitsByM3, orig.sell_vol, safeSupplyQty));
+            // Stress test sell price
+            const stress = OrderBookSimulator.runStressTest({
+              buyOrders: destBook.buys,
+              quantity: actualQty,
+              netCostIsk: trade.netCost,
+              effectiveSalesTaxRate: FeeEngine.calculateRates(feeCtx).salesTaxRate,
+              baseSellPrice: sellSim.weightedAvgPrice,
+            });
 
-          const trade = FeeEngine.calculateTrade({
-            buyType: 'immediate_buy', // Eat Jita sell: 0 broker fee
-            sellType: 'place_sell_order', // Place Dest sell: pays broker fee + sales tax
-            buyUnitPrice: unitBuyPrice,
-            sellUnitPrice: unitSellPrice,
-            quantity: targetQty,
-            buyCtx: feeCtx,
-            sellCtx: feeCtx,
-            haulingCost: 0,
-          });
+            // Quality & Rating
+            let opportunityRating: OpportunityRating = 'B';
+            let riskVetoReason: string | undefined;
 
-          const minMargin = opts.minNetMarginPct ?? 18.0;
-          const minProfit = opts.minNetProfit ?? 300_000;
-          if (trade.netMarginPct >= minMargin && trade.netProfit >= minProfit && unitM3 <= 50) {
+            if (dataQuality.isStale) {
+              opportunityRating = 'D';
+              riskVetoReason = `两地数据时间差过大 (${dataQuality.timestampSkewMinutes} 分钟) 或数据陈旧`;
+            } else if (trade.netProfit < (opts.minNetProfit ?? 100_000) || trade.netMarginPct < (opts.minNetMarginPct ?? 5.0)) {
+              opportunityRating = 'D';
+              riskVetoReason = '扣除税费后净利润过低';
+            } else if (stress.priceDrop10Pct.netProfit < 0) {
+              opportunityRating = 'C';
+            } else if (trade.netMarginPct >= 12.0 && dataQuality.timestampSkewMinutes <= 15) {
+              opportunityRating = 'A';
+            }
+
             opportunities.push({
               typeId: d.type_id,
               typeName: meta.en_name,
               zhName: meta.zh_name || undefined,
               groupName: meta.group_name || undefined,
+              categoryId: meta.category_id || undefined,
               volumeM3: unitM3,
               strategy: 'regional_hauling',
               buyStationId: route.originStationId,
               buyStationName: route.originName,
               sellStationId: route.destStationId,
               sellStationName: route.destName,
-              suggestedBuyPrice: unitBuyPrice,
-              suggestedSellPrice: unitSellPrice,
-              suggestedQuantity: targetQty,
+              suggestedBuyPrice: buySim.weightedAvgPrice,
+              suggestedSellPrice: sellSim.weightedAvgPrice,
+              suggestedQuantity: actualQty,
               capitalRequired: trade.netCost,
               estimatedFees: trade.totalFees,
               haulingCost: 0,
               expectedNetProfit: trade.netProfit,
               expectedRoiPct: trade.roiPct,
-              dailyVolumeDest: d.sell_vol,
-              turnoverDays: Math.round((targetQty / Math.max(1, d.sell_vol)) * 5 * 10) / 10,
-              liquidityRating: d.sell_vol >= 20 ? 'B' : 'C',
-              riskScore: 2, // Requires market order listing
-              rationale: `【挂单高毛利】在 ${route.originName} 采购 ${targetQty} 件，高安 ${route.highSecJumps} 跳运至 ${route.destName} 设立卖单出货。扣除两地税费后净利 +${trade.netProfit.toLocaleString()} ISK (+${trade.netMarginPct.toFixed(1)}%)，体积 ${(unitM3 * targetQty).toFixed(1)} m³。`,
+              dailyVolumeDest: topDestBuy.volumeRemain,
+              turnoverDays: 0,
+              liquidityRating: topDestBuy.volumeRemain >= 20 ? 'A' : 'B',
+              riskScore: opportunityRating === 'D' ? 4 : (opportunityRating === 'C' ? 3 : 1),
+              opportunityRating,
+              riskVetoReason,
+              stressTest: stress,
+              dataQuality,
+              rationale: `【即时秒变现】在 ${route.originName} 按卖盘加权价(${buySim.weightedAvgPrice.toLocaleString()} ISK)吃进 ${actualQty} 件，高安 ${route.highSecJumps} 跳运至 ${route.destName}，以买盘加权价(${sellSim.weightedAvgPrice.toLocaleString()} ISK)直接变现。扣税后净利 +${trade.netProfit.toLocaleString()} ISK (+${trade.netMarginPct.toFixed(1)}%)，货舱占用 ${(unitM3 * actualQty).toFixed(1)} m³。`,
             });
           }
         }
