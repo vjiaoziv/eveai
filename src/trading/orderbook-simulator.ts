@@ -1,4 +1,12 @@
-import type { FeeContext, FillSimulationResult, OrderBookLevel, StressTestResults } from './types.js';
+import type {
+  FeeContext,
+  FillSimulationResult,
+  LimitOrderFillResult,
+  OrderBookLevel,
+  SimulatedFill,
+  StressFillResult,
+  StressTestResults,
+} from './types.js';
 import { FeeEngine } from './fee-engine.js';
 
 export class OrderBookSimulator {
@@ -120,6 +128,113 @@ export class OrderBookSimulator {
       slippagePct: Math.round(slippagePct * 100) / 100,
       levelsConsumed,
       effectiveOrders,
+    };
+  }
+
+  /**
+   * Mode B: conservative limit-order simulation.
+   *
+   * A limit order is filled only when it is immediately marketable against the
+   * supplied counterparty book and there is no observable queue ahead. When
+   * queue evidence is absent or non-zero, the order remains open; merely
+   * touching the limit price is never treated as proof of a fill.
+   */
+  public static simulateLimitOrder(params: {
+    side: 'buy' | 'sell';
+    limitPrice: number;
+    requestedQty: number;
+    counterpartyBook: OrderBookLevel[];
+    visibleQueueAheadQty: number;
+  }): LimitOrderFillResult {
+    const { side, limitPrice, requestedQty, counterpartyBook, visibleQueueAheadQty } = params;
+    if (!Number.isFinite(limitPrice) || limitPrice <= 0 || !Number.isFinite(requestedQty) || requestedQty <= 0) {
+      return {
+        status: 'OPEN',
+        filledQty: 0,
+        unfilledQty: Math.max(0, requestedQty),
+        weightedAvgPrice: 0,
+        fills: [],
+        reason: 'invalid_limit_order',
+        modelVersion: 'eveai-paper-fill-v1-limit-queue',
+      };
+    }
+    if (visibleQueueAheadQty > 0) {
+      return {
+        status: 'OPEN',
+        filledQty: 0,
+        unfilledQty: requestedQty,
+        weightedAvgPrice: 0,
+        fills: [],
+        reason: 'queue_ahead_not_filled',
+        modelVersion: 'eveai-paper-fill-v1-limit-queue',
+      };
+    }
+
+    const marketable = side === 'buy'
+      ? [...counterpartyBook].sort((a, b) => a.price - b.price).filter((level) => level.price <= limitPrice)
+      : [...counterpartyBook].sort((a, b) => b.price - a.price).filter((level) => level.price >= limitPrice);
+
+    if (marketable.length === 0) {
+      return {
+        status: 'OPEN',
+        filledQty: 0,
+        unfilledQty: requestedQty,
+        weightedAvgPrice: 0,
+        fills: [],
+        reason: 'limit_not_marketable',
+        modelVersion: 'eveai-paper-fill-v1-limit-queue',
+      };
+    }
+
+    const sim = side === 'buy'
+      ? this.simulateBuy(marketable, requestedQty)
+      : this.simulateSell(marketable, requestedQty);
+    const fills: SimulatedFill[] = sim.effectiveOrders.map((level) => ({ price: level.price, quantity: level.volume }));
+    return {
+      status: sim.filledQty === 0 ? 'OPEN' : sim.isComplete ? 'FILLED' : 'PARTIALLY_FILLED',
+      filledQty: sim.filledQty,
+      unfilledQty: sim.unfilledQty,
+      weightedAvgPrice: sim.weightedAvgPrice,
+      fills,
+      reason: sim.isComplete ? 'marketable_limit_filled' : 'marketable_limit_partial',
+      modelVersion: 'eveai-paper-fill-v1-limit-queue',
+    };
+  }
+
+  /**
+   * Mode C: deterministic conservative stress fill.
+   *
+   * The caller supplies a worsened book, a fill-ratio cap and an adverse price
+   * adjustment. No random probability is used, and the result is always no
+   * better than the conservative immediate simulation.
+   */
+  public static simulateStressFill(params: {
+    side: 'buy' | 'sell';
+    requestedQty: number;
+    currentBook: OrderBookLevel[];
+    maxFillRatio: number;
+    adversePriceBps: number;
+  }): StressFillResult {
+    const { side, requestedQty, currentBook, maxFillRatio, adversePriceBps } = params;
+    const ratio = Math.max(0, Math.min(1, maxFillRatio));
+    const stressQty = Math.floor(requestedQty * ratio);
+    const base = side === 'buy'
+      ? this.simulateBuy(currentBook, stressQty)
+      : this.simulateSell(currentBook, stressQty);
+    const adverseMultiplier = 1 + (adversePriceBps / 10_000) * (side === 'buy' ? 1 : -1);
+    const adjustedPrice = Math.round(base.weightedAvgPrice * adverseMultiplier * 100) / 100;
+    const fills: SimulatedFill[] = base.effectiveOrders.map((level) => ({
+      price: Math.round(level.price * adverseMultiplier * 100) / 100,
+      quantity: level.volume,
+    }));
+    return {
+      status: base.filledQty === 0 ? 'OPEN' : base.filledQty >= requestedQty ? 'FILLED' : 'PARTIALLY_FILLED',
+      filledQty: base.filledQty,
+      unfilledQty: requestedQty - base.filledQty,
+      weightedAvgPrice: adjustedPrice,
+      fills,
+      reason: base.filledQty === 0 ? 'stress_no_fill' : base.isComplete ? 'stress_filled' : 'stress_partial_fill',
+      modelVersion: 'eveai-paper-fill-v1-stress',
     };
   }
 

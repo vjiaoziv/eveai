@@ -5,6 +5,7 @@ import { FeeEngine, ALPHA_DEFAULT_SKILLS, FEE_MODEL_VERSION } from './fee-engine
 import { OrderBookSimulator } from './orderbook-simulator.js';
 import { PortfolioManager, DEFAULT_RISK_LIMITS, type PortfolioRiskLimits } from './portfolio-manager.js';
 import { DraftSystem } from './draft-system.js';
+import { PaperTradingSystem } from './paper-trading.js';
 import type { 
   FeeContext, 
   OpportunityRating, 
@@ -546,6 +547,10 @@ export class TradingPipeline {
       pipelineCredential,
       rationale: `【管线独立评估】在 ${candidate.originStationName} 采购 ${actualQty} 件，运往 ${candidate.destStationName} 变现。加权净利润 +${trade.netProfit.toLocaleString()} ISK (+${trade.netMarginPct.toFixed(1)}%)，评级为 [${rating} 级]。`,
     };
+
+    // Persist the exact opportunity object before any draft/order is created so
+    // scan, pipeline, draft, order and fill share one opportunityId.
+    PaperTradingSystem.logOpportunity(db, opportunity);
 
     // Stage 8 & 9: Draft Generation Gate
     let draft: TradeDraft | undefined;

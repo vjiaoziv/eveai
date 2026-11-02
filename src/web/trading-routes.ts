@@ -8,6 +8,8 @@ import { ManufacturingArbitrageStrategy } from '../trading/strategies/manufactur
 import { TrendAnalysisStrategy } from '../trading/strategies/trend-following.js';
 import { DraftSystem } from '../trading/draft-system.js';
 import { PaperTradingSystem } from '../trading/paper-trading.js';
+import { PerformanceAnalytics } from '../trading/performance-analytics.js';
+import { PaperTradingRuntimeValidation } from '../trading/runtime-validation.js';
 import { getLinkedCharacter } from '../eve/sso.js';
 import type { WebSession } from './web-session.js';
 function sessionContext(session: WebSession) { return { userId: session.userId, chatId: session.chatId }; }
@@ -171,6 +173,126 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const char = getLinkedCharacter(db, sessionContext(session));
     if (!char) return { positions: [], totalInvested: 0, totalCurrentValue: 0, totalUnrealizedPnl: 0, totalRealizedPnl: 0 };
     return PaperTradingSystem.getPortfolio(db, char.characterId);
+  });
+
+  app.get('/api/web/trading/paper/overview', async (request, reply) => {
+    const session = requireSession(db, request, reply);
+    if (!session) return;
+    const char = getLinkedCharacter(db, sessionContext(session));
+    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    return {
+      portfolio: PaperTradingSystem.getPortfolio(db, char.characterId),
+      performance: PerformanceAnalytics.compute(db, char.characterId),
+      runtime: PaperTradingRuntimeValidation.build(db, char.characterId),
+    };
+  });
+
+  app.get<{ Querystring: { status?: string; limit?: string } }>('/api/web/trading/paper/orders', async (request, reply) => {
+    const session = requireSession(db, request, reply);
+    if (!session) return;
+    const char = getLinkedCharacter(db, sessionContext(session));
+    if (!char) return { orders: [] };
+    const limit = Math.max(1, Math.min(500, Number(request.query.limit || 100)));
+    const params: unknown[] = [char.characterId];
+    let sql = `
+      SELECT o.*, COALESCE(COUNT(f.fill_id), 0) AS fill_count,
+             COALESCE(SUM(f.quantity), 0) AS filled_from_fills,
+             COALESCE(SUM(f.fees), 0) AS fees_from_fills
+      FROM paper_trading_orders o
+      LEFT JOIN paper_fills f ON f.order_id = o.order_id
+      WHERE o.character_id = ?
+    `;
+    if (request.query.status) {
+      sql += ' AND o.status = ?';
+      params.push(request.query.status);
+    }
+    sql += ' GROUP BY o.order_id ORDER BY o.created_at DESC LIMIT ?';
+    params.push(limit);
+    return { orders: db.prepare(sql).all(...params) };
+  });
+
+  app.get<{ Querystring: { limit?: string } }>('/api/web/trading/paper/opportunities', async (request, reply) => {
+    const session = requireSession(db, request, reply);
+    if (!session) return;
+    const limit = Math.max(1, Math.min(500, Number(request.query.limit || 100)));
+    const rows = db.prepare(`
+      SELECT * FROM trade_opportunities_log
+      ORDER BY detected_at DESC LIMIT ?
+    `).all(limit) as any[];
+    return {
+      opportunities: rows.map((row) => ({
+        ...row,
+        profit_layers: row.profit_layers_json ? JSON.parse(row.profit_layers_json) : null,
+        data_quality: row.data_quality_json ? JSON.parse(row.data_quality_json) : null,
+      })),
+    };
+  });
+
+  app.get<{ Querystring: { orderId?: string; limit?: string } }>('/api/web/trading/paper/fills', async (request, reply) => {
+    const session = requireSession(db, request, reply);
+    if (!session) return;
+    const limit = Math.max(1, Math.min(1000, Number(request.query.limit || 200)));
+    if (request.query.orderId) {
+      return {
+        fills: db.prepare(`
+          SELECT * FROM paper_fills WHERE order_id = ? ORDER BY filled_at, rowid
+        `).all(request.query.orderId),
+      };
+    }
+    return {
+      fills: db.prepare(`
+        SELECT f.*, o.strategy_type, o.order_type, o.status AS order_status
+        FROM paper_fills f
+        JOIN paper_trading_orders o ON o.order_id = f.order_id
+        ORDER BY f.filled_at DESC, f.rowid DESC
+        LIMIT ?
+      `).all(limit),
+    };
+  });
+
+  app.get('/api/web/trading/paper/performance', async (request, reply) => {
+    const session = requireSession(db, request, reply);
+    if (!session) return;
+    const char = getLinkedCharacter(db, sessionContext(session));
+    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    return { performance: PerformanceAnalytics.compute(db, char.characterId) };
+  });
+
+  app.get('/api/web/trading/paper/runtime-validation', async (request, reply) => {
+    const session = requireSession(db, request, reply);
+    if (!session) return;
+    const char = getLinkedCharacter(db, sessionContext(session));
+    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    return { validation: PaperTradingRuntimeValidation.build(db, char.characterId) };
+  });
+
+  app.get('/api/web/trading/paper/risk', async (request, reply) => {
+    const session = requireSession(db, request, reply);
+    if (!session) return;
+    const char = getLinkedCharacter(db, sessionContext(session));
+    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    const validation = PaperTradingRuntimeValidation.build(db, char.characterId);
+    return {
+      risk: {
+        flags: validation.performance.riskFlags,
+        gates: validation.gates,
+        highRiskOpportunities: db.prepare(`
+          SELECT * FROM trade_opportunities_log
+          WHERE risk_rating IN ('C', 'D') OR outcome_status = 'vetoed'
+          ORDER BY detected_at DESC LIMIT 100
+        `).all(),
+        staleSnapshots: db.prepare(`
+          SELECT * FROM market_snapshot_regions
+          WHERE expires_at IS NULL OR expires_at < datetime('now')
+          ORDER BY fetched_at DESC LIMIT 100
+        `).all(),
+        unfilledOrders: db.prepare(`
+          SELECT * FROM paper_trading_orders
+          WHERE character_id = ? AND status IN ('open', 'partially_filled')
+          ORDER BY created_at DESC
+        `).all(char.characterId),
+      },
+    };
   });
 }
 

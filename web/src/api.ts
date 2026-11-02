@@ -351,6 +351,17 @@ export const webApi = {
       csrfToken,
     ),
   },
+  trading: {
+    overview: () => request<unknown>('/api/web/trading/paper/overview'),
+    orders: (status?: string, limit = 100) => request<unknown>(
+      `/api/web/trading/paper/orders?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ''}`,
+    ),
+    opportunities: (limit = 100) => request<unknown>(`/api/web/trading/paper/opportunities?limit=${limit}`),
+    fills: (limit = 200) => request<unknown>(`/api/web/trading/paper/fills?limit=${limit}`),
+    performance: () => request<unknown>('/api/web/trading/paper/performance'),
+    runtimeValidation: () => request<unknown>('/api/web/trading/paper/runtime-validation'),
+    risk: () => request<unknown>('/api/web/trading/paper/risk'),
+  },
   getExamples: () => request<{ examples: ShowcaseExample[] }>('/api/web/examples'),
   getTransparency: () => request<TransparencyPayload>('/api/web/transparency'),
   getMyTransparency: () => request<MyTransparency>('/api/web/transparency/me'),

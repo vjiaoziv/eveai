@@ -32,6 +32,33 @@ export interface OrderBookLevel {
   issued?: string;
 }
 
+export type FillModelMode = 'immediate' | 'limit_queue' | 'stress';
+
+export interface SimulatedFill {
+  price: number;
+  quantity: number;
+}
+
+export interface LimitOrderFillResult {
+  status: 'OPEN' | 'PARTIALLY_FILLED' | 'FILLED';
+  filledQty: number;
+  unfilledQty: number;
+  weightedAvgPrice: number;
+  fills: SimulatedFill[];
+  reason: string;
+  modelVersion: string;
+}
+
+export interface StressFillResult {
+  status: 'OPEN' | 'PARTIALLY_FILLED' | 'FILLED';
+  filledQty: number;
+  unfilledQty: number;
+  weightedAvgPrice: number;
+  fills: SimulatedFill[];
+  reason: string;
+  modelVersion: string;
+}
+
 export interface FillSimulationResult {
   requestedQty: number;
   filledQty: number;
@@ -125,13 +152,40 @@ export interface PipelineVerificationCredential {
   signature: string;
 }
 
+export interface OpportunityProfitLayers {
+  theoreticalGrossProfit?: number | null;
+  executableGrossProfit?: number | null;
+  feeNetProfit?: number | null;
+  comprehensiveNetProfit?: number | null;
+  comprehensiveNetProfitStatus?: 'CALCULATED' | 'UNKNOWN';
+  executableQuantity?: number | null;
+  unknownCosts?: string[];
+}
+
 export interface TradeOpportunity {
   opportunityId?: string;
+  detectedAt?: string;
+  expiresAt?: string;
   marketSnapshotHash?: string;
   marketSnapshotId?: string;
+  buySnapshotId?: string;
+  sellSnapshotId?: string;
   buySnapshotTimestamp?: string;
   sellSnapshotTimestamp?: string;
+  buyRegionId?: number;
+  sellRegionId?: number;
+  buyLocationId?: number;
+  sellLocationId?: number;
   feeModelVersion?: string;
+  executableQuantity?: number;
+  theoreticalGrossProfit?: number | null;
+  executableGrossProfit?: number | null;
+  feeNetProfit?: number | null;
+  comprehensiveNetProfit?: number | null;
+  comprehensiveNetProfitStatus?: 'CALCULATED' | 'UNKNOWN';
+  profitLayers?: OpportunityProfitLayers;
+  unknownCosts?: string[];
+  opportunityStatus?: 'pending' | 'approved' | 'expired' | 'vetoed' | 'simulated_filled' | 'simulated_partial';
   typeId: number;
   typeName: string;
   zhName?: string;

@@ -106,6 +106,88 @@ export function runMigrations(db: Db): void {
     addColumnIfMissing(db, 'paper_trading_orders', 'escrow_locked', 'REAL NOT NULL DEFAULT 0');
     addColumnIfMissing(db, 'paper_trading_orders', 'fee_reserved', 'REAL NOT NULL DEFAULT 0');
     addColumnIfMissing(db, 'paper_trading_orders', 'escrow_migration_status', "TEXT NOT NULL DEFAULT 'legacy_pending'");
+    addColumnIfMissing(db, 'paper_trading_orders', 'snapshot_id', 'TEXT');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS paper_fills (
+        fill_id           TEXT PRIMARY KEY,
+        order_id          TEXT NOT NULL,
+        opportunity_id    TEXT,
+        snapshot_id       TEXT,
+        filled_at         TEXT NOT NULL,
+        price             REAL NOT NULL,
+        quantity          INTEGER NOT NULL,
+        fees              REAL NOT NULL DEFAULT 0,
+        remaining_quantity INTEGER NOT NULL,
+        basis             TEXT NOT NULL,
+        model_version     TEXT NOT NULL,
+        created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_paper_fills_order ON paper_fills(order_id, filled_at);
+    `);
+    // P8.7: preserve both sides of an opportunity and its four profit layers.
+    addColumnIfMissing(db, 'trade_opportunities_log', 'buy_location_id', 'INTEGER');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'sell_location_id', 'INTEGER');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'buy_region_id', 'INTEGER');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'sell_region_id', 'INTEGER');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'buy_snapshot_id', 'TEXT');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'sell_snapshot_id', 'TEXT');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'buy_snapshot_timestamp', 'TEXT');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'sell_snapshot_timestamp', 'TEXT');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'fee_model_version', 'TEXT');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'executable_quantity', 'INTEGER');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'theoretical_gross_profit', 'REAL');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'executable_gross_profit', 'REAL');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'fee_net_profit', 'REAL');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'comprehensive_net_profit', 'REAL');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'comprehensive_net_profit_status', "TEXT NOT NULL DEFAULT 'UNKNOWN'");
+    addColumnIfMissing(db, 'trade_opportunities_log', 'profit_layers_json', 'TEXT');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'capital_required', 'REAL');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'logistics_cost', 'REAL');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'opportunity_expires_at', 'TEXT');
+    addColumnIfMissing(db, 'trade_opportunities_log', 'opportunity_status', "TEXT NOT NULL DEFAULT 'pending'");
+    addColumnIfMissing(db, 'paper_trading_orders', 'submitted_at', 'TEXT');
+    addColumnIfMissing(db, 'paper_trading_orders', 'fill_mode', "TEXT NOT NULL DEFAULT 'immediate'");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
+        snapshot_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id        TEXT NOT NULL,
+        available_cash    REAL NOT NULL,
+        escrow_locked     REAL NOT NULL,
+        inventory_cost    REAL NOT NULL,
+        inventory_value   REAL NOT NULL,
+        total_equity      REAL NOT NULL,
+        source_event      TEXT NOT NULL,
+        source_id         TEXT,
+        snapshot_at       TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_paper_equity_account_time
+        ON paper_equity_snapshots(account_id, snapshot_at, snapshot_id);
+      CREATE TABLE IF NOT EXISTS paper_position_exits (
+        exit_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id     TEXT NOT NULL,
+        paper_id     TEXT NOT NULL,
+        character_id INTEGER NOT NULL,
+        type_id      INTEGER NOT NULL,
+        quantity     INTEGER NOT NULL,
+        cost_price   REAL NOT NULL,
+        exit_price   REAL NOT NULL,
+        gross_pnl    REAL NOT NULL,
+        created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_paper_position_exits_order
+        ON paper_position_exits(order_id, created_at, exit_id);
+      CREATE TABLE IF NOT EXISTS paper_order_state_events (
+        event_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id      TEXT NOT NULL,
+        from_status   TEXT,
+        to_status     TEXT NOT NULL,
+        reason        TEXT,
+        metadata_json TEXT,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_paper_order_state_events_order
+        ON paper_order_state_events(order_id, created_at, event_id);
+    `);
     backfillPaperTradingEscrow(db);
     // Alert push redelivery: per-event attempts with exponential backoff and
     // a terminal abandoned_at so undeliverable events stop blocking the queue.
