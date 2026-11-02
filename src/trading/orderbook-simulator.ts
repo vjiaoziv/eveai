@@ -1,4 +1,5 @@
-import type { FillSimulationResult, OrderBookLevel, StressTestResults } from './types.js';
+import type { FeeContext, FillSimulationResult, OrderBookLevel, StressTestResults } from './types.js';
+import { FeeEngine } from './fee-engine.js';
 
 export class OrderBookSimulator {
   /**
@@ -119,6 +120,111 @@ export class OrderBookSimulator {
       slippagePct: Math.round(slippagePct * 100) / 100,
       levelsConsumed,
       effectiveOrders,
+    };
+  }
+
+  /**
+   * Find optimal profitable quantity across multiple orderbook levels.
+   * Dynamically balances multi-level depth with marginal unit profitability:
+   * - Traverses orderbook levels.
+   * - Prevents phantom spread dilution by halting when marginal selling revenue drops below marginal buying cost.
+   * - Ensures batch net margin remains >= minNetMarginPct.
+   */
+  public static findOptimalProfitableQuantity(params: {
+    originSells: OrderBookLevel[];
+    destBuys: OrderBookLevel[];
+    maxAllowedQty: number;
+    feeCtx: FeeContext;
+    minNetMarginPct?: number;
+  }): {
+    optimalQuantity: number;
+    buySim: FillSimulationResult;
+    sellSim: FillSimulationResult;
+    effectiveNetMarginPct: number;
+    isDepthConstrained: boolean;
+  } {
+    const { originSells, destBuys, maxAllowedQty, feeCtx, minNetMarginPct = 6.0 } = params;
+
+    if (originSells.length === 0 || destBuys.length === 0 || maxAllowedQty <= 0) {
+      return {
+        optimalQuantity: 0,
+        buySim: this.simulateBuy([], 0),
+        sellSim: this.simulateSell([], 0),
+        effectiveNetMarginPct: 0,
+        isDepthConstrained: true,
+      };
+    }
+
+    const sortedSells = [...originSells].sort((a, b) => a.price - b.price);
+    const sortedBuys = [...destBuys].sort((a, b) => b.price - a.price);
+
+    const rates = FeeEngine.calculateRates(feeCtx);
+    const effectiveSellMultiplier = 1 - rates.salesTaxRate;
+
+    // Discretize search steps by orderbook bucket boundaries
+    const candidateQuantities = new Set<number>();
+    let cumulativeBuyDepth = 0;
+    for (const b of sortedBuys) {
+      cumulativeBuyDepth += b.volumeRemain;
+      if (cumulativeBuyDepth <= maxAllowedQty) {
+        candidateQuantities.add(cumulativeBuyDepth);
+      } else {
+        candidateQuantities.add(maxAllowedQty);
+        break;
+      }
+    }
+    candidateQuantities.add(Math.min(maxAllowedQty, sortedBuys[0].volumeRemain));
+    candidateQuantities.add(Math.min(maxAllowedQty, sortedSells[0].volumeRemain));
+
+    const sortedCandidates = Array.from(candidateQuantities).filter(q => q > 0).sort((a, b) => a - b);
+
+    let bestQty = 0;
+    let bestBuySim = this.simulateBuy(sortedSells, 0);
+    let bestSellSim = this.simulateSell(sortedBuys, 0);
+    let bestNetMargin = 0;
+
+    for (const testQty of sortedCandidates) {
+      const bSim = this.simulateBuy(sortedSells, testQty);
+      const sSim = this.simulateSell(sortedBuys, testQty);
+
+      if (!bSim.isComplete || !sSim.isComplete) continue;
+
+      // Marginal test on the last level
+      const lastBuyOrder = sSim.effectiveOrders[sSim.effectiveOrders.length - 1];
+      const lastSellOrder = bSim.effectiveOrders[bSim.effectiveOrders.length - 1];
+      if (lastBuyOrder && lastSellOrder) {
+        const marginalSellNet = lastBuyOrder.price * effectiveSellMultiplier;
+        const marginalBuyCost = lastSellOrder.price;
+        // If marginal unit produces a loss, stop expanding quantity
+        if (marginalSellNet < marginalBuyCost) {
+          break;
+        }
+      }
+
+      const trade = FeeEngine.calculateTrade({
+        buyType: 'immediate_buy',
+        sellType: 'immediate_sell',
+        buyUnitPrice: bSim.weightedAvgPrice,
+        sellUnitPrice: sSim.weightedAvgPrice,
+        quantity: testQty,
+        buyCtx: feeCtx,
+        sellCtx: feeCtx,
+      });
+
+      if (trade.netMarginPct >= minNetMarginPct && trade.netProfit > 0) {
+        bestQty = testQty;
+        bestBuySim = bSim;
+        bestSellSim = sSim;
+        bestNetMargin = trade.netMarginPct;
+      }
+    }
+
+    return {
+      optimalQuantity: bestQty,
+      buySim: bestBuySim,
+      sellSim: bestSellSim,
+      effectiveNetMarginPct: bestNetMargin,
+      isDepthConstrained: bestQty < maxAllowedQty,
     };
   }
 

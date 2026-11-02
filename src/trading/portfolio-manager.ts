@@ -1,4 +1,6 @@
 import type { Db } from '../db/sqlite.js';
+import { DataCenter } from './data-center.js';
+import { OrderBookSimulator } from './orderbook-simulator.js';
 
 export interface PortfolioRiskLimits {
   cashReservePct: number;       // default 0.20 (20%)
@@ -25,8 +27,10 @@ export interface CapitalBreakdown {
   walletBalance: number;       // Cash in wallet
   escrowLocked: number;        // Locked in active buy orders
   inFlightCommittedIsk: number; // Committed to approved but unexecuted drafts
-  inventoryEstimatedValue: number; // Estimated value of inventory using Jita market price or SDE
-  totalNetWorth: number;       // wallet + escrow + inventory
+  liquidInventoryValue: number; // Realizable liquidation value against discrete orderbook depth
+  illiquidInventoryValue: number; // Value of items with no active buy depth or fallback SDE base price
+  specialAssetsCount: number;  // Count of special assets (BPCs, unpacked items, etc.)
+  totalNetWorth: number;       // wallet + escrow + liquidInventory + illiquidInventory
   cashReserveRequired: number; // 20% of wallet balance
   investableCapital: number;   // walletBalance - cashReserveRequired - inFlightCommittedIsk
   singleItemCapIsk: number;    // 15% of investable capital
@@ -35,8 +39,8 @@ export interface CapitalBreakdown {
 
 export class PortfolioManager {
   /**
-   * Calculate exact capital breakdown for a character, accounting for in-flight commitments
-   * and realistic inventory valuation.
+   * Calculate exact capital breakdown for a character, accounting for in-flight commitments,
+   * realistic multi-level orderbook liquidation depth, and special asset isolation.
    */
   public static getCapitalBreakdown(
     db: Db,
@@ -63,27 +67,44 @@ export class PortfolioManager {
     `).get(characterId) as any;
     const inFlightCommittedIsk = Number(inFlightRow?.committed_isk || 0);
 
-    // 4. Estimate inventory value (using Jita 4-4 buy order price if available, fallback to SDE basePrice)
+    // 4. Read all inventory items
     const assetRows = db.prepare(`
-      SELECT a.type_id, a.quantity,
-             COALESCE(
-               (SELECT max(price) FROM market_orders WHERE location_id = 60003760 AND type_id = a.type_id AND is_buy_order = 1),
-               json_extract(t.data_json, '$.basePrice'),
-               0
-             ) as unit_market_price
+      SELECT a.item_id, a.type_id, a.quantity, a.location_id, a.is_blueprint_copy,
+             COALESCE(json_extract(t.data_json, '$.basePrice'), 0) as base_price
       FROM character_assets a
       LEFT JOIN sde_types t ON a.type_id = t.type_id
-      WHERE a.character_id = ? AND a.is_blueprint_copy != 1
+      WHERE a.character_id = ?
     `).all(characterId) as any[];
 
-    let inventoryEstimatedValue = 0;
-    for (const r of assetRows) {
-      inventoryEstimatedValue += (r.quantity || 1) * (r.unit_market_price || 0);
+    let liquidInventoryValue = 0;
+    let illiquidInventoryValue = 0;
+    let specialAssetsCount = 0;
+
+    for (const item of assetRows) {
+      // Isolate BPCs and non-marketable items
+      if (item.is_blueprint_copy === 1) {
+        specialAssetsCount += 1;
+        // BPCs cannot be sold on regional market, zero liquidation value assigned
+        continue;
+      }
+
+      // Check orderbook depth at Jita 4-4 (Hub location 60003760)
+      const book = DataCenter.getOrderBook(db, 10000002, item.type_id, 60003760);
+      if (book.buys.length > 0) {
+        const sim = OrderBookSimulator.simulateSell(book.buys, item.quantity);
+        liquidInventoryValue += sim.totalGrossIsk * 0.94975; // after 5.025% sales tax
+        if (!sim.isComplete) {
+          // Unfilled units assigned conservative base price
+          illiquidInventoryValue += sim.unfilledQty * (item.base_price || 0);
+        }
+      } else {
+        // No buy depth at all
+        illiquidInventoryValue += (item.quantity || 1) * (item.base_price || 0);
+      }
     }
 
-    const totalNetWorth = walletBalance + escrowLocked + inventoryEstimatedValue;
+    const totalNetWorth = walletBalance + escrowLocked + liquidInventoryValue + illiquidInventoryValue;
     const cashReserveRequired = Math.round(walletBalance * limits.cashReservePct * 100) / 100;
-    // Crucial: deduct both cash reserve and in-flight committed drafts
     const investableCapital = Math.max(
       0,
       Math.round((walletBalance - cashReserveRequired - inFlightCommittedIsk) * 100) / 100,
@@ -96,7 +117,9 @@ export class PortfolioManager {
       walletBalance,
       escrowLocked,
       inFlightCommittedIsk,
-      inventoryEstimatedValue: Math.round(inventoryEstimatedValue * 100) / 100,
+      liquidInventoryValue: Math.round(liquidInventoryValue * 100) / 100,
+      illiquidInventoryValue: Math.round(illiquidInventoryValue * 100) / 100,
+      specialAssetsCount,
       totalNetWorth: Math.round(totalNetWorth * 100) / 100,
       cashReserveRequired,
       investableCapital,

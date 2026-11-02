@@ -1,4 +1,4 @@
-﻿import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import type { Db } from '../db/sqlite.js';
 import { requireSession, requireMutationSession } from './web-route-guards.js';
 import { PortfolioManager } from '../trading/portfolio-manager.js';
@@ -123,9 +123,13 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   app.post<{ Params: { draftId: string } }>('/api/web/trading/drafts/:draftId/approve', async (request, reply) => {
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
-    const ok = DraftSystem.updateStatus(db, request.params.draftId, 'approved');
-    if (!ok) return reply.status(404).send({ error: '草案不存在' });
-    return { success: true };
+    try {
+      const ok = DraftSystem.updateStatus(db, request.params.draftId, 'approved');
+      if (!ok) return reply.status(404).send({ error: '草案不存在' });
+      return { success: true };
+    } catch (err: any) {
+      return reply.status(403).send({ error: err.message });
+    }
   });
 
   app.post<{ Params: { draftId: string } }>('/api/web/trading/drafts/:draftId/reject', async (request, reply) => {
@@ -143,16 +147,20 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
     const b = request.body;
-    const ok = DraftSystem.recordManualExecution(db, {
-      draftId: request.params.draftId,
-      actualBuyPrice: Number(b.actualBuyPrice),
-      actualSellPrice: Number(b.actualSellPrice),
-      actualQuantity: Number(b.actualQuantity),
-      actualFees: Number(b.actualFees || 0),
-      notes: b.notes,
-    });
-    if (!ok) return reply.status(404).send({ error: '草案不存在' });
-    return { success: true };
+    try {
+      const ok = DraftSystem.recordManualExecution(db, {
+        draftId: request.params.draftId,
+        actualBuyPrice: Number(b.actualBuyPrice),
+        actualSellPrice: Number(b.actualSellPrice),
+        actualQuantity: Number(b.actualQuantity),
+        actualFees: Number(b.actualFees || 0),
+        notes: b.notes,
+      });
+      if (!ok) return reply.status(404).send({ error: '草案不存在' });
+      return { success: true };
+    } catch (err: any) {
+      return reply.status(403).send({ error: err.message });
+    }
   });
 
   // 7. Paper Trading

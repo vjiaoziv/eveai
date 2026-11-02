@@ -22,8 +22,8 @@ export interface PipelineEvaluationResult {
 export class TradingPipeline {
   /**
    * Complete 10-stage deterministic decision pipeline:
-   * 1. Data Quality & Temporal Consistency Verification
-   * 2. Orderbook Depth & Liquidity Walk Simulation
+   * 1. Data Quality & Temporal Consistency Verification (using snapshot metadata)
+   * 2. Orderbook Depth & Liquidity Walk Simulation across multiple levels
    * 3. Precise Tax & Fee Engine Calculation
    * 4. Logistics & Anti-Gank Cargo Risk Verification
    * 5. Multi-scenario Stress Testing (-5%, -10%, -20%, Bid Evaporation)
@@ -43,6 +43,8 @@ export class TradingPipeline {
       destStationId: number;
       destRegionId: number;
       destStationName: string;
+      maxCapital?: number;
+      maxCargoM3?: number;
       requestedQty?: number;
       characterId?: number;
       feeContext?: FeeContext;
@@ -63,7 +65,14 @@ export class TradingPipeline {
 
     const unitM3 = meta.volume || 1;
 
-    // Stage 1: Market data extraction & Temporal Consistency Check
+    // Stage 1: Snapshot temporal consistency validation using authoritative region metadata
+    const dataQuality = DataCenter.validateTemporalConsistency(
+      db,
+      candidate.originRegionId,
+      candidate.destRegionId,
+    );
+
+    // Stage 2: Pull full discrete orderbook for rigorous simulation
     const originBook = DataCenter.getOrderBook(db, candidate.originRegionId, candidate.typeId, candidate.originStationId);
     const destBook = DataCenter.getOrderBook(db, candidate.destRegionId, candidate.typeId, candidate.destStationId);
 
@@ -71,31 +80,30 @@ export class TradingPipeline {
       return this.rejectResult(candidate, '采购端卖单或销售端买单订单簿为空，无真实流动性', 'D', meta);
     }
 
-    const dataQuality = DataCenter.validateTemporalConsistency(originBook.sells, destBook.buys);
+    // Determine capital and cargo volume constraints
+    const maxCapital = candidate.maxCapital ?? 50_000_000;
+    const maxCargoM3 = candidate.maxCargoM3 ?? 5_000;
+    const lowestSellPrice = originBook.sells[0]?.price || 1;
+    const maxQtyByCap = Math.max(1, Math.floor(maxCapital / lowestSellPrice));
+    const maxQtyByM3 = Math.max(1, Math.floor(maxCargoM3 / unitM3));
+    const maxAllowedQty = candidate.requestedQty
+      ? Math.min(candidate.requestedQty, maxQtyByCap, maxQtyByM3)
+      : Math.min(maxQtyByCap, maxQtyByM3);
 
-    // Stage 2: Orderbook Depth & Real Volume Determination
-    const topBuy = destBook.buys[0];
-    const topSell = originBook.sells[0];
+    // Stage 3: Optimal quantity determination across orderbook levels (reconciling depth and multi-level simulation)
+    const { optimalQuantity, buySim, sellSim } = OrderBookSimulator.findOptimalProfitableQuantity({
+      originSells: originBook.sells,
+      destBuys: destBook.buys,
+      maxAllowedQty,
+      feeCtx,
+      minNetMarginPct: 5.0,
+    });
 
-    // Cap requested quantity strictly by available top bid volume to prevent phantom spread
-    const maxQtyByBid = topBuy.volumeRemain;
-    const requestedQty = candidate.requestedQty
-      ? Math.min(candidate.requestedQty, maxQtyByBid)
-      : Math.min(100, maxQtyByBid);
-
-    if (requestedQty <= 0) {
-      return this.rejectResult(candidate, '目标买单剩余深度为 0', 'D', meta);
+    if (optimalQuantity === 0 || !buySim.isComplete || !sellSim.isComplete || buySim.filledQty === 0) {
+      return this.rejectResult(candidate, '订单簿深度无法支撑具有正边际利润的批量交易', 'D', meta);
     }
 
-    // Stage 3: Orderbook Walk Simulation (Weighted average fill prices)
-    const buySim = OrderBookSimulator.simulateBuy(originBook.sells, requestedQty);
-    const sellSim = OrderBookSimulator.simulateSell(destBook.buys, requestedQty);
-
-    if (!buySim.isComplete || !sellSim.isComplete || buySim.filledQty === 0) {
-      return this.rejectResult(candidate, '订单簿深度不足以完全覆盖提议数量', 'D', meta);
-    }
-
-    const actualQty = buySim.filledQty;
+    const actualQty = optimalQuantity;
 
     // Stage 4: Precise Fee Calculation via FeeEngine
     const trade = FeeEngine.calculateTrade({
@@ -175,15 +183,15 @@ export class TradingPipeline {
       haulingCost: 0,
       expectedNetProfit: trade.netProfit,
       expectedRoiPct: trade.roiPct,
-      dailyVolumeDest: topBuy.volumeRemain,
+      dailyVolumeDest: destBook.buys[0].volumeRemain,
       turnoverDays: 0,
-      liquidityRating: topBuy.volumeRemain >= 20 ? 'A' : 'B',
+      liquidityRating: actualQty >= 20 ? 'A' : 'B',
       riskScore: rating === 'D' ? 4 : (rating === 'C' ? 3 : 1),
       opportunityRating: rating,
       riskVetoReason: vetoReason,
       stressTest: stress,
       dataQuality,
-      rationale: `【管线独立评估】在 ${candidate.originStationName} 采购 ${actualQty} 件，运往 ${candidate.destStationName} 变现。净利润 +${trade.netProfit.toLocaleString()} ISK (+${trade.netMarginPct.toFixed(1)}%)，评级为 [${rating} 级]。`,
+      rationale: `【管线独立评估】在 ${candidate.originStationName} 采购 ${actualQty} 件，运往 ${candidate.destStationName} 变现。加权净利润 +${trade.netProfit.toLocaleString()} ISK (+${trade.netMarginPct.toFixed(1)}%)，评级为 [${rating} 级]。`,
     };
 
     // Stage 8 & 9: Draft Generation Gate

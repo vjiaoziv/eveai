@@ -88,6 +88,9 @@ export class RegionalHaulingStrategy {
 
     const opportunities: TradeOpportunity[] = [];
 
+    // Check temporal consistency using authoritative region snapshot records
+    const dataQuality = DataCenter.validateTemporalConsistency(db, route.originRegionId, route.destRegionId);
+
     for (const d of destCandidates) {
       const orig = originMap.get(d.type_id);
       if (!orig) continue;
@@ -97,30 +100,28 @@ export class RegionalHaulingStrategy {
 
       const unitM3 = meta.volume || 1;
 
-      // Pull full discrete orderbook for rigorous simulation
+      // Pull full discrete orderbook for rigorous multi-level simulation
       const originBook = DataCenter.getOrderBook(db, route.originRegionId, d.type_id, route.originStationId);
       const destBook = DataCenter.getOrderBook(db, route.destRegionId, d.type_id, route.destStationId);
-
-      // Validate temporal skew between origin and dest snapshots
-      const dataQuality = DataCenter.validateTemporalConsistency(originBook.sells, destBook.buys);
 
       // Mode 1: Instant Fill (Eat Dest Buy Order)
       if (opts.mode === 'instant_fill' || opts.mode === 'all') {
         if (d.best_buy && d.best_buy > orig.best_sell * 1.05 && destBook.buys.length > 0) {
-          const topDestBuy = destBook.buys[0];
-          // Rigid Depth Guard: Target qty is bounded by top buy order depth, cargo volume and capital
-          const maxUnitsByCap = Math.floor(maxCapital / orig.best_sell);
-          const maxUnitsByM3 = Math.floor(maxCargoM3 / unitM3);
+          const maxUnitsByCap = Math.max(1, Math.floor(maxCapital / orig.best_sell));
+          const maxUnitsByM3 = Math.max(1, Math.floor(maxCargoM3 / unitM3));
+          const maxAllowedQty = Math.min(maxUnitsByCap, maxUnitsByM3);
 
-          // Capped at top buy volume to prevent phantom spread dilution
-          const safeBuyQty = Math.max(1, Math.min(topDestBuy.volumeRemain, maxUnitsByCap, maxUnitsByM3));
+          // Find optimal profitable quantity across all orderbook levels without phantom spread
+          const { optimalQuantity, buySim, sellSim } = OrderBookSimulator.findOptimalProfitableQuantity({
+            originSells: originBook.sells,
+            destBuys: destBook.buys,
+            maxAllowedQty,
+            feeCtx,
+            minNetMarginPct: opts.minNetMarginPct ?? 5.0,
+          });
 
-          // Run rigorous orderbook walk simulation on both sides
-          const buySim = OrderBookSimulator.simulateBuy(originBook.sells, safeBuyQty);
-          const sellSim = OrderBookSimulator.simulateSell(destBook.buys, safeBuyQty);
-
-          if (buySim.isComplete && sellSim.isComplete && buySim.filledQty > 0) {
-            const actualQty = buySim.filledQty;
+          if (optimalQuantity > 0 && buySim.isComplete && sellSim.isComplete) {
+            const actualQty = optimalQuantity;
 
             const trade = FeeEngine.calculateTrade({
               buyType: 'immediate_buy',
@@ -133,7 +134,6 @@ export class RegionalHaulingStrategy {
               haulingCost: 0,
             });
 
-            // Stress test sell price
             const stress = OrderBookSimulator.runStressTest({
               buyOrders: destBook.buys,
               quantity: actualQty,
@@ -142,13 +142,12 @@ export class RegionalHaulingStrategy {
               baseSellPrice: sellSim.weightedAvgPrice,
             });
 
-            // Quality & Rating
             let opportunityRating: OpportunityRating = 'B';
             let riskVetoReason: string | undefined;
 
             if (dataQuality.isStale) {
               opportunityRating = 'D';
-              riskVetoReason = `两地数据时间差过大 (${dataQuality.timestampSkewMinutes} 分钟) 或数据陈旧`;
+              riskVetoReason = `两地数据时间差过大 (${dataQuality.timestampSkewMinutes} 分钟) 或快照过期`;
             } else if (trade.netProfit < (opts.minNetProfit ?? 100_000) || trade.netMarginPct < (opts.minNetMarginPct ?? 5.0)) {
               opportunityRating = 'D';
               riskVetoReason = '扣除税费后净利润过低';
@@ -178,9 +177,9 @@ export class RegionalHaulingStrategy {
               haulingCost: 0,
               expectedNetProfit: trade.netProfit,
               expectedRoiPct: trade.roiPct,
-              dailyVolumeDest: topDestBuy.volumeRemain,
+              dailyVolumeDest: destBook.buys[0].volumeRemain,
               turnoverDays: 0,
-              liquidityRating: topDestBuy.volumeRemain >= 20 ? 'A' : 'B',
+              liquidityRating: actualQty >= 20 ? 'A' : 'B',
               riskScore: opportunityRating === 'D' ? 4 : (opportunityRating === 'C' ? 3 : 1),
               opportunityRating,
               riskVetoReason,

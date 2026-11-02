@@ -3,7 +3,9 @@ import { FeeEngine, ALPHA_DEFAULT_SKILLS } from '../fee-engine.js';
 import type { FeeContext } from '../types.js';
 
 export interface BacktestTrade {
-  date: string;
+  signalDate: string;
+  entryDate: string;
+  exitDate: string;
   typeId: number;
   quantity: number;
   entryPrice: number;
@@ -19,7 +21,9 @@ export interface BacktestTrade {
 export interface BacktestSummary {
   runId: string;
   strategyName: string;
-  executionMode: 'conservative_simulation' | 'price_signal_only';
+  simulationType: 'daily_signal_backtest';
+  executionMode?: 'conservative_simulation';
+  slippageModel: string;
   startDate: string;
   endDate: string;
   initialCapital: number;
@@ -31,7 +35,7 @@ export interface BacktestSummary {
   profitFactor: number;
   sharpeRatio: number;
   sortinoRatio: number;
-  cvar95Pct: number; // 95% Conditional Value at Risk (Expected Shortfall)
+  cvar95Pct: number; // 95% Conditional Value at Risk
   capitalTurnoverRate: number; // Total volume transacted / initial capital
   totalTrades: number;
   profitableTrades: number;
@@ -43,8 +47,11 @@ export interface BacktestSummary {
 
 export class BacktestingEngine {
   /**
-   * Run historical simulation on daily points without lookahead bias.
-   * Eliminates "lowest price buy" and "next day average sell" lookahead bugs.
+   * Run historical simulation with strict time-causality:
+   * - Signal is computed at close of Day T using historical window [T-14, T].
+   * - Trade execution occurs strictly on Day T+1 (Entry Day).
+   * - Trade exit occurs on Day T+2 (Exit Day).
+   * - Future data from Day T+1 or T+2 CANNOT influence entry decision at Day T.
    */
   public static runHistoricalBacktest(
     db: Db,
@@ -53,11 +60,11 @@ export class BacktestingEngine {
       regionId: number;
       typeIds: number[];
       initialCapital: number;
-      minDaysRequired?: number;
+      slippageFriction?: number; // default 0.015 (1.5% stylized friction)
       feeContext?: FeeContext;
     },
   ): BacktestSummary {
-    const { strategyName, regionId, typeIds, initialCapital, feeContext } = params;
+    const { strategyName, regionId, typeIds, initialCapital, slippageFriction = 0.015, feeContext } = params;
     const runId = `BT-${Date.now()}`;
 
     const feeCtx: FeeContext = feeContext ?? {
@@ -90,28 +97,31 @@ export class BacktestingEngine {
     }
 
     for (const [typeId, series] of typeSeries.entries()) {
-      if (series.length < 5) continue;
+      if (series.length < 6) continue;
 
-      // Anti-lookahead trading simulation:
-      // Signal generated at day i using strictly historical data (window ending at i - 1)
-      for (let i = 4; i < series.length - 1; i++) {
-        const historyWindow = series.slice(Math.max(0, i - 14), i);
+      // Strict causal loop:
+      // Loop index i represents Signal Day T (needs at least 14 days history, and 2 subsequent days for execution)
+      for (let i = 14; i < series.length - 2; i++) {
+        // Historical window strictly ends at i (Signal Day T)
+        const historyWindow = series.slice(Math.max(0, i - 14), i + 1);
         const rollingAvg = historyWindow.reduce((acc, w) => acc + w.average, 0) / historyWindow.length;
-        const current = series[i];
-        const next = series[i + 1];
+        const signalDay = series[i];
 
-        // Signal: price dip below historical rolling average by > 5% with volume support
-        if (current.average < rollingAvg * 0.95 && current.volume > 10) {
-          // Conservative Entry Price: Conservative execution at daily average (not impossible lowest)
-          const entryPrice = current.average;
+        // Signal rule evaluated on closed Day T data
+        if (signalDay.average < rollingAvg * 0.95 && signalDay.volume > 10) {
+          // Execution Day T+1: buy at Day T+1 market average
+          const entryDay = series[i + 1];
+          const entryPrice = entryDay.average;
+
           const maxAllocation = currentCapital * 0.15; // 15% single item cap
           const qty = Math.max(1, Math.floor(maxAllocation / entryPrice));
           const tradeCost = qty * entryPrice;
 
           if (tradeCost > currentCapital * 0.8) continue; // Respect 20% cash reserve
 
-          // Conservative Exit Price: Exit on next day with 1.5% execution friction below next average
-          const exitPrice = next.average * 0.985;
+          // Exit Day T+2: sell on Day T+2 with stylized friction
+          const exitDay = series[i + 2];
+          const exitPrice = exitDay.average * (1 - slippageFriction);
 
           // Compute exact fees through FeeEngine
           const tradeCalc = FeeEngine.calculateTrade({
@@ -139,7 +149,9 @@ export class BacktestingEngine {
           returns.push(tradeReturnPct / 100);
 
           trades.push({
-            date: current.date,
+            signalDate: signalDay.date,
+            entryDate: entryDay.date,
+            exitDate: exitDay.date,
             typeId,
             quantity: qty,
             entryPrice: Math.round(entryPrice * 100) / 100,
@@ -152,8 +164,8 @@ export class BacktestingEngine {
             returnPct: Math.round(tradeReturnPct * 100) / 100,
           });
 
-          // Move forward
-          i += 1;
+          // Fast forward past execution days
+          i += 2;
         }
       }
     }
@@ -207,7 +219,9 @@ export class BacktestingEngine {
     return {
       runId,
       strategyName,
+      simulationType: 'daily_signal_backtest',
       executionMode: 'conservative_simulation',
+      slippageModel: `simplified_${(slippageFriction * 100).toFixed(1)}pct_friction`,
       startDate,
       endDate,
       initialCapital,
@@ -230,3 +244,4 @@ export class BacktestingEngine {
     };
   }
 }
+

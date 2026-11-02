@@ -140,3 +140,16 @@
   - **风控模型完善**：明确 20% 安全现金储备、在途已审批草案额度锁定、单品 15% 累计持仓限额、品类 30% 累计持仓限额及 5000 万高安防强杀货值门禁。
   - **草案生命周期**：指明历史草案 `TR-2026-000001` 已被永久撤销 (`audit_revoked`)；补充说明实盘交易反馈与真实成交对比记账闭环 (`record-trade`)。
   - **评级与否决标准**：新增 A/B/C/D 四级交易机会评级体系与多情景压力测试规范，明确时差 $> 15$ 分钟一票否决规则。
+
+### 11. 2026-11-02：完成 EVEAI P8.5 独立验收与二次纠偏
+- **二次纠偏与逻辑重构**：
+  - `src/trading/data-center.ts`：彻底纠正使用订单 `issued` 判断时差的错误，重构为读取 `market_snapshot_regions` 表中真实的 `fetched_at` 与 `expires_at` 快照时效。
+  - `src/trading/orderbook-simulator.ts`：实现 `findOptimalProfitableQuantity` 边际收益贪心搜索，彻底化解“第一档粗暴截断”与“多档订单簿模拟”之间的逻辑冲突，实现兼顾深度与防滑脱的动态平衡。
+  - `src/trading/backtesting/engine.ts`：重构日线回测时序因果链，消除 Day T 决策偷窥 Day T 均价收盘数据的未来漏洞，强制 Day T 信号 $\to$ Day T+1 进场 $\to$ Day T+2 出场。
+  - `src/trading/portfolio-manager.ts`：库存估值改用吉他买盘多档真实撮合测算变现净额，隔离非标 BPC 拷贝件，分层输出流动性与特殊资产。
+  - `src/trading/draft-system.ts`, `src/web/trading-routes.ts`, `scripts/eve-cli.ts`：全链路硬性捕获并拦截对 `audit_revoked` 草案的审批与执行，修正历史撤销描述为客观的“模拟成交测算重大风险”。
+- **综合集成测试**：
+  - 新增 `tests/unit/p8-5-integration.test.ts`，覆盖案例 A（多档深度优化截断）、案例 B（issued 不同但快照同步）、案例 C（issued 相同但快照陈旧）、案例 D（回测无未来数据泄漏）、案例 E（多档库存真实估值与 BPC 隔离）、案例 F（全链路撤销草案锁死）。
+  - 4 套专项测试共 23 项单测 100% 通过；TypeScript 0 错误；Vite 前端构建成功。
+- **交付文档**：
+  - 生成 `P8_5_INDEPENDENT_AUDIT.md`, `P8_5_MARKET_TIMESTAMP_AUDIT.md`, `P8_5_ORDERBOOK_LOGIC_AUDIT.md`, `P8_5_BACKTEST_CAUSALITY_AUDIT.md`, `P8_5_FEE_ENGINE_AUDIT.md`, `P8_5_INVENTORY_VALUATION_AUDIT.md`, `P8_5_DRAFT_STATE_SECURITY_AUDIT.md`, `P8_5_INTEGRATION_TEST_REPORT.md`, `P8_5_REMEDIATION_LOG.md`, `P8_5_FINAL_ACCEPTANCE_REPORT.md` 共 10 份交付文档。

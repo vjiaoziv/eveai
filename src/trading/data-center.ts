@@ -10,6 +10,14 @@ export interface DataSourceRecord {
   updated_at: string;
 }
 
+export interface RegionSnapshotMeta {
+  regionId: number;
+  pages: number;
+  rowsLoaded: number;
+  fetchedAt: string | null;
+  expiresAt: string | null;
+}
+
 export class DataCenter {
   /**
    * Record data source health in data_source_status table
@@ -38,6 +46,26 @@ export class DataCenter {
    */
   public static getAllStatuses(db: Db): DataSourceRecord[] {
     return db.prepare('SELECT * FROM data_source_status ORDER BY source_id').all() as DataSourceRecord[];
+  }
+
+  /**
+   * Query metadata about a region's market snapshot (fetched_at, expires_at)
+   */
+  public static getRegionSnapshotMeta(db: Db, regionId: number): RegionSnapshotMeta | undefined {
+    const row = db.prepare(`
+      SELECT region_id, pages, rows_loaded, fetched_at, expires_at
+      FROM market_snapshot_regions
+      WHERE region_id = ?
+    `).get(regionId) as any;
+
+    if (!row) return undefined;
+    return {
+      regionId: row.region_id,
+      pages: row.pages,
+      rowsLoaded: row.rows_loaded,
+      fetchedAt: row.fetched_at,
+      expiresAt: row.expires_at,
+    };
   }
 
   /**
@@ -76,7 +104,6 @@ export class DataCenter {
 
   /**
    * Query current active orders for a type in a region, optionally scoped to a station.
-   * Includes issued timestamp for temporal validation.
    */
   public static getOrderBook(
     db: Db,
@@ -109,38 +136,58 @@ export class DataCenter {
   }
 
   /**
-   * Validate temporal consistency between two market datasets (e.g. cross-region hauling)
+   * Validate temporal consistency using authoritative market snapshot metadata (fetched_at, expires_at),
+   * strictly adhering to CCP ESI cache model rather than order creation timestamp (issued).
    */
   public static validateTemporalConsistency(
-    originOrders: OrderBookLevel[],
-    destOrders: OrderBookLevel[],
+    db: Db,
+    originRegionId: number,
+    destRegionId: number,
     maxAllowedSkewMinutes = 15,
   ): DataQualityMetrics {
     const now = Date.now();
-    const getNewestTime = (orders: OrderBookLevel[]) => {
-      let maxTs = 0;
-      for (const o of orders) {
-        if (o.issued) {
-          const ts = new Date(o.issued.endsWith('Z') ? o.issued : o.issued + 'Z').getTime();
-          if (ts > maxTs) maxTs = ts;
-        }
-      }
-      return maxTs;
+    const originMeta = this.getRegionSnapshotMeta(db, originRegionId);
+    const destMeta = this.getRegionSnapshotMeta(db, destRegionId);
+
+    const parseIso = (isoStr?: string | null) => {
+      if (!isoStr) return 0;
+      return new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z').getTime();
     };
 
-    const originTs = getNewestTime(originOrders) || now;
-    const destTs = getNewestTime(destOrders) || now;
+    const originFetchedTs = parseIso(originMeta?.fetchedAt);
+    const destFetchedTs = parseIso(destMeta?.fetchedAt);
+    const originExpiresTs = parseIso(originMeta?.expiresAt);
+    const destExpiresTs = parseIso(destMeta?.expiresAt);
 
-    const originAgeMin = Math.round(Math.abs(now - originTs) / 60000);
-    const destAgeMin = Math.round(Math.abs(now - destTs) / 60000);
-    const skewMin = Math.round(Math.abs(originTs - destTs) / 60000);
+    // If metadata is present in DB, use exact snapshot fetched_at
+    let originAgeMin = 9999;
+    let destAgeMin = 9999;
+    let skewMin = 9999;
+    let hasSnapshotRecord = false;
+
+    if (originFetchedTs > 0 && destFetchedTs > 0) {
+      hasSnapshotRecord = true;
+      originAgeMin = Math.round(Math.abs(now - originFetchedTs) / 60000);
+      destAgeMin = Math.round(Math.abs(now - destFetchedTs) / 60000);
+      skewMin = Math.round(Math.abs(originFetchedTs - destFetchedTs) / 60000);
+    }
+
+    // Check ESI cache expiration: if current time past expires_at by > 5 minutes, mark as stale
+    const isCacheExpired = (originExpiresTs > 0 && now > originExpiresTs + 300_000)
+      || (destExpiresTs > 0 && now > destExpiresTs + 300_000);
+
+    const isStale = !hasSnapshotRecord
+      || originAgeMin > 60
+      || destAgeMin > 60
+      || skewMin > maxAllowedSkewMinutes
+      || isCacheExpired;
 
     return {
       originSnapshotAgeMinutes: originAgeMin,
       destSnapshotAgeMinutes: destAgeMin,
       timestampSkewMinutes: skewMin,
-      isStale: originAgeMin > 60 || destAgeMin > 60 || skewMin > maxAllowedSkewMinutes,
-      hasDepthMismatch: false, // Populated during simulation
+      isStale,
+      hasDepthMismatch: false,
     };
   }
 
