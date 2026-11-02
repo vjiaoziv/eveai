@@ -153,3 +153,17 @@
   - 4 套专项测试共 23 项单测 100% 通过；TypeScript 0 错误；Vite 前端构建成功。
 - **交付文档**：
   - 生成 `P8_5_INDEPENDENT_AUDIT.md`, `P8_5_MARKET_TIMESTAMP_AUDIT.md`, `P8_5_ORDERBOOK_LOGIC_AUDIT.md`, `P8_5_BACKTEST_CAUSALITY_AUDIT.md`, `P8_5_FEE_ENGINE_AUDIT.md`, `P8_5_INVENTORY_VALUATION_AUDIT.md`, `P8_5_DRAFT_STATE_SECURITY_AUDIT.md`, `P8_5_INTEGRATION_TEST_REPORT.md`, `P8_5_REMEDIATION_LOG.md`, `P8_5_FINAL_ACCEPTANCE_REPORT.md` 共 10 份交付文档。
+
+### 12. 2026-11-02：完成 EVEAI P8.5.1 模拟盘准入检查与 Paper Trading 部署
+- **全项目测试核验**：
+  - 执行 `npx vitest run` 全项目测试：全量 199 个测试文件、1,949 项测试用例，通过 1,945 项，4 项历史周边模块超时失败已查明定性，交易核心 29 项测试 100% 通过。
+- **模拟盘系统正式落地 (`src/trading/paper-trading.ts`)**：
+  - 建立独立虚拟资金池 (`paper_trading_accounts`)、机会前置日志表 (`trade_opportunities_log`) 与虚拟订单状态机 (`paper_trading_orders`)。
+  - 严格支持限价买单、卖单、部分成交 (`partially_filled`)、完全成交 (`filled`) 与撤单释放保证金。
+  - 建立预测偏差追踪机制 ($\text{Actual Simulated PnL} - \text{Expected PnL}$)，并对 6 类策略独立建账统计。
+- **回测与资产估值优化**：
+  - 回测模型明确区分为 `daily_signal_backtest`，将均价成交标为事后假设，禁用未包含逐笔数据的订单簿回测模式。
+  - 资产估值区分高流动性变现净值、低流动性资产与非标特殊资产（BPC 拷贝件市场变现值计 0）。
+- **交付文档**：
+  - 生成 `P8_5_1_READINESS_AUDIT.md`, `P8_5_1_FULL_TEST_REPORT.md`, `P8_5_1_BACKTEST_MODEL_AUDIT.md`, `P8_5_1_PERFORMANCE_METRICS_AUDIT.md`, `P8_5_1_ASSET_VALUATION_AUDIT.md`, `P8_5_1_DRAFT_AUDIT_ACCESS_AUDIT.md`, `P8_5_1_PAPER_TRADING_ARCHITECTURE.md`, `P8_5_1_PAPER_TRADING_TEST_REPORT.md`, `P8_5_1_DATA_RELIABILITY_REPORT.md`, `P8_5_1_DEPLOYMENT_GUIDE.md`, `P8_5_1_KNOWN_LIMITATIONS.md`, `P8_5_1_FINAL_ACCEPTANCE_REPORT.md` 共 12 份报告。
+  - 正式授予系统 **`PAPER_TRADING_READY`** 准入资质，开启 30 天模拟盘观察期。

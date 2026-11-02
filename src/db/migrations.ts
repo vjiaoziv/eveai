@@ -738,10 +738,61 @@ function ensureWebAgentRequests(db: Db): void {
       quantity        INTEGER NOT NULL,
       cost_price      REAL NOT NULL,
       status          TEXT NOT NULL DEFAULT 'holding' CHECK (status IN ('holding', 'sold')),
+      strategy_type   TEXT NOT NULL DEFAULT 'regional_hauling',
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       sold_at         TEXT,
       sold_price      REAL,
       realized_pnl    REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS paper_trading_accounts (
+      account_id          TEXT PRIMARY KEY,
+      character_id        INTEGER NOT NULL,
+      initial_cash        REAL NOT NULL DEFAULT 10000000,
+      available_cash      REAL NOT NULL DEFAULT 10000000,
+      escrow_locked       REAL NOT NULL DEFAULT 0,
+      total_realized_pnl  REAL NOT NULL DEFAULT 0,
+      total_fees_paid     REAL NOT NULL DEFAULT 0,
+      status              TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'stopped')),
+      created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS trade_opportunities_log (
+      opportunity_id      TEXT PRIMARY KEY,
+      strategy_type       TEXT NOT NULL,
+      type_id             INTEGER NOT NULL,
+      region_id           INTEGER NOT NULL,
+      detected_at         TEXT NOT NULL DEFAULT (datetime('now')),
+      expected_buy_price  REAL NOT NULL,
+      expected_sell_price REAL NOT NULL,
+      proposed_quantity   INTEGER NOT NULL,
+      expected_fees       REAL NOT NULL,
+      expected_net_profit REAL NOT NULL,
+      expected_roi        REAL NOT NULL,
+      risk_rating         TEXT NOT NULL,
+      rejection_reason    TEXT,
+      data_quality_json   TEXT,
+      outcome_status      TEXT NOT NULL DEFAULT 'pending' CHECK (outcome_status IN ('pending', 'simulated_filled', 'vetoed', 'expired', 'simulated_partial')),
+      actual_simulated_pnl REAL,
+      prediction_variance  REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS paper_trading_orders (
+      order_id            TEXT PRIMARY KEY,
+      account_id          TEXT NOT NULL,
+      opportunity_id      TEXT,
+      character_id        INTEGER NOT NULL,
+      type_id             INTEGER NOT NULL,
+      strategy_type       TEXT NOT NULL DEFAULT 'regional_hauling',
+      order_type          TEXT NOT NULL CHECK (order_type IN ('buy', 'sell')),
+      price               REAL NOT NULL,
+      quantity            INTEGER NOT NULL,
+      filled_quantity     INTEGER NOT NULL DEFAULT 0,
+      status              TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'partially_filled', 'filled', 'cancelled', 'expired')),
+      fees_paid           REAL NOT NULL DEFAULT 0,
+      created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
 
@@ -763,4 +814,5 @@ const isMain = process.argv[1]
 if (isMain) {
   void main();
 }
+
 
