@@ -155,7 +155,7 @@ describe('P8.5.2 Advanced Engineering Stress & Security Test Suite (A - R Scenar
     // Calling DraftSystem.createDraft directly MUST throw and block draft creation
     expect(() => {
       DraftSystem.createDraft(db, 3001, badOpp);
-    }).toThrow(/【风控一票否决】/);
+    }).toThrow(/【风控一票否决】|【凭证缺失】/);
   });
 
   it('Scenario I: Audit-revoked drafts blocked across all state mutations', () => {
@@ -246,5 +246,6 @@ describe('P8.5.2 Advanced Engineering Stress & Security Test Suite (A - R Scenar
     expect(toolsCode).not.toContain('trash_inventory_item');
   });
 });
+
 
 

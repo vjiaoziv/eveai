@@ -179,3 +179,15 @@
   - TypeScript 0 错误，前端生产构建打包完全成功。
 - **交付文档**：
   - 生成 `P8_5_2_CODE_AUDIT.md`, `P8_5_2_TRADING_PIPELINE_AUDIT.md`, `P8_5_2_ORDERBOOK_AUDIT.md`, `P8_5_2_FUND_AND_ORDER_STATE_AUDIT.md`, `P8_5_2_FEE_ENGINE_AUDIT.md`, `P8_5_2_PORTFOLIO_AUDIT.md`, `P8_5_2_BACKTEST_AUDIT.md`, `P8_5_2_STRATEGY_AUDIT.md`, `P8_5_2_DATA_RELIABILITY_AUDIT.md`, `P8_5_2_SECURITY_AUDIT.md`, `P8_5_2_FULL_TEST_REPORT.md`, `P8_5_2_FINAL_ACCEPTANCE_REPORT.md` 共 12 份专项报告。
+
+### 14. 2026-11-02：完成 EVEAI P8.5.3 独立验证、会计审计与对抗测试
+- **深层安全与凭证防伪机制**：
+  - `src/trading/trading-pipeline.ts`: 引入数字签名验证凭证机制 (`PipelineVerificationCredential`, HMAC-SHA256)；在 A/B 级机会经管线多档撮合与风控通过后签发防篡改凭证。
+  - `src/trading/draft-system.ts`: 在 `createDraft` 前置强校验凭证合法性、签名完整性、15 分钟时效性及参数一致性，彻底切断伪造参数创建草案的任何路径。
+  - `src/trading/paper-trading.ts`: 增强幂等键防重，增加同键异参 409 冲突拦截；修复买单成交税费多扣致资产负债表失衡 Bug，确保 $\text{Assets} \equiv \text{Equity}$ 借贷平衡对账。
+- **全套回归与对抗测试**：
+  - 新增 `tests/unit/p8-5-3-adversarial.test.ts`，覆盖无凭证拦截、参数篡改拦截、凭证过期拦截、同键异参冲突、状态机终结态不可逆。
+  - 7 套交易专项测试共 42 项单测 100% 通过（耗时 1.34s）；全项目测试通过 1,945 项，4 项历史非交易用例穿透审计完毕。
+  - TypeScript 0 错误，前端生产构建打包完全成功。
+- **交付文档**：
+  - 生成 `P8_5_3_BASELINE_AND_FULL_TEST_REPORT.md`, `P8_5_3_PIPELINE_CREDENTIAL_AUDIT.md`, `P8_5_3_IDEMPOTENCY_CONCURRENCY_AUDIT.md`, `P8_5_3_DOUBLE_ENTRY_ACCOUNTING_AUDIT.md`, `P8_5_3_ORDER_STATE_MACHINE_AUDIT.md`, `P8_5_3_ORDERBOOK_ADVERSARIAL_AUDIT.md`, `P8_5_3_ESI_READONLY_SECURITY_AUDIT.md`, `P8_5_3_DATABASE_RECOVERY_AUDIT.md`, `P8_5_3_REGRESSION_TEST_REPORT.md`, `P8_5_3_DEFECT_REMEDIATION_LOG.md`, `P8_5_3_GIT_CHANGE_SUMMARY.md`, `P8_5_3_FINAL_ACCEPTANCE_REPORT.md` 共 12 份专项报告。

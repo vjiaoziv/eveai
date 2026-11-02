@@ -99,6 +99,22 @@ export interface DataQualityMetrics {
 
 export type OpportunityRating = 'A' | 'B' | 'C' | 'D';
 
+export interface PipelineVerificationCredential {
+  credentialId: string;
+  typeId: number;
+  strategy: StrategyType;
+  buyStationId: number;
+  sellStationId: number;
+  suggestedBuyPrice: number;
+  suggestedSellPrice: number;
+  suggestedQuantity: number;
+  capitalRequired: number;
+  expectedNetProfit: number;
+  opportunityRating: OpportunityRating;
+  verifiedAt: string;
+  signature: string;
+}
+
 export interface TradeOpportunity {
   typeId: number;
   typeName: string;
@@ -128,6 +144,7 @@ export interface TradeOpportunity {
   riskVetoReason?: string;
   stressTest?: StressTestResults;
   dataQuality?: DataQualityMetrics;
+  pipelineCredential?: PipelineVerificationCredential;
 }
 
 export interface TradeDraft {
@@ -157,3 +174,4 @@ export interface TradeDraft {
   actualSellPrice?: number;
   actualProfit?: number;
 }
+

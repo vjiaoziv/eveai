@@ -1,3 +1,4 @@
+import { createHmac, randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import { DataCenter } from './data-center.js';
 import { FeeEngine, ALPHA_DEFAULT_SKILLS } from './fee-engine.js';
@@ -7,9 +8,88 @@ import { DraftSystem } from './draft-system.js';
 import type { 
   FeeContext, 
   OpportunityRating, 
+  PipelineVerificationCredential,
   TradeDraft, 
   TradeOpportunity 
 } from './types.js';
+
+const PIPELINE_SIGNING_SECRET = 'eveai-deterministic-pipeline-signing-key-v1';
+
+export function signPipelineCredential(
+  data: Omit<PipelineVerificationCredential, 'signature'>,
+  secret = PIPELINE_SIGNING_SECRET,
+): string {
+  const message = [
+    data.credentialId,
+    data.typeId,
+    data.strategy,
+    data.buyStationId,
+    data.sellStationId,
+    data.suggestedBuyPrice,
+    data.suggestedSellPrice,
+    data.suggestedQuantity,
+    data.capitalRequired,
+    data.expectedNetProfit,
+    data.opportunityRating,
+    data.verifiedAt,
+  ].join('|');
+  return createHmac('sha256', secret).update(message).digest('hex');
+}
+
+export function validatePipelineCredential(
+  opp: TradeOpportunity,
+  secret = PIPELINE_SIGNING_SECRET,
+  maxAgeMs = 15 * 60 * 1000,
+): { valid: boolean; reason?: string } {
+  if (!opp.pipelineCredential) {
+    return { valid: false, reason: '【凭证缺失】该交易机会未包含统一决策管线签发的验证凭证，严禁创建草案！' };
+  }
+
+  const cred = opp.pipelineCredential;
+  if (cred.opportunityRating === 'D' || opp.opportunityRating === 'D' || opp.riskVetoReason) {
+    return { valid: false, reason: '【风控一票否决】D 级或被否决的高危机会不得签发或使用执行凭证！' };
+  }
+
+  const verifiedTs = new Date(cred.verifiedAt.endsWith('Z') ? cred.verifiedAt : cred.verifiedAt + 'Z').getTime();
+  if (Date.now() - verifiedTs > maxAgeMs) {
+    return { valid: false, reason: '【凭证过期】该凭证已超过 15 分钟有效期，严禁使用陈旧行情创建草案！' };
+  }
+
+  const expectedSig = signPipelineCredential({
+    credentialId: cred.credentialId,
+    typeId: cred.typeId,
+    strategy: cred.strategy,
+    buyStationId: cred.buyStationId,
+    sellStationId: cred.sellStationId,
+    suggestedBuyPrice: cred.suggestedBuyPrice,
+    suggestedSellPrice: cred.suggestedSellPrice,
+    suggestedQuantity: cred.suggestedQuantity,
+    capitalRequired: cred.capitalRequired,
+    expectedNetProfit: cred.expectedNetProfit,
+    opportunityRating: cred.opportunityRating,
+    verifiedAt: cred.verifiedAt,
+  }, secret);
+
+  if (cred.signature !== expectedSig) {
+    return { valid: false, reason: '【凭证篡改】凭证数字签名验证失败，参数已被篡改或由未授权模块伪造！' };
+  }
+
+  if (
+    cred.typeId !== opp.typeId ||
+    cred.strategy !== opp.strategy ||
+    cred.buyStationId !== opp.buyStationId ||
+    cred.sellStationId !== opp.sellStationId ||
+    cred.suggestedBuyPrice !== opp.suggestedBuyPrice ||
+    cred.suggestedSellPrice !== opp.suggestedSellPrice ||
+    cred.suggestedQuantity !== opp.suggestedQuantity ||
+    cred.capitalRequired !== opp.capitalRequired ||
+    cred.opportunityRating !== opp.opportunityRating
+  ) {
+    return { valid: false, reason: '【参数篡改】机会当前参数与凭证内签章的原始计算快照不吻合！' };
+  }
+
+  return { valid: true };
+}
 
 export interface PipelineEvaluationResult {
   opportunity: TradeOpportunity;
@@ -250,3 +330,4 @@ export class TradingPipeline {
     };
   }
 }
+

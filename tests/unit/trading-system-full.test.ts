@@ -1,3 +1,4 @@
+import { signPipelineCredential } from '../../src/trading/trading-pipeline.js';
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { DataCenter } from '../../src/trading/data-center.js';
@@ -160,6 +161,22 @@ describe('Trading System Comprehensive Verification', () => {
       rationale: 'Test',
     };
 
+        opp.opportunityRating = 'A';
+    const u = {
+      credentialId: 'CRED-FULL-01',
+      typeId: opp.typeId,
+      strategy: opp.strategy,
+      buyStationId: opp.buyStationId,
+      sellStationId: opp.sellStationId,
+      suggestedBuyPrice: opp.suggestedBuyPrice,
+      suggestedSellPrice: opp.suggestedSellPrice,
+      suggestedQuantity: opp.suggestedQuantity,
+      capitalRequired: opp.capitalRequired,
+      expectedNetProfit: opp.expectedNetProfit,
+      opportunityRating: 'A' as const,
+      verifiedAt: new Date().toISOString(),
+    };
+    opp.pipelineCredential = { ...u, signature: signPipelineCredential(u) };
     const draft = DraftSystem.createDraft(db, 1001, opp);
     expect(draft.status).toBe('draft');
 
@@ -218,4 +235,6 @@ describe('Trading System Comprehensive Verification', () => {
     expect(typeof summary.capitalTurnoverRate).toBe('number');
   });
 });
+
+
 

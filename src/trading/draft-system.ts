@@ -1,3 +1,4 @@
+import { validatePipelineCredential } from './trading-pipeline.js';
 import type { Db } from '../db/sqlite.js';
 import type { TradeDraft, TradeOpportunity } from './types.js';
 
@@ -33,9 +34,10 @@ export class DraftSystem {
     opp: TradeOpportunity,
     validHours = 24,
   ): TradeDraft {
-    // Stage 8 Guardrail: D-grade or vetoed opportunities can NEVER generate a draft in any pathway
-    if (opp.opportunityRating === 'D' || opp.riskVetoReason) {
-      throw new Error('【风控一票否决】该交易机会评级为 D (' + (opp.riskVetoReason || '高风险未通过') + ')，严禁生成交易订单草案！');
+    // Stage 8 Guardrail: Strictly verify Cryptographic Pipeline Verification Credential
+    const verification = validatePipelineCredential(opp);
+    if (!verification.valid) {
+      throw new Error(verification.reason || '【凭证失效】该机会未通过统一交易管线加密签章核验！');
     }
 
     const draftId = this.generateDraftId(db);
@@ -222,5 +224,6 @@ export class DraftSystem {
     }));
   }
 }
+
 
 

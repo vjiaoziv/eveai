@@ -218,8 +218,20 @@ export class PaperTradingSystem {
     }
 
     if (idempotencyKey) {
-      const existing = db.prepare('SELECT order_id FROM paper_trading_orders WHERE idempotency_key = ?').get(idempotencyKey) as any;
+      const existing = db.prepare('SELECT * FROM paper_trading_orders WHERE idempotency_key = ?').get(idempotencyKey) as any;
       if (existing) {
+        if (
+          existing.type_id !== typeId ||
+          existing.order_type !== orderType ||
+          existing.price !== price ||
+          existing.quantity !== quantity ||
+          existing.character_id !== characterId
+        ) {
+          return {
+            success: false,
+            error: '【幂等冲突】相同 idempotencyKey (' + idempotencyKey + ') 不能用于不同参数的订单！已有订单参数: typeId=' + existing.type_id + ', price=' + existing.price + ', qty=' + existing.quantity,
+          };
+        }
         return { success: true, orderId: existing.order_id };
       }
     }
@@ -576,3 +588,4 @@ export class PaperTradingSystem {
     };
   }
 }
+
