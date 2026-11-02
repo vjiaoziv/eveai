@@ -34,11 +34,13 @@ export class DraftSystem {
     opp: TradeOpportunity,
     validHours = 24,
   ): TradeDraft {
-    const draftId = this.generateDraftId(db);
+    return db.transaction(() => {
+      const draftId = this.generateDraftId(db);
 
-    // Stage 8 Guardrail: Cryptographic verification + atomic anti-replay consumption
-    validateAndConsumePipelineCredential(db, opp, characterId, draftId);
-    const now = new Date();
+      // Stage 8 Guardrail: verification, single-use consumption and draft write
+      // must commit or roll back as one unit.
+      validateAndConsumePipelineCredential(db, opp, characterId, draftId);
+      const now = new Date();
     const expiresAt = new Date(now.getTime() + validHours * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19);
 
     const draft: TradeDraft = {
@@ -78,7 +80,8 @@ export class DraftSystem {
       draft.createdAt, draft.expiresAt
     );
 
-    return draft;
+      return draft;
+    })();
   }
 
   /**

@@ -102,7 +102,7 @@ export type OpportunityRating = 'A' | 'B' | 'C' | 'D';
 export interface PipelineVerificationCredential {
   credentialId: string;
   characterId: number;
-  opportunityId?: string;
+  opportunityId: string;
   typeId: number;
   strategy: StrategyType;
   buyStationId: number;
@@ -122,6 +122,8 @@ export interface PipelineVerificationCredential {
 }
 
 export interface TradeOpportunity {
+  opportunityId?: string;
+  marketSnapshotHash?: string;
   typeId: number;
   typeName: string;
   zhName?: string;

@@ -61,7 +61,8 @@ async function cmdCapital() {
   console.log(`\n=== 飞行员财务与风险限额概况 (${acc?.character_name || charId}) ===`);
   console.log(`• 钱包可用现金: ${bd.walletBalance.toLocaleString()} ISK`);
   console.log(`• 市场买单锁定 (Escrow): ${bd.escrowLocked.toLocaleString()} ISK`);
-  console.log(`• 个人库存估值: ${bd.inventoryEstimatedValue.toLocaleString()} ISK`);
+  const invVal = (bd.liquidInventoryValue || 0) + (bd.illiquidInventoryValue || 0);
+  console.log(`• 个人库存估值: ${invVal.toLocaleString()} ISK (即时清算深度: ${(bd.liquidInventoryValue || 0).toLocaleString()} ISK)`);
   console.log(`• 总净资产估值: ${bd.totalNetWorth.toLocaleString()} ISK`);
   console.log(`----------------------------------------------------`);
   console.log(`• 强制 20% 现金储备底线: ${bd.cashReserveRequired.toLocaleString()} ISK (禁止挪用)`);
@@ -69,6 +70,109 @@ async function cmdCapital() {
   console.log(`• 单一物品投资上限 (15%): ${bd.singleItemCapIsk.toLocaleString()} ISK`);
   console.log(`• 单一品类投资上限 (30%): ${bd.categoryCapIsk.toLocaleString()} ISK`);
   console.log(`• T1 工业舰单趟货运防强杀上限: ${DEFAULT_RISK_LIMITS.maxHaulingCargoIsk.toLocaleString()} ISK\n`);
+}
+
+async function cmdAssets(stationArg?: string) {
+  const db = getDb();
+  const charId = getLinkedCharId(db);
+  if (!charId) {
+    console.log("尚未关联角色。请在浏览器 http://localhost:3000 完成 EVE SSO 登录。");
+    return;
+  }
+  const stationId = stationArg && /^\d+$/.test(stationArg) ? Number(stationArg) : 60003760;
+  const stationRow = db.prepare("SELECT name, zh_name FROM sde_stations WHERE station_id = ?").get(stationId) as any;
+  const stationName = stationRow?.zh_name || stationRow?.name || `Station ${stationId}`;
+
+  const assets = db.prepare(`
+    SELECT a.item_id, a.type_id, t.name as en_name, t.zh_name,
+           g.name as group_name, c.name as category_name,
+           a.quantity, a.location_flag, a.is_singleton
+    FROM character_assets a
+    LEFT JOIN sde_types t ON a.type_id = t.type_id
+    LEFT JOIN sde_groups g ON t.group_id = g.group_id
+    LEFT JOIN sde_categories c ON g.category_id = c.category_id
+    WHERE a.character_id = ? AND a.location_id = ?
+  `).all(charId, stationId) as any[];
+
+  console.log(`\n=== 空间站机库资产与变现评估 ===`);
+  console.log(`飞行员 ID: ${charId} | 目标站点: [${stationId}] ${stationName}`);
+  console.log(`库存物品项: ${assets.length} 种\n`);
+
+  if (assets.length === 0) {
+    console.log("该空间站机库内未查询到已同步的资产。");
+    return;
+  }
+
+  const items = [];
+  for (const a of assets) {
+    const topBuy = db.prepare(`
+      SELECT price, volume_remain
+      FROM market_orders
+      WHERE region_id = 10000002 AND location_id = ? AND type_id = ? AND is_buy_order = 1
+      ORDER BY price DESC
+      LIMIT 1
+    `).get(stationId, a.type_id) as any;
+
+    const lowestSell = db.prepare(`
+      SELECT price, volume_remain
+      FROM market_orders
+      WHERE region_id = 10000002 AND location_id = ? AND type_id = ? AND is_buy_order = 0
+      ORDER BY price ASC
+      LIMIT 1
+    `).get(stationId, a.type_id) as any;
+
+    const buyPrice = topBuy?.price || 0;
+    const sellPrice = lowestSell?.price || 0;
+    const salesTax = 0.075;
+    const brokerFee = 0.03;
+
+    const immediateNet = Math.round(a.quantity * buyPrice * (1 - salesTax));
+    const sellOrderNet = Math.round(a.quantity * sellPrice * (1 - salesTax - brokerFee));
+    const spreadPct = sellPrice > 0 && buyPrice > 0 ? ((sellPrice - buyPrice) / sellPrice) * 100 : 0;
+
+    let recommendation = "保留自用或观望";
+    if (spreadPct > 50 && sellOrderNet > 1000000) {
+      recommendation = "买单价格极低(虚假低价陷阱)！建议挂卖单慢慢出";
+    } else if (spreadPct <= 10 && immediateNet > 500000) {
+      recommendation = "买卖差价极小且深度充足，建议直接吃买单极速变现";
+    } else if (sellOrderNet > immediateNet * 1.3 && sellOrderNet > 500000) {
+      recommendation = "挂卖单利润高 30% 以上，建议挂单出售";
+    } else if (immediateNet > 0) {
+      recommendation = "可直接吃买单变现";
+    }
+
+    items.push({
+      typeId: a.type_id,
+      name: a.zh_name || a.en_name,
+      category: a.category_name,
+      group: a.group_name,
+      quantity: a.quantity,
+      buyPrice,
+      sellPrice,
+      spreadPct: Math.round(spreadPct * 10) / 10,
+      immediateNet,
+      sellOrderNet,
+      recommendation,
+    });
+  }
+
+  items.sort((a, b) => Math.max(b.immediateNet, b.sellOrderNet) - Math.max(a.immediateNet, a.sellOrderNet));
+
+  const totalImmediate = items.reduce((s, i) => s + i.immediateNet, 0);
+  const totalSellOrder = items.reduce((s, i) => s + i.sellOrderNet, 0);
+
+  console.log("【前 20 项高价值资产变现清单】");
+  for (const it of items.slice(0, 20)) {
+    console.log(`• [${it.typeId}] ${it.name} x${it.quantity.toLocaleString()} (${it.category} / ${it.group})`);
+    console.log(`  买单价: ${it.buyPrice.toLocaleString()} | 卖单价: ${it.sellPrice.toLocaleString()} ISK (价差 ${it.spreadPct}%)`);
+    console.log(`  吃买单净收益: ${it.immediateNet.toLocaleString()} ISK | 挂卖单净收益: ${it.sellOrderNet.toLocaleString()} ISK`);
+    console.log(`  -> 建议: ${it.recommendation}\n`);
+  }
+
+  console.log("----------------------------------------------------");
+  console.log(`机库全量吃买单极速变现预估: ${totalImmediate.toLocaleString()} ISK`);
+  console.log(`机库全量挂卖单分批变现预估: ${totalSellOrder.toLocaleString()} ISK`);
+  console.log("----------------------------------------------------\n");
 }
 
 async function cmdScanStation(stationArg?: string) {
@@ -304,6 +408,17 @@ async function cmdAsk(prompt: string) {
       throw new Error(`Could not obtain CSRF token from daemon: ${JSON.stringify(sData)}`);
     }
 
+    // 确保新生成的 CLI 对话 Session 继承已认证角色所在的用户体系
+    const db = getDb();
+    const charRow = db.prepare("SELECT user_id, character_id FROM eve_character_links LIMIT 1").get() as any;
+    if (charRow) {
+      const sessionRow = db.prepare("SELECT user_id, chat_id FROM web_sessions ORDER BY created_at DESC LIMIT 1").get() as any;
+      if (sessionRow && sessionRow.user_id !== charRow.user_id) {
+        db.prepare("UPDATE web_sessions SET user_id = ? WHERE chat_id = ?").run(charRow.user_id, sessionRow.chat_id);
+        db.prepare("INSERT OR IGNORE INTO eve_character_links (chat_id, character_id, user_id) VALUES (?, ?, ?)").run(sessionRow.chat_id, charRow.character_id, charRow.user_id);
+      }
+    }
+
     const cResp = await fetch(`${BASE_URL}/api/web/chat`, {
       method: 'POST',
       headers: {
@@ -379,6 +494,10 @@ async function main() {
     case 'capital':
       await cmdCapital();
       break;
+    case 'assets':
+    case 'inventory':
+      await cmdAssets(args[1]);
+      break;
     case 'scan-station':
       await cmdScanStation(args[1]);
       break;
@@ -418,6 +537,7 @@ async function main() {
 
 投资与决策引擎 (P1-P4):
   eve-agent capital                 查看角色动态资金、20%强制储备金与单品限额
+  eve-agent assets [station]        查看空间站机库资产与即时变现/挂单评估 (默认 Jita 4-4)
   eve-agent scan-station [station]  执行站内套利扫描 (默认 Jita 4-4)
   eve-agent scan-haul [0|1|2]       执行高安跨区航运套利扫描 (0=Dodixie, 1=Hek, 2=Rens)
   eve-agent drafts                  查看已生成的交易订单草案清单
@@ -431,5 +551,3 @@ main().catch(err => {
   console.error(err);
   process.exit(1);
 });
-
-

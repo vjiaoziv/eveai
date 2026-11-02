@@ -13,38 +13,86 @@ import type {
   TradeOpportunity 
 } from './types.js';
 
-export const PIPELINE_KEY_STORE: Record<string, string> = {
-  'v1': 'eveai-deterministic-pipeline-signing-key-v1',
-};
+function loadPipelineKeyStore(): Record<string, string> {
+  const raw = process.env.EVEAI_PIPELINE_SIGNING_KEYS;
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] =>
+        typeof entry[0] === 'string' && entry[0].length > 0 &&
+        typeof entry[1] === 'string' && entry[1].length > 0,
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+// Production keys must arrive through the environment; no signing secret is
+// committed in source. Tests inject a non-production key via tests/setup.ts.
+export const PIPELINE_KEY_STORE: Record<string, string> = loadPipelineKeyStore();
 
 export function getPipelineKey(keyId: string): string | undefined {
   return PIPELINE_KEY_STORE[keyId];
 }
 
+function requireInteger(name: string, value: number, min = Number.MIN_SAFE_INTEGER): number {
+  if (!Number.isSafeInteger(value) || value < min) throw new Error(`【凭证参数非法】${name} 必须是不小于 ${min} 的安全整数`);
+  return value;
+}
+
+function requireMoney(name: string, value: number): number {
+  if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER / 100) {
+    throw new Error(`【凭证参数非法】${name} 必须是有限 ISK 数值`);
+  }
+  const cents = value * 100;
+  if (Math.abs(cents - Math.round(cents)) > 1e-8) {
+    throw new Error(`【凭证参数非法】${name} 最多支持两位小数`);
+  }
+  return Math.round(cents) / 100;
+}
+
+function requireText(name: string, value: string, pattern?: RegExp): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 256) {
+    throw new Error(`【凭证参数非法】${name} 必须是非空且长度受控的字符串`);
+  }
+  if (pattern && !pattern.test(value)) throw new Error(`【凭证参数非法】${name} 格式不合法`);
+  return value;
+}
+
+function requireIso(name: string, value: string): string {
+  const ts = Date.parse(value);
+  if (!Number.isFinite(ts)) throw new Error(`【凭证参数非法】${name} 必须是有效 ISO 时间`);
+  return new Date(ts).toISOString();
+}
+
 export function buildCanonicalCredentialPayload(
   data: Omit<PipelineVerificationCredential, 'signature'>,
 ): string {
-  return [
-    'v2',
-    data.keyId,
-    data.credentialId,
-    data.characterId,
-    data.opportunityId || '',
-    data.typeId,
-    data.strategy,
-    data.buyStationId,
-    data.sellStationId,
-    data.suggestedBuyPrice.toFixed(2),
-    data.suggestedSellPrice.toFixed(2),
-    data.suggestedQuantity,
-    data.capitalRequired.toFixed(2),
-    data.expectedNetProfit.toFixed(2),
-    data.opportunityRating,
-    data.marketSnapshotHash,
-    data.verifiedAt,
-    data.expiresAt,
-    data.nonce,
-  ].join('|');
+  const canonical = {
+    schema: 'eveai-pipeline-credential-v3',
+    keyId: requireText('keyId', data.keyId),
+    credentialId: requireText('credentialId', data.credentialId),
+    characterId: requireInteger('characterId', data.characterId, 1),
+    opportunityId: requireText('opportunityId', data.opportunityId),
+    typeId: requireInteger('typeId', data.typeId, 1),
+    strategy: requireText('strategy', data.strategy),
+    buyStationId: requireInteger('buyStationId', data.buyStationId, 1),
+    sellStationId: requireInteger('sellStationId', data.sellStationId, 1),
+    suggestedBuyPrice: requireMoney('suggestedBuyPrice', data.suggestedBuyPrice),
+    suggestedSellPrice: requireMoney('suggestedSellPrice', data.suggestedSellPrice),
+    suggestedQuantity: requireInteger('suggestedQuantity', data.suggestedQuantity, 1),
+    capitalRequired: requireMoney('capitalRequired', data.capitalRequired),
+    expectedNetProfit: requireMoney('expectedNetProfit', data.expectedNetProfit),
+    opportunityRating: requireText('opportunityRating', data.opportunityRating, /^[ABCD]$/),
+    marketSnapshotHash: requireText('marketSnapshotHash', data.marketSnapshotHash, /^[a-f0-9]{16,64}$/i),
+    verifiedAt: requireIso('verifiedAt', data.verifiedAt),
+    expiresAt: requireIso('expiresAt', data.expiresAt),
+    nonce: requireText('nonce', data.nonce),
+  };
+  return JSON.stringify(canonical);
 }
 
 export function signPipelineCredential(
@@ -61,6 +109,7 @@ export function signPipelineCredential(
 
 function safeCompareHex(a: string, b: string): boolean {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (!/^[0-9a-f]+$/i.test(a) || !/^[0-9a-f]+$/i.test(b) || a.length % 2 !== 0 || b.length % 2 !== 0) return false;
   const bufA = Buffer.from(a, 'hex');
   const bufB = Buffer.from(b, 'hex');
   if (bufA.length !== bufB.length || bufA.length === 0) return false;
@@ -124,6 +173,12 @@ export function validatePipelineCredential(
     return { valid: false, reason: '【凭证篡改】凭证数字签名验证失败，参数已被篡改或由未授权模块伪造！' };
   }
 
+  if (Math.abs(cred.expectedNetProfit - opp.expectedNetProfit) > 0.01) {
+    return { valid: false, reason: '【参数篡改】机会当前预期净利润与凭证签章值不吻合！' };
+  }
+  if (cred.marketSnapshotHash !== opp.marketSnapshotHash) {
+    return { valid: false, reason: '【行情快照不一致】凭证绑定的行情快照与当前机会不一致！' };
+  }
   if (
     cred.typeId !== opp.typeId ||
     cred.strategy !== opp.strategy ||
@@ -136,6 +191,10 @@ export function validatePipelineCredential(
     cred.opportunityRating !== opp.opportunityRating
   ) {
     return { valid: false, reason: '【参数篡改】机会当前参数与凭证内签章的原始计算快照不吻合！' };
+  }
+
+  if (!cred.opportunityId || cred.opportunityId !== opp.opportunityId) {
+    return { valid: false, reason: '【机会绑定缺失】凭证未绑定当前交易机会 ID，禁止脱离原始评估结果使用！' };
   }
 
   return { valid: true };
@@ -324,7 +383,8 @@ export class TradingPipeline {
       sells: originBook.sells.slice(0, 3).map(s => ({ p: s.price, v: s.volumeRemain })),
       buys: destBook.buys.slice(0, 3).map(b => ({ p: b.price, v: b.volumeRemain })),
     });
-    const marketSnapshotHash = createHash('sha256').update(snapshotContent).digest('hex').slice(0, 16);
+    const marketSnapshotHash = createHash('sha256').update(snapshotContent).digest('hex');
+    const opportunityId = 'OPP-' + Date.now() + '-' + randomUUID().slice(0, 8);
 
     // Stage 7.5: Generate Cryptographic Pipeline Verification Credential for Approved A/B grades
     let pipelineCredential: PipelineVerificationCredential | undefined;
@@ -335,6 +395,7 @@ export class TradingPipeline {
       const unsigned = {
         credentialId: 'CRED-' + Date.now() + '-' + randomUUID().slice(0, 8),
         characterId: candidate.characterId || 0,
+        opportunityId,
         typeId: candidate.typeId,
         strategy: candidate.strategy,
         buyStationId: candidate.originStationId,
@@ -358,6 +419,8 @@ export class TradingPipeline {
     }
 
     const opportunity: TradeOpportunity = {
+      opportunityId,
+      marketSnapshotHash,
       typeId: candidate.typeId,
       typeName: meta.en_name,
       zhName: meta.zh_name || undefined,

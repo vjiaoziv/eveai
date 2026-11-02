@@ -206,3 +206,21 @@
   - TypeScript 0 错误，前端生产构建打包完全成功。
 - **文档交付**:
   - 在 `docs/audit/P8.5.4/` 目录下交付 12 份标准审计报告 (`01-baseline-and-git-audit.md` 至 `12-p8-5-4-final-verdict.md`)。
+
+### 16. 2026-11-02：完成 EVEAI P8.5.5 独立证据审计、密码学授权复核与复式记账最终验收
+- **凭证密码学加固**:
+  - `src/trading/trading-pipeline.ts`: 将管道符拼接规范化升级为 `eveai-pipeline-credential-v3` JSON；新增字段边界、整数、金额精度、ISO 时间和哈希格式校验。
+  - `PipelineVerificationCredential.opportunityId` 改为必填；`TradeOpportunity` 增加 `opportunityId` 与 `marketSnapshotHash`，并在消费时校验机会 ID、行情快照和预期净利润。
+  - `safeCompareHex` 增加严格十六进制和偶数长度校验。
+  - `PIPELINE_KEY_STORE` 改由 `EVEAI_PIPELINE_SIGNING_KEYS` 环境变量加载，移除工作树硬编码签名密钥。
+- **事务与复式记账修复**:
+  - `DraftSystem.createDraft` 将凭证消费与草案写入放入同一 SQLite 事务，新增强制插入失败回滚测试。
+  - `paper_trading_journal` 将成交费用拆分为 `order_spend`/`order_revenue` 与 `fee_payment`；`paper_trading_orders` 新增 `escrow_locked`、`fee_reserved`，部分成交撤单精确释放剩余担保金。
+  - 新增独立 journal replay 测试，不调用 `verifyAccountBalance`，逐笔重建现金和冻结资金。
+- **测试与质量门禁**:
+  - 新增 `tests/unit/p8-5-5-a01-a24.test.ts`、`p8-5-5-crypto-atomicity.test.ts`、`p8-5-5-independent-ledger.test.ts`、`p8-5-5-esi-runtime-guard.test.ts`。
+  - 修复 `map-route-clear.test.ts` 未知目的地请求超时；修复 lint unused warnings。
+  - P8.5.5 专项测试 29 项通过；TypeScript、Build、Lint 通过。
+- **审计交付**:
+  - 在 `docs/audit/P8.5.5/` 交付 12 份独立审计报告，最终裁定为 `PAPER_TRADING_BLOCKED`：UI POST ESI 行为和并行回归 flaky 仍未满足严格只读与全量绿灯要求。
+  - P8.5.5 最终提交：`the current P8.5.5 HEAD (resolve with git rev-parse HEAD)`。

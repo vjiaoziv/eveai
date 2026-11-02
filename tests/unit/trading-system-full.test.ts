@@ -138,6 +138,8 @@ describe('Trading System Comprehensive Verification', () => {
 
     // Create a draft
     const opp: TradeOpportunity = {
+      opportunityId: 'OPP-FULL-01',
+      marketSnapshotHash: '0123456789abcdef',
       typeId: 34,
       typeName: 'Tritanium',
       volumeM3: 0.01,
@@ -166,6 +168,7 @@ describe('Trading System Comprehensive Verification', () => {
     const u = {
       credentialId: 'CRED-FULL-01',
       characterId: 1001,
+      opportunityId: opp.opportunityId,
       typeId: opp.typeId,
       strategy: opp.strategy,
       buyStationId: opp.buyStationId,
@@ -176,7 +179,7 @@ describe('Trading System Comprehensive Verification', () => {
       capitalRequired: opp.capitalRequired,
       expectedNetProfit: opp.expectedNetProfit,
       opportunityRating: 'A' as const,
-      marketSnapshotHash: 'snaph1234567890',
+      marketSnapshotHash: '0123456789abcdef',
       verifiedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
       nonce: 'nonce-full-01',

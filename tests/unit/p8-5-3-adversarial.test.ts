@@ -71,6 +71,8 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
   it('Adversarial Pipeline 2: Tampered parameters invalidate cryptographic credential', () => {
     const db = createTestDb();
     const opp: TradeOpportunity = {
+      opportunityId: 'OPP-ADV-' + Date.now() + '-' + Math.floor(Math.random() * 10000),
+      marketSnapshotHash: '0123456789abcdef',
       typeId: 34,
       typeName: 'Tritanium',
       volumeM3: 0.01,
@@ -99,6 +101,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
     const unsigned = {
       credentialId: 'CRED-ADV-001',
       characterId: 4001,
+      opportunityId: opp.opportunityId,
       typeId: 34,
       strategy: 'station_arbitrage' as const,
       buyStationId: 60003760,
@@ -109,7 +112,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
       capitalRequired: 3500,
       expectedNetProfit: 1200,
       opportunityRating: 'A' as const,
-      marketSnapshotHash: 'snaph1234567890',
+      marketSnapshotHash: '0123456789abcdef',
       verifiedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
       nonce: 'nonce-12345',
@@ -156,6 +159,8 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
     const expiredAt = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
 
     const opp: TradeOpportunity = {
+      opportunityId: 'OPP-ADV-' + Date.now() + '-' + Math.floor(Math.random() * 10000),
+      marketSnapshotHash: '0123456789abcdef',
       typeId: 34,
       typeName: 'Tritanium',
       volumeM3: 0.01,
@@ -183,6 +188,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
     const unsigned = {
       credentialId: 'CRED-EXP-001',
       characterId: 4001,
+      opportunityId: opp.opportunityId,
       typeId: 34,
       strategy: 'station_arbitrage' as const,
       buyStationId: 60003760,
@@ -193,7 +199,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
       capitalRequired: 3500,
       expectedNetProfit: 1200,
       opportunityRating: 'A' as const,
-      marketSnapshotHash: 'snaph1234567890',
+      marketSnapshotHash: '0123456789abcdef',
       verifiedAt: twentyMinsAgo,
       expiresAt: expiredAt,
       nonce: 'nonce-exp-01',
@@ -213,6 +219,8 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
     const db = createTestDb();
     const now = new Date();
     const opp: TradeOpportunity = {
+      opportunityId: 'OPP-ADV-' + Date.now() + '-' + Math.floor(Math.random() * 10000),
+      marketSnapshotHash: '0123456789abcdef',
       typeId: 34,
       typeName: 'Tritanium',
       volumeM3: 0.01,
@@ -240,6 +248,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
     const unsigned = {
       credentialId: 'CRED-REPLAY-001',
       characterId: 4001,
+      opportunityId: opp.opportunityId,
       typeId: 34,
       strategy: 'station_arbitrage' as const,
       buyStationId: 60003760,
@@ -250,7 +259,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
       capitalRequired: 3500,
       expectedNetProfit: 1200,
       opportunityRating: 'A' as const,
-      marketSnapshotHash: 'snaph1234567890',
+      marketSnapshotHash: '0123456789abcdef',
       verifiedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
       nonce: 'nonce-replay-01',
@@ -275,6 +284,8 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
     const db = createTestDb();
     const now = new Date();
     const opp: TradeOpportunity = {
+      opportunityId: 'OPP-ADV-' + Date.now() + '-' + Math.floor(Math.random() * 10000),
+      marketSnapshotHash: '0123456789abcdef',
       typeId: 34,
       typeName: 'Tritanium',
       volumeM3: 0.01,
@@ -303,6 +314,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
     const unsigned = {
       credentialId: 'CRED-ALICE-001',
       characterId: 4001,
+      opportunityId: opp.opportunityId,
       typeId: 34,
       strategy: 'station_arbitrage' as const,
       buyStationId: 60003760,
@@ -313,7 +325,7 @@ describe('P8.5.3 Adversarial Verification & Security Hardening Test Suite', () =
       capitalRequired: 3500,
       expectedNetProfit: 1200,
       opportunityRating: 'A' as const,
-      marketSnapshotHash: 'snaph1234567890',
+      marketSnapshotHash: '0123456789abcdef',
       verifiedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
       nonce: 'nonce-alice-01',

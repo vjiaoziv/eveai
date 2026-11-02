@@ -293,9 +293,14 @@ export class PaperTradingSystem {
       }
 
       db.prepare(`
-        INSERT INTO paper_trading_orders (order_id, account_id, opportunity_id, idempotency_key, character_id, type_id, strategy_type, order_type, price, quantity, filled_quantity, status, fees_paid, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'open', 0, datetime('now'), datetime('now'))
-      `).run(orderId, account.accountId, opportunityId || null, idempotencyKey || null, characterId, typeId, strategyType, orderType, price, quantity);
+        INSERT INTO paper_trading_orders (order_id, account_id, opportunity_id, idempotency_key, character_id, type_id, strategy_type, order_type, price, quantity, filled_quantity, status, fees_paid, escrow_locked, fee_reserved, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'open', 0, ?, ?, datetime('now'), datetime('now'))
+      `).run(
+        orderId, account.accountId, opportunityId || null, idempotencyKey || null,
+        characterId, typeId, strategyType, orderType, price, quantity,
+        orderType === 'buy' ? totalRequiredIsk : 0,
+        orderType === 'buy' ? estFees : 0,
+      );
 
       success = true;
     });
@@ -321,9 +326,11 @@ export class PaperTradingSystem {
       if (order.order_type === 'buy' && unfilledQty > 0) {
         const acc = db.prepare('SELECT available_cash, escrow_locked FROM paper_trading_accounts WHERE account_id = ?').get(order.account_id) as any;
         // Refund exactly the unfilled cash portion plus any remaining unused fee buffer in escrow
-        const unfilledGross = unfilledQty * order.price;
-        // If order had 0 fills, refund all escrow tied to it; if partially filled, refund remaining escrow
-        const escrowToRefund = Math.min(acc.escrow_locked, unfilledGross + (order.filled_quantity === 0 ? 100 : 0));
+        const trackedRemainingEscrow = Number(order.escrow_locked || 0);
+        const escrowToRefund = Math.min(
+          acc.escrow_locked,
+          trackedRemainingEscrow > 0 ? trackedRemainingEscrow : unfilledQty * order.price,
+        );
         const newBal = acc.available_cash + escrowToRefund;
         const newEscrow = Math.max(0, acc.escrow_locked - escrowToRefund);
 
@@ -341,7 +348,7 @@ export class PaperTradingSystem {
         `).run(order.account_id, orderId, escrowToRefund, newBal, newEscrow);
       }
 
-      db.prepare("UPDATE paper_trading_orders SET status = 'cancelled', updated_at = datetime('now') WHERE order_id = ?").run(orderId);
+      db.prepare("UPDATE paper_trading_orders SET status = 'cancelled', escrow_locked = 0, fee_reserved = 0, updated_at = datetime('now') WHERE order_id = ?").run(orderId);
     });
 
     tx();
@@ -415,20 +422,33 @@ export class PaperTradingSystem {
 
         const actualSpend = sim.totalGrossIsk;
         const acc = db.prepare('SELECT available_cash, escrow_locked FROM paper_trading_accounts WHERE account_id = ?').get(order.account_id) as any;
-        const newEscrow = Math.max(0, acc.escrow_locked - actualSpend - buyerFee);
+        const escrowAfterSpend = Math.max(0, acc.escrow_locked - actualSpend);
 
+        db.prepare(`
+          UPDATE paper_trading_accounts
+          SET escrow_locked = ?,
+              updated_at = datetime('now')
+          WHERE account_id = ?
+        `).run(escrowAfterSpend, order.account_id);
+
+        db.prepare(`
+          INSERT INTO paper_trading_journal (account_id, order_id, entry_type, amount, balance_after, escrow_after)
+          VALUES (?, ?, 'order_spend', ?, ?, ?)
+        `).run(order.account_id, orderId, actualSpend, acc.available_cash, escrowAfterSpend);
+
+        const escrowAfterFee = Math.max(0, escrowAfterSpend - buyerFee);
         db.prepare(`
           UPDATE paper_trading_accounts
           SET escrow_locked = ?,
               total_fees_paid = total_fees_paid + ?,
               updated_at = datetime('now')
           WHERE account_id = ?
-        `).run(newEscrow, buyerFee, order.account_id);
+        `).run(escrowAfterFee, buyerFee, order.account_id);
 
         db.prepare(`
           INSERT INTO paper_trading_journal (account_id, order_id, entry_type, amount, balance_after, escrow_after)
-          VALUES (?, ?, 'order_spend', ?, ?, ?)
-        `).run(order.account_id, orderId, actualSpend, acc.available_cash, newEscrow);
+          VALUES (?, ?, 'fee_payment', ?, ?, ?)
+        `).run(order.account_id, orderId, buyerFee, acc.available_cash, escrowAfterFee);
       } else {
         const grossRev = sim.totalGrossIsk;
         const netRev = grossRev - sellerFee;
@@ -436,8 +456,21 @@ export class PaperTradingSystem {
         const pnl = netRev - estCost;
 
         const acc = db.prepare('SELECT available_cash, escrow_locked FROM paper_trading_accounts WHERE account_id = ?').get(order.account_id) as any;
-        const newBal = acc.available_cash + netRev;
+        const balanceAfterRevenue = acc.available_cash + grossRev;
 
+        db.prepare(`
+          UPDATE paper_trading_accounts
+          SET available_cash = ?,
+              updated_at = datetime('now')
+          WHERE account_id = ?
+        `).run(balanceAfterRevenue, order.account_id);
+
+        db.prepare(`
+          INSERT INTO paper_trading_journal (account_id, order_id, entry_type, amount, balance_after, escrow_after)
+          VALUES (?, ?, 'order_revenue', ?, ?, ?)
+        `).run(order.account_id, orderId, grossRev, balanceAfterRevenue, acc.escrow_locked);
+
+        const newBal = balanceAfterRevenue - sellerFee;
         db.prepare(`
           UPDATE paper_trading_accounts
           SET available_cash = ?,
@@ -448,15 +481,9 @@ export class PaperTradingSystem {
         `).run(newBal, pnl, sellerFee, order.account_id);
 
         db.prepare(`
-          UPDATE paper_trading_positions
-          SET quantity = max(0, quantity - ?)
-          WHERE character_id = ? AND type_id = ? AND status = 'holding'
-        `).run(filledNow, order.character_id, order.type_id);
-
-        db.prepare(`
           INSERT INTO paper_trading_journal (account_id, order_id, entry_type, amount, balance_after, escrow_after)
-          VALUES (?, ?, 'order_revenue', ?, ?, ?)
-        `).run(order.account_id, orderId, netRev, newBal, acc.escrow_locked);
+          VALUES (?, ?, 'fee_payment', ?, ?, ?)
+        `).run(order.account_id, orderId, sellerFee, newBal, acc.escrow_locked);
       }
 
       db.prepare(`
@@ -464,9 +491,18 @@ export class PaperTradingSystem {
         SET filled_quantity = ?,
             status = ?,
             fees_paid = fees_paid + ?,
+            escrow_locked = CASE WHEN order_type = 'buy' THEN max(0, escrow_locked - ?) ELSE 0 END,
+            fee_reserved = CASE WHEN order_type = 'buy' THEN max(0, fee_reserved - ?) ELSE 0 END,
             updated_at = datetime('now')
         WHERE order_id = ?
-      `).run(newTotalFilled, newStatus, feeForOrder, orderId);
+      `).run(
+        newTotalFilled,
+        newStatus,
+        feeForOrder,
+        order.order_type === 'buy' ? sim.totalGrossIsk + feeForOrder : 0,
+        order.order_type === 'buy' ? feeForOrder : 0,
+        orderId,
+      );
 
       if (order.opportunity_id) {
         const oppRow = db.prepare('SELECT * FROM trade_opportunities_log WHERE opportunity_id = ?').get(order.opportunity_id) as any;

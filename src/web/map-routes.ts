@@ -325,6 +325,19 @@ export function registerMapRoutes(
       return reply.status(400).send({ error: `avoid не должен превышать ${MAX_ROUTE_AVOID} систем.` });
     }
 
+    // Unknown systems cannot produce a route. Fail before doing any bubble or
+    // advisory work so an impossible destination is a bounded, local response.
+    if (!getMapSystem(db, origin) || !getMapSystem(db, destination)) {
+      const route = routeWithRisk(db, origin, destination, { mode, riskWeight: risk });
+      return {
+        route,
+        autopilot: { requested: false, ok: false, mode: 'none', error: null },
+        avoided: [],
+        systems: [],
+        dangerCoverage: { knownSystems: 0, totalSystems: route.systemIds.length },
+      };
+    }
+
     // The danger weights come from a bubble centred on the origin: routing
     // beyond it falls back to zero danger rather than pretending to know.
     const bubble = await buildBubble(db, origin, {

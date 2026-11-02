@@ -51,3 +51,4 @@ process.env.MODEL_PRICING_JSON = '';
 // against the default tariff table, and an operator OPENAI_MODEL outside the
 // default table would flip priced costs back to NULL.
 process.env.OPENAI_MODEL = 'gpt-5.6-terra';
+process.env.EVEAI_PIPELINE_SIGNING_KEYS ??= '{"v1":"test-pipeline-signing-key-v1"}';

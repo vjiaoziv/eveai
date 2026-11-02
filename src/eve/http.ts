@@ -3,7 +3,7 @@ import { setGlobalDispatcher, EnvHttpProxyAgent } from 'undici';
 if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy) {
   try {
     setGlobalDispatcher(new EnvHttpProxyAgent());
-  } catch (e) {
+  } catch {
     // Ignore in environments where dispatcher is already locked
   }
 }

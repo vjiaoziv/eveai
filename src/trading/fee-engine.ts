@@ -1,5 +1,5 @@
 import type { Db } from '../db/sqlite.js';
-import type { CloneState, FeeContext, FeeRates, PilotTradingSkills } from './types.js';
+import type { FeeContext, FeeRates, PilotTradingSkills } from './types.js';
 
 export const BASE_SALES_TAX_RATE = 0.075;      // 7.5% CCP Current Baseline (reduced from 8.0%)
 export const ACCOUNTING_REDUCTION_PER_LEVEL = 0.11; // 11% reduction per level

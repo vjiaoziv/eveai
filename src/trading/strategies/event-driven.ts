@@ -1,5 +1,3 @@
-﻿import type { Db } from '../../db/sqlite.js';
-
 export interface MarketEventItemImpact {
   typeId: number;
   typeName: string;
