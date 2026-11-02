@@ -630,6 +630,120 @@ function ensureWebAgentRequests(db: Db): void {
     CREATE INDEX IF NOT EXISTS idx_web_admission_events_user_time
       ON web_admission_events(user_id, created_at_ms);
   `);
+  // --- Trading System Extensions (P1-P7) ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS data_source_status (
+      source_id       TEXT PRIMARY KEY,
+      status          TEXT NOT NULL CHECK (status IN ('ok', 'degraded', 'offline')),
+      last_success_at TEXT,
+      last_error      TEXT,
+      error_count_1h  INTEGER NOT NULL DEFAULT 0,
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS portfolio_positions (
+      position_id     TEXT PRIMARY KEY,
+      character_id    INTEGER NOT NULL,
+      type_id         INTEGER NOT NULL,
+      location_id     INTEGER NOT NULL,
+      quantity        INTEGER NOT NULL,
+      cost_basis      REAL NOT NULL,
+      current_price   REAL,
+      unrealized_pnl  REAL,
+      strategy_type   TEXT NOT NULL,
+      status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'partial', 'closed')),
+      opened_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      closed_at       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_portfolio_char_status
+      ON portfolio_positions(character_id, status);
+
+    CREATE TABLE IF NOT EXISTS trade_drafts (
+      draft_id        TEXT PRIMARY KEY,
+      character_id    INTEGER NOT NULL,
+      type_id         INTEGER NOT NULL,
+      strategy        TEXT NOT NULL,
+      buy_station_id  INTEGER NOT NULL,
+      sell_station_id INTEGER NOT NULL,
+      suggested_buy   REAL NOT NULL,
+      suggested_qty   INTEGER NOT NULL,
+      suggested_sell  REAL NOT NULL,
+      estimated_fees  REAL NOT NULL,
+      hauling_cost    REAL NOT NULL DEFAULT 0,
+      expected_profit REAL NOT NULL,
+      expected_roi    REAL NOT NULL,
+      capital_required REAL NOT NULL,
+      turnover_hours  REAL,
+      status          TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'rejected', 'executed_manually', 'expired', 'closed')),
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at      TEXT NOT NULL,
+      executed_at     TEXT,
+      actual_buy_price REAL,
+      actual_sell_price REAL,
+      actual_profit   REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_trade_drafts_char_status
+      ON trade_drafts(character_id, status);
+
+    CREATE TABLE IF NOT EXISTS trade_ledger (
+      ledger_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      draft_id        TEXT,
+      character_id    INTEGER NOT NULL,
+      type_id         INTEGER NOT NULL,
+      action          TEXT NOT NULL CHECK (action IN ('buy', 'sell', 'reprocess', 'broker_fee', 'sales_tax', 'relist_fee')),
+      quantity        INTEGER NOT NULL,
+      price           REAL NOT NULL,
+      fees            REAL NOT NULL DEFAULT 0,
+      timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+      notes           TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_trade_ledger_char_time
+      ON trade_ledger(character_id, timestamp);
+
+    CREATE TABLE IF NOT EXISTS risk_snapshots (
+      snapshot_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      character_id        INTEGER NOT NULL,
+      total_equity        REAL NOT NULL,
+      cash_reserve        REAL NOT NULL,
+      invested_capital    REAL NOT NULL,
+      single_item_max_pct REAL NOT NULL,
+      category_max_pct    REAL NOT NULL,
+      var_95              REAL,
+      cvar_95             REAL,
+      recorded_at         TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS backtest_runs (
+      run_id          TEXT PRIMARY KEY,
+      strategy_name   TEXT NOT NULL,
+      time_horizon    TEXT NOT NULL,
+      initial_capital REAL NOT NULL,
+      final_capital   REAL NOT NULL,
+      total_roi_pct   REAL NOT NULL,
+      max_drawdown_pct REAL NOT NULL,
+      sharpe_ratio    REAL,
+      win_rate_pct    REAL NOT NULL,
+      trade_count     INTEGER NOT NULL,
+      fee_drag_pct    REAL NOT NULL,
+      metrics_json    TEXT NOT NULL,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS paper_trading_positions (
+      paper_id        TEXT PRIMARY KEY,
+      character_id    INTEGER NOT NULL,
+      type_id         INTEGER NOT NULL,
+      location_id     INTEGER NOT NULL,
+      quantity        INTEGER NOT NULL,
+      cost_price      REAL NOT NULL,
+      status          TEXT NOT NULL DEFAULT 'holding' CHECK (status IN ('holding', 'sold')),
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      sold_at         TEXT,
+      sold_price      REAL,
+      realized_pnl    REAL
+    );
+  `);
+
 }
 
 async function main(): Promise<void> {
