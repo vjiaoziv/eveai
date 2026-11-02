@@ -84,3 +84,22 @@
 - **修复方案**：
   - 在 `src/eve/http.ts` 初始化阶段注入 `undici.EnvHttpProxyAgent`，使全局 `fetch` 与 `jose` 验签库全量无缝走本地代理网关 (`http://127.0.0.1:8033`)。
   - 在 `.env` 中固化 `HTTPS_PROXY` 与 `NO_PROXY` 规则，实测 EVE SSO 元数据与 Token 交互耗时由超时失败降低至 1 秒以内。
+### 7. 2026-11-02：构建核心交易引擎与订单草案系统 (P1 ~ P4) (Commit: `0e80f58`)
+- **新增模块**：
+  - `src/trading/types.ts`：投资交易核心类型契约（费率、模拟深度、策略类型、订单草案）。
+  - `src/trading/data-center.ts`：统一数据中心与多源健康监控表 (`data_source_status`)。
+  - `src/trading/fee-engine.ts`：确定性税费精算引擎（支持 Alpha/Omega、会计学、经纪人关系、声望与建筑费率）。
+  - `src/trading/orderbook-simulator.ts`：订单簿多档穿透撮合模拟器（加权平均价、滑点、未成交截断）。
+  - `src/trading/strategies/station-arbitrage.ts`：站内价差套利扫描器。
+  - `src/trading/strategies/regional-hauling.ts`：跨贸易中心高安航线套利扫描器。
+  - `src/trading/strategies/manufacturing-arbitrage.ts`：SDE 制造与再处理矿物套利比价。
+  - `src/trading/portfolio-manager.ts`：动态资金风控状态机（20% 储备金、15% 单品限额、5000万防强杀货值上限）。
+  - `src/trading/draft-system.ts`：交易订单草案全生命周期管理器（生成唯一标识 `TR-YYYY-NNNNNN`、审批流、记账台账）。
+  - `src/trading/backtesting/engine.ts`：无未来数据泄露的历史回测引擎（胜率、夏普比率、最大回撤）。
+  - `tests/unit/trading-fee-simulator.test.ts` & `tests/unit/trading-system-full.test.ts`：15 项单元测试 100% 通过。
+- **数据库迁移**：
+  - 在 `src/db/migrations.ts` 中增量创建了 `data_source_status`, `portfolio_positions`, `trade_drafts`, `trade_ledger`, `risk_snapshots`, `backtest_runs`, `paper_trading_positions` 七张核心业务表。
+- **CLI 命令升级**：
+  - `eve-agent capital`：查询角色实时现金、20% 储备金与限额。
+  - `eve-agent scan-station` / `scan-haul`：执行站内与跨区套利扫描。
+  - `eve-agent drafts` / `draft-auto` / `draft-approve`：自动化生成、查看与审批订单草案。
