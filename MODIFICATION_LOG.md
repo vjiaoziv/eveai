@@ -127,3 +127,16 @@
   - `tsc --noEmit` 0 错误，前端生产打包成功。
 - **交付文档**：
   - 生成 `P8_REPAIR_PLAN.md`, `P8_IMPLEMENTATION_REPORT.md`, `P8_MARKET_DATA_VALIDATION.md`, `P8_ORDERBOOK_SIMULATION.md`, `P8_FEE_ENGINE_VALIDATION.md`, `P8_PORTFOLIO_RISK_VALIDATION.md`, `P8_BACKTEST_VALIDATION.md`, `P8_OPPORTUNITY_RATING.md`, `P8_PAPER_TRADING_GUIDE.md`, `P8_SECURITY_VALIDATION.md`, `P8_TEST_REPORT.md`, `P8_KNOWN_LIMITATIONS.md` 共 12 份交付文档。
+
+### 10. 2026-11-02：全面同步更新 EVE AI Agent 技能定义文件 (eve-agent SKILL.md)
+- **更新目标**：
+  - `C:\Users\JIAOZI\.codex\skills\eve-agent\SKILL.md` (Codex 用户级技能库)
+  - `C:\Users\JIAOZI\.agents\skills\eve-agent\SKILL.md` (Agents/Hermes 共享技能库)
+  - `D:\Git\EVE\skills\eve-agent\SKILL.md` (Windows 镜像目录)
+  - `/home/ubuntu/projects/eveai/skills/eve-agent/SKILL.md` (WSL 项目源码库，已入 Git 版本管理)
+- **主要更新内容**：
+  - **决策管线更新**：集成 10 阶段确定性交易决策管线 (`TradingPipeline`)，说明多档位深度穿透撮合、滑点精算与反虚假价差（Phantom Spread）深度截断规则。
+  - **税费规则核准**：更新 CCP 现行基准销售税 7.5%、Alpha Accounting 3 (5.025%)、Omega Accounting 5 (3.375%)、100 ISK 最低经纪人费保底及 Upwell 建筑 0.5% 法定 SCC 附加税。
+  - **风控模型完善**：明确 20% 安全现金储备、在途已审批草案额度锁定、单品 15% 累计持仓限额、品类 30% 累计持仓限额及 5000 万高安防强杀货值门禁。
+  - **草案生命周期**：指明历史草案 `TR-2026-000001` 已被永久撤销 (`audit_revoked`)；补充说明实盘交易反馈与真实成交对比记账闭环 (`record-trade`)。
+  - **评级与否决标准**：新增 A/B/C/D 四级交易机会评级体系与多情景压力测试规范，明确时差 $> 15$ 分钟一票否决规则。
