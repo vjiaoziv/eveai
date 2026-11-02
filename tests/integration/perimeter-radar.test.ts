@@ -466,6 +466,10 @@ describe('Perimeter live radar, end to end over real SSE', () => {
     const pursuit = of(tab, 'advisory').slice(advisoriesBefore)
       .find((frame) => (frame.data.advisory as { rule: string }).rule === 'pursuit');
     expect(pursuit?.data.advisory).toMatchObject({ severity: 'danger' });
+    await until(
+      () => threadAdvisories(threadIdSeen).some((entry) => entry.rule === 'pursuit'),
+      'pursuit advisory persisted',
+    );
     expect(threadAdvisories(threadIdSeen).map((entry) => entry.rule)).toContain('pursuit');
 
     // The radar then *understands*: one model-written assessment follows the

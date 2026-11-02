@@ -1,4 +1,5 @@
 import { setGlobalDispatcher, EnvHttpProxyAgent } from 'undici';
+import { assertEsiHttpDispatch } from './esi-security.js';
 
 if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy) {
   try {
@@ -9,6 +10,17 @@ if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy
 }
 
 export async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs: number): Promise<Response> {
+  const requestUrl = input instanceof URL ? input : new URL(
+    typeof input === 'string' ? input : input.url,
+  );
+  const requestMethod = String(
+    init.method
+    || (typeof input !== 'string' && !(input instanceof URL) && 'method' in input ? input.method : 'GET')
+    || 'GET',
+  );
+  if (requestUrl.origin === new URL(process.env.ESI_BASE_URL || 'https://esi.evetech.net/latest/').origin) {
+    assertEsiHttpDispatch(requestUrl, requestMethod);
+  }
   const signal = timeoutSignal(timeoutMs, init.signal);
   return fetch(input, {
     ...init,
@@ -46,6 +58,18 @@ export async function fetchRetrying(
   opts: RetryConfig,
 ): Promise<Response> {
   const { maxAttempts, backoffMaxMs, timeoutMs } = opts;
+
+  const retryUrl = input instanceof URL ? input : new URL(
+    typeof input === 'string' ? input : input.url,
+  );
+  const retryMethod = String(
+    init.method
+    || (typeof input !== 'string' && !(input instanceof URL) && 'method' in input ? input.method : 'GET')
+    || 'GET',
+  );
+  if (retryUrl.origin === new URL(process.env.ESI_BASE_URL || 'https://esi.evetech.net/latest/').origin) {
+    assertEsiHttpDispatch(retryUrl, retryMethod);
+  }
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let response: Response;

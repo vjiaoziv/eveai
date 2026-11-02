@@ -5,6 +5,7 @@ import { loadEsiCatalog, type EsiOperationMeta } from './esi-catalog.js';
 import { hasFreshCapabilitySnapshot } from './capabilities.js';
 import type { UserContext } from '../auth/user-resolver.js';
 import { fetchWithTimeout, parseHeaderInt, parseRetryAfterMs, sleep } from './http.js';
+import { assertEsiHttpDispatch, evaluateEsiOperationPolicy } from './esi-security.js';
 
 export type EsiCallResult<T = unknown> =
   | {
@@ -66,6 +67,11 @@ export async function callEsiOperation<T = unknown>(
   const operation = catalog.get(operationName);
   if (!operation) {
     return { ok: false, status: 404, error: `Unknown ESI operation: ${operationName}` };
+  }
+
+  const policy = evaluateEsiOperationPolicy(operation);
+  if (!policy.allowed) {
+    return { ok: false, status: policy.status, error: policy.error };
   }
 
   const access = await resolveAccess(db, operation, userCtx);
@@ -372,6 +378,7 @@ export async function fetchEsiWithRetry(
   body: string | null,
   guard: EsiExecutionGuard,
 ): Promise<{ ok: true; value: Response } | { ok: false; result: Extract<EsiCallResult<never>, { ok: false }> }> {
+  assertEsiHttpDispatch(url, method);
   const maxAttempts = Math.max(1, config.esi.retryMaxAttempts);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {

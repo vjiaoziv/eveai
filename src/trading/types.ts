@@ -114,6 +114,10 @@ export interface PipelineVerificationCredential {
   expectedNetProfit: number;
   opportunityRating: OpportunityRating;
   marketSnapshotHash: string;
+  marketSnapshotId: string;
+  buySnapshotTimestamp: string;
+  sellSnapshotTimestamp: string;
+  feeModelVersion: string;
   verifiedAt: string;
   expiresAt: string;
   nonce: string;
@@ -124,6 +128,10 @@ export interface PipelineVerificationCredential {
 export interface TradeOpportunity {
   opportunityId?: string;
   marketSnapshotHash?: string;
+  marketSnapshotId?: string;
+  buySnapshotTimestamp?: string;
+  sellSnapshotTimestamp?: string;
+  feeModelVersion?: string;
   typeId: number;
   typeName: string;
   zhName?: string;

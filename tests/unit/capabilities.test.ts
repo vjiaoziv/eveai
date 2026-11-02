@@ -111,7 +111,7 @@ describe('get_eve_capabilities', () => {
     expect(caps.accessibleOperations).toBeGreaterThan(0);
   });
 
-  it('rejects private ESI without a fresh capability handshake', async () => {
+  it('blocks private ESI write before any capability handshake', async () => {
     db.prepare("INSERT INTO telegram_sessions (chat_id, username, active_character_id) VALUES (?, ?, ?)").run(1, 'pilot', 123);
     db.prepare(`
       INSERT INTO eve_accounts (character_id, character_name, access_token, refresh_token, expires_at, scopes_json)
@@ -124,11 +124,11 @@ describe('get_eve_capabilities', () => {
     if (result.ok) {
       throw new Error('Expected private ESI call to be rejected');
     }
-    expect(result.status).toBe(428);
-    expect(result.error).toContain('get_eve_capabilities');
+    expect(result.status).toBe(405);
+    expect(result.error).toContain('Blocked non-GET ESI operation');
   });
 
-  it('allows private ESI after a fresh capability handshake', async () => {
+  it('allows private GET ESI after a fresh capability handshake', async () => {
     db.prepare("INSERT INTO telegram_sessions (chat_id, username, active_character_id) VALUES (?, ?, ?)").run(1, 'pilot', 123);
     db.prepare(`
       INSERT INTO eve_accounts (character_id, character_name, access_token, refresh_token, expires_at, scopes_json)
@@ -136,7 +136,7 @@ describe('get_eve_capabilities', () => {
     `).run(123, 'Pilot', 'tok', 'ref', JSON.stringify(ALL_REQUESTED_SCOPES));
     db.prepare('INSERT INTO eve_character_links (chat_id, character_id) VALUES (?, ?)').run(1, 123);
 
-    await getEveCapabilities(db, 'ui_info', { userId: 0, chatId: 1 });
+    await getEveCapabilities(db, 'character_info', { userId: 0, chatId: 1 });
 
     const realFetch = global.fetch;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -145,14 +145,17 @@ describe('get_eve_capabilities', () => {
         : input instanceof URL
           ? input.toString()
           : input.url;
-      if (url.includes('/ui/openwindow/information')) {
-        return new Response(null, { status: 204 });
+      if (url.includes('/characters/123')) {
+        return new Response(JSON.stringify({ character_id: 123 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }
       return await realFetch(input as RequestInfo, init);
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await callEsiOperation(db, 'post_ui_openwindow_information', { target_id: 60003760 }, { userId: 0, chatId: 1 });
+    const result = await callEsiOperation(db, 'get_characters_character_id', { character_id: 123 }, { userId: 0, chatId: 1 });
     expect(result.ok).toBe(true);
     expect(fetchMock).toHaveBeenCalled();
   });

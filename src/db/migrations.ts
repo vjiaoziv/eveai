@@ -2,6 +2,41 @@ import type { Db } from './sqlite.js';
 import { SCHEMA_SQL } from './schema.js';
 import { pathToFileURL } from 'node:url';
 
+function backfillPaperTradingEscrow(db: Db): void {
+  // Historical rows can be reconstructed only when their escrow_lock journal
+  // entry exists. Rows without that evidence are isolated instead of being
+  // allowed to create unexplained account liabilities.
+  db.prepare(`
+    UPDATE paper_trading_orders
+    SET escrow_locked = max(0,
+      COALESCE((SELECT amount FROM paper_trading_journal j WHERE j.order_id = paper_trading_orders.order_id AND j.entry_type = 'escrow_lock'), 0)
+      - COALESCE((SELECT SUM(amount) FROM paper_trading_journal j WHERE j.order_id = paper_trading_orders.order_id AND j.entry_type IN ('order_spend', 'fee_payment', 'escrow_release')), 0)
+    )
+    WHERE escrow_migration_status = 'legacy_pending'
+      AND order_type = 'buy'
+      AND EXISTS (SELECT 1 FROM paper_trading_journal j WHERE j.order_id = paper_trading_orders.order_id AND j.entry_type = 'escrow_lock')
+  `).run();
+  db.prepare(`
+    UPDATE paper_trading_orders
+    SET fee_reserved = max(0, escrow_locked - max(0, quantity - filled_quantity) * price)
+    WHERE escrow_migration_status = 'legacy_pending'
+      AND order_type = 'buy'
+      AND EXISTS (SELECT 1 FROM paper_trading_journal j WHERE j.order_id = paper_trading_orders.order_id AND j.entry_type = 'escrow_lock')
+  `).run();
+  db.prepare(`
+    UPDATE paper_trading_orders
+    SET escrow_migration_status = 'recovered'
+    WHERE escrow_migration_status = 'legacy_pending'
+      AND order_type = 'buy'
+      AND EXISTS (SELECT 1 FROM paper_trading_journal j WHERE j.order_id = paper_trading_orders.order_id AND j.entry_type = 'escrow_lock')
+  `).run();
+  db.prepare(`
+    UPDATE paper_trading_orders
+    SET escrow_locked = 0, fee_reserved = 0, escrow_migration_status = 'unrecoverable'
+    WHERE escrow_migration_status = 'legacy_pending'
+  `).run();
+}
+
 export function runMigrations(db: Db): void {
   const migrate = db.transaction(() => {
     ensureSchema(db);
@@ -70,6 +105,8 @@ export function runMigrations(db: Db): void {
     addColumnIfMissing(db, 'market_history_sync', 'last_wanted_at', 'TEXT');
     addColumnIfMissing(db, 'paper_trading_orders', 'escrow_locked', 'REAL NOT NULL DEFAULT 0');
     addColumnIfMissing(db, 'paper_trading_orders', 'fee_reserved', 'REAL NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, 'paper_trading_orders', 'escrow_migration_status', "TEXT NOT NULL DEFAULT 'legacy_pending'");
+    backfillPaperTradingEscrow(db);
     // Alert push redelivery: per-event attempts with exponential backoff and
     // a terminal abandoned_at so undeliverable events stop blocking the queue.
     addColumnIfMissing(db, 'market_alert_events', 'delivery_attempts', 'INTEGER NOT NULL DEFAULT 0');

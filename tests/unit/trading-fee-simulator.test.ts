@@ -47,14 +47,14 @@ describe('FeeEngine', () => {
     expect(rates.brokerFeeRate).toBe(0.01);
   });
 
-  it('enforces 100 ISK minimum broker fee on small orders', () => {
+  it('does not apply an unverified absolute 100 ISK broker-fee floor', () => {
     const alphaCtx = {
       clone: 'alpha' as const,
       skills: ALPHA_DEFAULT_SKILLS,
       facility: 'npc_station' as const,
     };
 
-    // Tiny order: 1 unit @ 1,000 ISK. Normal 2.1% fee would be 21 ISK, but floor is 100 ISK
+    // Tiny order: 1 unit @ 1,000 ISK. Official percentage rules yield 21 ISK buyer fee.
     const trade = FeeEngine.calculateTrade({
       buyType: 'place_buy_order',
       sellType: 'place_sell_order',
@@ -65,8 +65,8 @@ describe('FeeEngine', () => {
       sellCtx: alphaCtx,
     });
 
-    expect(trade.buyerBrokerFee).toBe(100);
-    expect(trade.sellerBrokerFee).toBe(100);
+    expect(trade.buyerBrokerFee).toBe(21);
+    expect(trade.sellerBrokerFee).toBe(42);
   });
 
   it('applies Upwell structure SCC statutory surcharge correctly', () => {

@@ -81,7 +81,7 @@ export class DraftSystem {
     );
 
       return draft;
-    })();
+    }).immediate();
   }
 
   /**

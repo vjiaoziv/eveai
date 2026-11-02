@@ -73,6 +73,25 @@ const VALID_STATE_TRANSITIONS: Record<string, string[]> = {
   'expired': [], // Terminal
 };
 
+function feeForOrderForClaim(
+  orderType: 'buy' | 'sell',
+  sim: { weightedAvgPrice: number; filledQty: number },
+  feeCtx: FeeContext,
+): number {
+  const calc = FeeEngine.calculateTrade({
+    buyType: orderType === 'buy' ? 'place_buy_order' : 'immediate_buy',
+    sellType: orderType === 'sell' ? 'place_sell_order' : 'immediate_sell',
+    buyUnitPrice: sim.weightedAvgPrice,
+    sellUnitPrice: sim.weightedAvgPrice,
+    quantity: sim.filledQty,
+    buyCtx: feeCtx,
+    sellCtx: feeCtx,
+  });
+  return orderType === 'buy'
+    ? calc.buyerBrokerFee
+    : calc.sellerBrokerFee + calc.salesTax + (calc.sccSurcharge || 0);
+}
+
 export class PaperTradingSystem {
   /**
    * Get or create a dedicated virtual paper trading account for a character
@@ -217,25 +236,6 @@ export class PaperTradingSystem {
       return { success: false, error: '订单价格与数量必须为大于零的合法有限数值。' };
     }
 
-    if (idempotencyKey) {
-      const existing = db.prepare('SELECT * FROM paper_trading_orders WHERE idempotency_key = ?').get(idempotencyKey) as any;
-      if (existing) {
-        if (
-          existing.type_id !== typeId ||
-          existing.order_type !== orderType ||
-          existing.price !== price ||
-          existing.quantity !== quantity ||
-          existing.character_id !== characterId
-        ) {
-          return {
-            success: false,
-            error: '【幂等冲突】相同 idempotencyKey (' + idempotencyKey + ') 不能用于不同参数的订单！已有订单参数: typeId=' + existing.type_id + ', price=' + existing.price + ', qty=' + existing.quantity,
-          };
-        }
-        return { success: true, orderId: existing.order_id };
-      }
-    }
-
     const account = this.getOrCreateAccount(db, characterId);
     if (account.status !== 'active') {
       return { success: false, error: `模拟账户当前处于 ${account.status} 状态，禁止创建新订单。` };
@@ -248,43 +248,68 @@ export class PaperTradingSystem {
     };
 
     const estFees = orderType === 'buy'
-      ? Math.max(100.0, price * quantity * FeeEngine.calculateRates(feeCtx).brokerFeeRate)
-      : Math.max(100.0, price * quantity * (FeeEngine.calculateRates(feeCtx).brokerFeeRate + FeeEngine.calculateRates(feeCtx).salesTaxRate));
+      ? Math.round(price * quantity * FeeEngine.calculateRates(feeCtx).brokerFeeRate * 100) / 100
+      : Math.round(price * quantity * (FeeEngine.calculateRates(feeCtx).brokerFeeRate + FeeEngine.calculateRates(feeCtx).salesTaxRate) * 100) / 100;
 
     const totalRequiredIsk = price * quantity + estFees;
     const orderId = 'PT-ORD-' + Date.now() + '-' + randomUUID().slice(0, 8);
 
     let success = false;
+    let resultOrderId = orderId;
     let errReason: string | undefined;
 
     const tx = db.transaction(() => {
+      if (idempotencyKey) {
+        const existing = db.prepare('SELECT * FROM paper_trading_orders WHERE idempotency_key = ?').get(idempotencyKey) as any;
+        if (existing) {
+          if (
+            existing.type_id !== typeId ||
+            existing.order_type !== orderType ||
+            existing.price !== price ||
+            existing.quantity !== quantity ||
+            existing.character_id !== characterId
+          ) {
+            errReason = '【幂等冲突】相同 idempotencyKey (' + idempotencyKey + ') 不能用于不同参数的订单！';
+            return;
+          }
+          resultOrderId = existing.order_id;
+          success = true;
+          return;
+        }
+      }
+
+      const accountRow = db.prepare('SELECT account_id, status, available_cash, escrow_locked FROM paper_trading_accounts WHERE account_id = ?')
+        .get(account.accountId) as any;
+      if (!accountRow || accountRow.status !== 'active') {
+        errReason = '模拟账户不可用，禁止创建新订单。';
+        return;
+      }
+
       if (orderType === 'buy') {
-        if (account.availableCash < totalRequiredIsk) {
-          errReason = `虚拟可用资金不足：需要 ${Math.round(totalRequiredIsk).toLocaleString()} ISK，当前可用 ${Math.round(account.availableCash).toLocaleString()} ISK。`;
+        const reserved = db.prepare(`
+          UPDATE paper_trading_accounts
+          SET available_cash = available_cash - ?,
+              escrow_locked = escrow_locked + ?,
+              updated_at = datetime('now')
+          WHERE account_id = ? AND available_cash >= ?
+        `).run(totalRequiredIsk, totalRequiredIsk, account.accountId, totalRequiredIsk);
+        if (reserved.changes !== 1) {
+          errReason = `虚拟可用资金不足：需要 ${Math.round(totalRequiredIsk).toLocaleString()} ISK，当前可用 ${Math.round(accountRow.available_cash).toLocaleString()} ISK。`;
           return;
         }
 
-        const newBal = account.availableCash - totalRequiredIsk;
-        const newEscrow = account.escrowLocked + totalRequiredIsk;
-        db.prepare(`
-          UPDATE paper_trading_accounts
-          SET available_cash = ?,
-              escrow_locked = ?,
-              updated_at = datetime('now')
-          WHERE account_id = ?
-        `).run(newBal, newEscrow, account.accountId);
-
+        const after = db.prepare('SELECT available_cash, escrow_locked FROM paper_trading_accounts WHERE account_id = ?')
+          .get(account.accountId) as any;
         db.prepare(`
           INSERT INTO paper_trading_journal (account_id, order_id, entry_type, amount, balance_after, escrow_after)
           VALUES (?, ?, 'escrow_lock', ?, ?, ?)
-        `).run(account.accountId, orderId, totalRequiredIsk, newBal, newEscrow);
+        `).run(account.accountId, orderId, totalRequiredIsk, after.available_cash, after.escrow_locked);
       } else {
         const holding = db.prepare(`
           SELECT COALESCE(SUM(quantity), 0) as available_units
           FROM paper_trading_positions
           WHERE character_id = ? AND type_id = ? AND status = 'holding'
         `).get(characterId, typeId) as any;
-
         const currentHolding = Number(holding?.available_units || 0);
         if (currentHolding < quantity) {
           errReason = `模拟库存不足：拟卖出 ${quantity} 件，当前持仓仅 ${currentHolding} 件。`;
@@ -305,27 +330,31 @@ export class PaperTradingSystem {
       success = true;
     });
 
-    tx();
-    return { success, orderId: success ? orderId : undefined, error: errReason };
+    tx.immediate();
+    return { success, orderId: success ? resultOrderId : undefined, error: errReason };
   }
 
   /**
    * Cancel an open virtual order and release locked escrow
    */
   public static cancelVirtualOrder(db: Db, orderId: string): boolean {
-    const order = db.prepare('SELECT * FROM paper_trading_orders WHERE order_id = ?').get(orderId) as any;
-    if (!order) return false;
-
-    const allowed = VALID_STATE_TRANSITIONS[order.status] || [];
-    if (!allowed.includes('cancelled')) {
-      return false;
-    }
-
-    const unfilledQty = order.quantity - order.filled_quantity;
     const tx = db.transaction(() => {
+      const order = db.prepare('SELECT * FROM paper_trading_orders WHERE order_id = ?').get(orderId) as any;
+      if (!order) return false;
+
+      const allowed = VALID_STATE_TRANSITIONS[order.status] || [];
+      if (!allowed.includes('cancelled')) return false;
+
+      const transition = db.prepare(`
+        UPDATE paper_trading_orders
+        SET status = 'cancelled', escrow_locked = 0, fee_reserved = 0, updated_at = datetime('now')
+        WHERE order_id = ? AND status = ? AND filled_quantity = ?
+      `).run(orderId, order.status, order.filled_quantity);
+      if (transition.changes !== 1) return false;
+
+      const unfilledQty = order.quantity - order.filled_quantity;
       if (order.order_type === 'buy' && unfilledQty > 0) {
         const acc = db.prepare('SELECT available_cash, escrow_locked FROM paper_trading_accounts WHERE account_id = ?').get(order.account_id) as any;
-        // Refund exactly the unfilled cash portion plus any remaining unused fee buffer in escrow
         const trackedRemainingEscrow = Number(order.escrow_locked || 0);
         const escrowToRefund = Math.min(
           acc.escrow_locked,
@@ -348,11 +377,10 @@ export class PaperTradingSystem {
         `).run(order.account_id, orderId, escrowToRefund, newBal, newEscrow);
       }
 
-      db.prepare("UPDATE paper_trading_orders SET status = 'cancelled', escrow_locked = 0, fee_reserved = 0, updated_at = datetime('now') WHERE order_id = ?").run(orderId);
+      return true;
     });
 
-    tx();
-    return true;
+    return tx.immediate();
   }
 
   /**
@@ -399,6 +427,36 @@ export class PaperTradingSystem {
     }
 
     const tx = db.transaction(() => {
+      const currentOrder = db.prepare('SELECT * FROM paper_trading_orders WHERE order_id = ?').get(orderId) as any;
+      if (
+        !currentOrder
+        || currentOrder.status !== order.status
+        || currentOrder.filled_quantity !== order.filled_quantity
+      ) {
+        return false;
+      }
+
+      const claimed = db.prepare(`
+        UPDATE paper_trading_orders
+        SET filled_quantity = ?,
+            status = ?,
+            fees_paid = fees_paid + ?,
+            escrow_locked = CASE WHEN order_type = 'buy' THEN max(0, escrow_locked - ?) ELSE 0 END,
+            fee_reserved = CASE WHEN order_type = 'buy' THEN max(0, fee_reserved - ?) ELSE 0 END,
+            updated_at = datetime('now')
+        WHERE order_id = ? AND status = ? AND filled_quantity = ?
+      `).run(
+        newTotalFilled,
+        newStatus,
+        feeForOrderForClaim(currentOrder.order_type, sim, fCtx),
+        currentOrder.order_type === 'buy' ? sim.totalGrossIsk + feeForOrderForClaim(currentOrder.order_type, sim, fCtx) : 0,
+        currentOrder.order_type === 'buy' ? feeForOrderForClaim(currentOrder.order_type, sim, fCtx) : 0,
+        orderId,
+        order.status,
+        order.filled_quantity,
+      );
+      if (claimed.changes !== 1) return false;
+
       const calc = FeeEngine.calculateTrade({
         buyType: order.order_type === 'buy' ? 'place_buy_order' : 'immediate_buy',
         sellType: order.order_type === 'sell' ? 'place_sell_order' : 'immediate_sell',
@@ -411,7 +469,6 @@ export class PaperTradingSystem {
 
       const buyerFee = calc.buyerBrokerFee;
       const sellerFee = calc.sellerBrokerFee + calc.salesTax + (calc.sccSurcharge || 0);
-      const feeForOrder = order.order_type === 'buy' ? buyerFee : sellerFee;
 
       if (order.order_type === 'buy') {
         const paperPosId = 'PT-POS-' + Date.now() + '-' + randomUUID().slice(0, 8);
@@ -486,24 +543,6 @@ export class PaperTradingSystem {
         `).run(order.account_id, orderId, sellerFee, newBal, acc.escrow_locked);
       }
 
-      db.prepare(`
-        UPDATE paper_trading_orders
-        SET filled_quantity = ?,
-            status = ?,
-            fees_paid = fees_paid + ?,
-            escrow_locked = CASE WHEN order_type = 'buy' THEN max(0, escrow_locked - ?) ELSE 0 END,
-            fee_reserved = CASE WHEN order_type = 'buy' THEN max(0, fee_reserved - ?) ELSE 0 END,
-            updated_at = datetime('now')
-        WHERE order_id = ?
-      `).run(
-        newTotalFilled,
-        newStatus,
-        feeForOrder,
-        order.order_type === 'buy' ? sim.totalGrossIsk + feeForOrder : 0,
-        order.order_type === 'buy' ? feeForOrder : 0,
-        orderId,
-      );
-
       if (order.opportunity_id) {
         const oppRow = db.prepare('SELECT * FROM trade_opportunities_log WHERE opportunity_id = ?').get(order.opportunity_id) as any;
         if (oppRow) {
@@ -518,10 +557,14 @@ export class PaperTradingSystem {
           `).run(isFullyFilled ? 'simulated_filled' : 'simulated_partial', actualPnl, variance, order.opportunity_id);
         }
       }
+
+      return true;
     });
 
-    tx();
-    return { filledQty: filledNow, avgPrice: sim.weightedAvgPrice, status: newStatus };
+    const applied = tx.immediate();
+    return applied
+      ? { filledQty: filledNow, avgPrice: sim.weightedAvgPrice, status: newStatus }
+      : { filledQty: 0, avgPrice: 0, status: 'conflict' };
   }
 
   /**

@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import { DataCenter } from './data-center.js';
-import { FeeEngine, ALPHA_DEFAULT_SKILLS } from './fee-engine.js';
+import { FeeEngine, ALPHA_DEFAULT_SKILLS, FEE_MODEL_VERSION } from './fee-engine.js';
 import { OrderBookSimulator } from './orderbook-simulator.js';
 import { PortfolioManager, DEFAULT_RISK_LIMITS, type PortfolioRiskLimits } from './portfolio-manager.js';
 import { DraftSystem } from './draft-system.js';
@@ -34,8 +34,33 @@ function loadPipelineKeyStore(): Record<string, string> {
 // committed in source. Tests inject a non-production key via tests/setup.ts.
 export const PIPELINE_KEY_STORE: Record<string, string> = loadPipelineKeyStore();
 
+// SHA-256 fingerprints only: the compromised historical plaintext is never
+// repeated in source. Any attempt to reintroduce it is rejected at signing and
+// verification time.
+export const REVOKED_PIPELINE_SECRET_SHA256: ReadonlySet<string> = new Set([
+  '37ca7d242a79b5dfa5c774b0e43510a05d6ffc965e65b00d0c7ae5ccccc08c69',
+]);
+
+export function pipelineSecretFingerprint(secret: string): string {
+  return createHash('sha256').update(secret, 'utf8').digest('hex');
+}
+
+export function isPipelineSecretRevoked(secret: string): boolean {
+  return REVOKED_PIPELINE_SECRET_SHA256.has(pipelineSecretFingerprint(secret));
+}
+
 export function getPipelineKey(keyId: string): string | undefined {
   return PIPELINE_KEY_STORE[keyId];
+}
+
+function resolvePipelineSecret(
+  keyId: string,
+  secretOverride?: string,
+): { ok: true; secret: string } | { ok: false; reason: string } {
+  const secret = secretOverride || getPipelineKey(keyId);
+  if (!secret) return { ok: false, reason: `【密钥未知】无法为 keyId=${keyId} 找到可用的签名密钥` };
+  if (isPipelineSecretRevoked(secret)) return { ok: false, reason: '【密钥已撤销】该历史签名密钥已永久吊销，禁止签发或验证凭证！' };
+  return { ok: true, secret };
 }
 
 function requireInteger(name: string, value: number, min = Number.MIN_SAFE_INTEGER): number {
@@ -60,6 +85,13 @@ function requireText(name: string, value: string, pattern?: RegExp): string {
   }
   if (pattern && !pattern.test(value)) throw new Error(`【凭证参数非法】${name} 格式不合法`);
   return value;
+}
+
+function normalizeSnapshotTimestamp(value?: string | null): string {
+  if (!value) return new Date(0).toISOString();
+  const normalized = value.endsWith('Z') ? value : value + 'Z';
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date(0).toISOString();
 }
 
 function requireIso(name: string, value: string): string {
@@ -88,6 +120,10 @@ export function buildCanonicalCredentialPayload(
     expectedNetProfit: requireMoney('expectedNetProfit', data.expectedNetProfit),
     opportunityRating: requireText('opportunityRating', data.opportunityRating, /^[ABCD]$/),
     marketSnapshotHash: requireText('marketSnapshotHash', data.marketSnapshotHash, /^[a-f0-9]{16,64}$/i),
+    marketSnapshotId: requireText('marketSnapshotId', data.marketSnapshotId),
+    buySnapshotTimestamp: requireIso('buySnapshotTimestamp', data.buySnapshotTimestamp),
+    sellSnapshotTimestamp: requireIso('sellSnapshotTimestamp', data.sellSnapshotTimestamp),
+    feeModelVersion: requireText('feeModelVersion', data.feeModelVersion),
     verifiedAt: requireIso('verifiedAt', data.verifiedAt),
     expiresAt: requireIso('expiresAt', data.expiresAt),
     nonce: requireText('nonce', data.nonce),
@@ -99,12 +135,10 @@ export function signPipelineCredential(
   data: Omit<PipelineVerificationCredential, 'signature'>,
   secretOverride?: string,
 ): string {
-  const secret = secretOverride || getPipelineKey(data.keyId);
-  if (!secret) {
-    throw new Error(`【密钥未知】无法为 keyId=${data.keyId} 找到可用的签名密钥`);
-  }
+  const resolved = resolvePipelineSecret(data.keyId, secretOverride);
+  if (!resolved.ok) throw new Error(resolved.reason);
   const payload = buildCanonicalCredentialPayload(data);
-  return createHmac('sha256', secret).update(payload).digest('hex');
+  return createHmac('sha256', resolved.secret).update(payload).digest('hex');
 }
 
 function safeCompareHex(a: string, b: string): boolean {
@@ -143,10 +177,14 @@ export function validatePipelineCredential(
     return { valid: false, reason: `【跨角色越权】凭证绑定角色 (${cred.characterId}) 与当前操作角色 (${options.expectedCharacterId}) 不一致，严禁跨用户复用凭证！` };
   }
 
-  const secret = options?.secretOverride || getPipelineKey(cred.keyId);
-  if (!secret) {
-    return { valid: false, reason: `【密钥失效】无法验证 keyId=${cred.keyId} 的签名，该密钥未注册或已轮换作废！` };
+  const resolved = resolvePipelineSecret(cred.keyId, options?.secretOverride);
+  if (!resolved.ok) {
+    const reason = resolved.reason.includes('【密钥未知】')
+      ? resolved.reason.replace('【密钥未知】', '【密钥失效】')
+      : resolved.reason;
+    return { valid: false, reason };
   }
+  const secret = resolved.secret;
 
   const expectedSig = signPipelineCredential({
     credentialId: cred.credentialId,
@@ -163,6 +201,10 @@ export function validatePipelineCredential(
     expectedNetProfit: cred.expectedNetProfit,
     opportunityRating: cred.opportunityRating,
     marketSnapshotHash: cred.marketSnapshotHash,
+    marketSnapshotId: cred.marketSnapshotId,
+    buySnapshotTimestamp: cred.buySnapshotTimestamp,
+    sellSnapshotTimestamp: cred.sellSnapshotTimestamp,
+    feeModelVersion: cred.feeModelVersion,
     verifiedAt: cred.verifiedAt,
     expiresAt: cred.expiresAt,
     nonce: cred.nonce,
@@ -176,8 +218,16 @@ export function validatePipelineCredential(
   if (Math.abs(cred.expectedNetProfit - opp.expectedNetProfit) > 0.01) {
     return { valid: false, reason: '【参数篡改】机会当前预期净利润与凭证签章值不吻合！' };
   }
-  if (cred.marketSnapshotHash !== opp.marketSnapshotHash) {
-    return { valid: false, reason: '【行情快照不一致】凭证绑定的行情快照与当前机会不一致！' };
+  if (
+    cred.marketSnapshotHash !== opp.marketSnapshotHash
+    || cred.marketSnapshotId !== opp.marketSnapshotId
+    || cred.buySnapshotTimestamp !== opp.buySnapshotTimestamp
+    || cred.sellSnapshotTimestamp !== opp.sellSnapshotTimestamp
+  ) {
+    return { valid: false, reason: '【行情快照不一致】凭证绑定的行情快照身份或时间与当前机会不一致！' };
+  }
+  if (cred.feeModelVersion !== opp.feeModelVersion) {
+    return { valid: false, reason: '【费用模型版本不一致】凭证签发时使用的费用模型与当前机会不一致！' };
   }
   if (
     cred.typeId !== opp.typeId ||
@@ -213,17 +263,15 @@ export function validateAndConsumePipelineCredential(
 
   const credId = opp.pipelineCredential!.credentialId;
 
-  // Anti-replay: single-use consumption check in SQLite
-  const existing = db.prepare('SELECT 1 FROM consumed_pipeline_credentials WHERE credential_id = ?').get(credId);
-  if (existing) {
-    throw new Error(`【凭证重放阻断】验证凭证 ${credId} 已经被消费使用过，严禁重复提交生成草案！`);
-  }
-
-  // Atomically record consumption
-  db.prepare(`
-    INSERT INTO consumed_pipeline_credentials (credential_id, character_id, draft_id, consumed_at)
+  // Atomic single-use consumption: the primary key makes concurrent replays
+  // lose the insert race instead of relying on a prior SELECT.
+  const consumed = db.prepare(`
+    INSERT OR IGNORE INTO consumed_pipeline_credentials (credential_id, character_id, draft_id, consumed_at)
     VALUES (?, ?, ?, datetime('now'))
   `).run(credId, characterId, draftId);
+  if (consumed.changes !== 1) {
+    throw new Error(`【凭证重放阻断】验证凭证 ${credId} 已经被消费使用过，严禁重复提交生成草案！`);
+  }
 }
 
 export interface PipelineEvaluationResult {
@@ -314,6 +362,18 @@ export class TradingPipeline {
       minNetMarginPct: 5.0,
     });
 
+    const depthCapacity = Math.min(
+      originBook.sells.reduce((sum, level) => sum + Math.max(0, level.volumeRemain), 0),
+      destBook.buys.reduce((sum, level) => sum + Math.max(0, level.volumeRemain), 0),
+    );
+    if (candidate.requestedQty && candidate.requestedQty > depthCapacity) {
+      return this.rejectResult(
+        candidate,
+        `订单簿可成交量 ${depthCapacity} 不足拟交易数量 ${candidate.requestedQty}，明确拒绝授权`,
+        'D',
+        meta,
+      );
+    }
     if (optimalQuantity === 0 || !buySim.isComplete || !sellSim.isComplete || buySim.filledQty === 0) {
       return this.rejectResult(candidate, '订单簿深度无法支撑具有正边际利润的批量交易', 'D', meta);
     }
@@ -378,12 +438,39 @@ export class TradingPipeline {
       rating = 'A';
     }
 
-    // Compute market snapshot hash binding
+    // Compute a quantity-aware snapshot binding. The full normalized book is
+    // hashed, not just the top three levels, so different trade sizes cannot
+    // share one authorization by accident.
+    const normalizeLevels = (levels: Array<{ price: number; volumeRemain: number }>) =>
+      [...levels]
+        .map((level) => ({ p: level.price, v: level.volumeRemain }))
+        .sort((left, right) => left.p - right.p || left.v - right.v);
     const snapshotContent = JSON.stringify({
-      sells: originBook.sells.slice(0, 3).map(s => ({ p: s.price, v: s.volumeRemain })),
-      buys: destBook.buys.slice(0, 3).map(b => ({ p: b.price, v: b.volumeRemain })),
+      schema: 'eveai-market-snapshot-v2',
+      requestedQuantity: actualQty,
+      originSells: normalizeLevels(originBook.sells),
+      destBuys: normalizeLevels(destBook.buys).sort((left, right) => right.p - left.p || right.v - left.v),
+      buyFill: {
+        requestedQty: buySim.requestedQty,
+        filledQty: buySim.filledQty,
+        unfilledQty: buySim.unfilledQty,
+        isComplete: buySim.isComplete,
+        effectiveOrders: buySim.effectiveOrders,
+      },
+      sellFill: {
+        requestedQty: sellSim.requestedQty,
+        filledQty: sellSim.filledQty,
+        unfilledQty: sellSim.unfilledQty,
+        isComplete: sellSim.isComplete,
+        effectiveOrders: sellSim.effectiveOrders,
+      },
     });
     const marketSnapshotHash = createHash('sha256').update(snapshotContent).digest('hex');
+    const marketSnapshotId = 'MSNAP-' + marketSnapshotHash.slice(0, 24);
+    const originMeta = DataCenter.getRegionSnapshotMeta(db, candidate.originRegionId);
+    const destMeta = DataCenter.getRegionSnapshotMeta(db, candidate.destRegionId);
+    const buySnapshotTimestamp = normalizeSnapshotTimestamp(originMeta?.fetchedAt);
+    const sellSnapshotTimestamp = normalizeSnapshotTimestamp(destMeta?.fetchedAt);
     const opportunityId = 'OPP-' + Date.now() + '-' + randomUUID().slice(0, 8);
 
     // Stage 7.5: Generate Cryptographic Pipeline Verification Credential for Approved A/B grades
@@ -407,6 +494,10 @@ export class TradingPipeline {
         expectedNetProfit: trade.netProfit,
         opportunityRating: rating,
         marketSnapshotHash,
+        marketSnapshotId,
+        buySnapshotTimestamp,
+        sellSnapshotTimestamp,
+        feeModelVersion: FEE_MODEL_VERSION,
         verifiedAt,
         expiresAt,
         nonce: randomUUID(),
@@ -421,6 +512,10 @@ export class TradingPipeline {
     const opportunity: TradeOpportunity = {
       opportunityId,
       marketSnapshotHash,
+      marketSnapshotId,
+      buySnapshotTimestamp,
+      sellSnapshotTimestamp,
+      feeModelVersion: FEE_MODEL_VERSION,
       typeId: candidate.typeId,
       typeName: meta.en_name,
       zhName: meta.zh_name || undefined,

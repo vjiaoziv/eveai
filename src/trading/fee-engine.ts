@@ -10,7 +10,7 @@ export const CORP_STANDING_REDUCTION = 0.0002;    // 0.02% reduction per standin
 export const NPC_BROKER_FEE_FLOOR = 0.01;     // 1.0% minimum floor in NPC stations
 export const STRUCTURE_BROKER_FEE_FLOOR = 0.005; // 0.5% minimum floor in Upwell structures
 export const STATUTORY_SCC_SURCHARGE_RATE = 0.005; // 0.5% mandatory SCC surcharge in Upwell structures
-export const MINIMUM_BROKER_FEE_ISK = 100.0;  // EVE minimum 100 ISK broker fee per order
+export const FEE_MODEL_VERSION = 'eveai-fee-2026-11-v1';
 
 export const ALPHA_DEFAULT_SKILLS: PilotTradingSkills = {
   accounting: 3,         // Alpha cap is level 3 (Tax = 5.025%)
@@ -124,20 +124,21 @@ export class FeeEngine {
     const grossRevenue = sellUnitPrice * quantity;
 
     // Buyer fees:
-    // If placing buy order, buyer pays broker fee upfront (min 100 ISK floor).
+    // If placing buy order, buyer pays the percentage broker fee upfront.
     // If immediate buy (eating a sell order), buyer pays 0 fee.
     let buyerBrokerFee = 0;
     if (buyType === 'place_buy_order' && grossCost > 0) {
-      buyerBrokerFee = Math.max(MINIMUM_BROKER_FEE_ISK, grossCost * buyRates.brokerFeeRate);
+      buyerBrokerFee = Math.round(grossCost * buyRates.brokerFeeRate * 100) / 100;
     }
     const netCost = grossCost + buyerBrokerFee + haulingCost;
 
     // Seller fees:
-    // If placing sell order, seller pays broker fee upfront (min 100 ISK floor) + sales tax + SCC surcharge (Upwell).
+    // If placing sell order, seller pays the percentage broker fee upfront,
+    // plus sales tax and SCC surcharge (Upwell).
     // If immediate sell (eating a buy order), seller pays 0 broker fee, but pays sales tax.
     let sellerBrokerFee = 0;
     if (sellType === 'place_sell_order' && grossRevenue > 0) {
-      sellerBrokerFee = Math.max(MINIMUM_BROKER_FEE_ISK, grossRevenue * sellRates.brokerFeeRate);
+      sellerBrokerFee = Math.round(grossRevenue * sellRates.brokerFeeRate * 100) / 100;
     }
     const salesTax = grossRevenue * sellRates.salesTaxRate;
     const sccSurcharge = sellType === 'place_sell_order' && sellRates.sccSurchargeRate

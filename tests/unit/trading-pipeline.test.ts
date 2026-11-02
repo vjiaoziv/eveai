@@ -32,7 +32,7 @@ function createTestDb(): Database.Database {
 }
 
 describe('TradingPipeline Deterministic Verification', () => {
-  it('strictly caps quantity by top bid volume and calculates multi-level costs', () => {
+  it('rejects a requested quantity larger than executable orderbook depth', () => {
     const db = createTestDb();
     const nowIso = new Date().toISOString();
 
@@ -60,16 +60,10 @@ describe('TradingPipeline Deterministic Verification', () => {
       characterId: 1001,
     });
 
-    // The pipeline MUST cap suggestedQuantity to 2 (top bid depth)
-    expect(result.opportunity.suggestedQuantity).toBe(2);
-    expect(result.opportunity.suggestedBuyPrice).toBe(274900);
-    expect(result.opportunity.suggestedSellPrice).toBe(700000);
-
-    // Stress test must be present
-    expect(result.opportunity.stressTest).toBeDefined();
-    expect(result.opportunity.stressTest?.priceDrop5Pct.netProfit).toBeGreaterThan(0);
-    // When bid evaporates, price falls back to 1006 ISK, creating huge loss
-    expect(result.opportunity.stressTest?.bidEvaporation.netProfit).toBeLessThan(0);
+    expect(result.rating).toBe('D');
+    expect(result.isExecutable).toBe(false);
+    expect(result.vetoReason).toContain('订单簿可成交量');
+    expect(result.draft).toBeUndefined();
   });
 
   it('vetoes candidate with D rating when timestamp skew exceeds threshold', () => {

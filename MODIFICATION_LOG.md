@@ -224,3 +224,23 @@
 - **审计交付**:
   - 在 `docs/audit/P8.5.5/` 交付 12 份独立审计报告，最终裁定为 `PAPER_TRADING_BLOCKED`：UI POST ESI 行为和并行回归 flaky 仍未满足严格只读与全量绿灯要求。
   - P8.5.5 最终提交：`the current P8.5.5 HEAD (resolve with git rev-parse HEAD)`。
+
+### 17. 2026-11-02：完成 EVEAI P8.5.6 阻断项清零、并发安全加固与 Paper Trading 恢复验收
+- **严格 ESI GET-only 边界**:
+  - 新增 `src/eve/esi-security.ts`，在操作注册层和最终 HTTP 派发层拒绝所有非 GET。
+  - `callEsiOperation`、`fetchEsiWithRetry`、`fetchWithTimeout`、`fetchRetrying` 全部接入安全网关；修复 `DataCenter` 直接 ESI fetch 绕过。
+  - ESI inventory：58 个 catalog 操作，52 个 GET 允许，6 个非 GET 阻断，其中 3 个 UI POST。
+- **并发与事务加固**:
+  - 订单资金预留改为条件式原子 SQL；凭证消费使用 `INSERT OR IGNORE`；草案、成交和撤单使用立即事务与乐观状态条件更新。
+  - 多进程测试覆盖 80 个资金竞争请求和 100 次同一凭证消费，均无透支、无重复授权。
+- **行情、费用与历史迁移**:
+  - 凭证新增 `marketSnapshotId`、双侧快照时间、`feeModelVersion`；快照哈希覆盖完整订单簿与成交深度。
+  - 订单簿深度不足拟交易数量时返回 D 级并拒绝授权。
+  - 历史担保金按 journal 恢复；无证据行隔离为 `unrecoverable`。
+  - 删除无权威依据的 100 ISK 绝对保底，费用按 CCP 官方百分比规则计算。
+  - 历史签名密钥按 SHA-256 指纹永久撤销。
+- **稳定性与交付**:
+  - 修复 Perimeter pursuit 持久化时序和多进程 draftId 竞争；Vitest 使用确定性串行文件执行。
+  - 全量测试连续 3 次通过：每次 211 文件、2009 项。
+  - TypeScript、Build、Lint 全部通过；Build 字体警告清零。
+  - 在 `docs/audit/P8.5.6/` 交付 12 份审计报告，最终状态为 `PAPER_TRADING_READY`（仅限本地 Paper Trading）。

@@ -46,6 +46,10 @@ function createValidSignedOpportunity(characterId = 5001, keyId = 'v1'): TradeOp
   const opp: TradeOpportunity = {
     opportunityId: 'OPP-A24-' + Date.now() + '-' + Math.floor(Math.random() * 10000),
     marketSnapshotHash: 'abcdef0123456789',
+    marketSnapshotId: 'MSNAP-test-0123456789abcdef',
+    buySnapshotTimestamp: '2026-11-02T00:00:00.000Z',
+    sellSnapshotTimestamp: '2026-11-02T00:00:00.000Z',
+    feeModelVersion: 'eveai-fee-2026-11-v1',
     typeId: 34,
     typeName: 'Tritanium',
     volumeM3: 0.01,
@@ -85,6 +89,10 @@ function createValidSignedOpportunity(characterId = 5001, keyId = 'v1'): TradeOp
     expectedNetProfit: opp.expectedNetProfit,
     opportunityRating: 'A' as const,
     marketSnapshotHash: 'abcdef0123456789',
+    marketSnapshotId: 'MSNAP-test-0123456789abcdef',
+    buySnapshotTimestamp: '2026-11-02T00:00:00.000Z',
+    sellSnapshotTimestamp: '2026-11-02T00:00:00.000Z',
+    feeModelVersion: 'eveai-fee-2026-11-v1',
     verifiedAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
     nonce: 'nonce-' + Math.random(),
@@ -273,6 +281,10 @@ describe('P8.5.5 Exhaustive Adversarial Test Matrix (A01 - A24)', () => {
         expectedNetProfit: 100,
         opportunityRating: 'A',
         marketSnapshotHash: 'abcdef0123456789',
+        marketSnapshotId: 'MSNAP-test-0123456789abcdef',
+        buySnapshotTimestamp: '2026-11-02T00:00:00.000Z',
+        sellSnapshotTimestamp: '2026-11-02T00:00:00.000Z',
+        feeModelVersion: 'eveai-fee-2026-11-v1',
         verifiedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 60000).toISOString(),
         nonce: 'nonce',
@@ -397,7 +409,7 @@ describe('P8.5.5 Exhaustive Adversarial Test Matrix (A01 - A24)', () => {
     expect(trade.totalFees).toBe(30_000 + 10_000 + (2_000_000 * 0.05025));
   });
 
-  it('A21: 费用舍入边界 -> 100 ISK 保底与统一精度', () => {
+  it('A21: 费用舍入边界 -> 百分比费用与两位小数精度', () => {
     const alphaCtx = {
       clone: 'alpha' as const,
       skills: ALPHA_DEFAULT_SKILLS,
@@ -414,8 +426,8 @@ describe('P8.5.5 Exhaustive Adversarial Test Matrix (A01 - A24)', () => {
       sellCtx: alphaCtx,
     });
 
-    expect(trade.buyerBrokerFee).toBe(100.0);
-    expect(trade.sellerBrokerFee).toBe(100.0);
+    expect(trade.buyerBrokerFee).toBe(0.21);
+    expect(trade.sellerBrokerFee).toBe(0.42);
   });
 
   it('A22: 账户并发访问资金守恒 -> 100 并发订单无透支', () => {

@@ -1,4 +1,5 @@
 import type { Db } from '../db/sqlite.js';
+import { fetchWithTimeout } from '../eve/http.js';
 import type { DataQualityMetrics, OrderBookLevel } from './types.js';
 
 export interface DataSourceRecord {
@@ -201,10 +202,9 @@ export class DataCenter {
   ): Promise<boolean> {
     const url = `https://esi.evetech.net/latest/markets/${regionId}/history/?datasource=tranquility&type_id=${typeId}`;
     try {
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         headers: { 'User-Agent': 'EVEAI/4.1.0 (contact=jiaozi@local)' },
-        signal: AbortSignal.timeout(10_000),
-      });
+      }, 10_000);
       if (!res.ok) {
         this.recordStatus(db, 'ccp_esi_history', 'degraded', `HTTP ${res.status}`);
         return false;

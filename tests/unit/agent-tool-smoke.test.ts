@@ -437,10 +437,6 @@ const SUCCESS_CASES: Case[] = [
     expect(r).toMatchObject({ ok: true, scope: 'character', id: 90000002 });
     expect((r.hypotheses as Row[]).length).toBeGreaterThan(0);
   }],
-  ['analyze_local', { pilots: 'Prey Pilot\nHunter Pilot', days: 7 }, (r) => {
-    expect(r.ok).toBe(true);
-    expect(JSON.stringify(r)).toContain('Hunter Pilot');
-  }],
   ['analyze_scan', { paste: `${RIFTER}\tHunter's Rifter\tRifter\t1,200 km\n${DRAKE}\tDrake\tDrake\t-`, scan_type: null, days: null }, (r) => {
     expect(r).toMatchObject({ ok: true, scan_type: 'dscan', total_objects: 2, resolved: 2 });
   }],
@@ -526,7 +522,6 @@ const SUCCESS_CASES: Case[] = [
     expect(r).toMatchObject({ ok: true });
     expect(r.data).toEqual([expect.objectContaining({ system_id: TAMA, ship_kills: 12 })]);
   }],
-  ['post_universe_names', { ids: JSON.stringify([JITA]) }, (r) => expect(r).toMatchObject({ ok: true, data: [{ id: JITA }] })],
   // Local batch (ModelHub provider)
   ['local_parallel_batch', { calls: [
     { id: 'count', tool: 'count_universe_objects', arguments_json: JSON.stringify({ target_kind: 'region', target_name: 'The Forge', object_kind: 'systems' }) },
@@ -591,7 +586,7 @@ const FAILURE_CASES: FailureCase[] = [
   ['scout_systems', { query: 'Thera', space: null, limit: null }, 'api.eve-scout.com', { ok: false, status: 503 }],
   ['get_status', { fields: ['nope'] }, null, { ok: false, status: 400 }],
   ['get_universe_system_kills', { fields: null }, null, { ok: false, status: 400 }],
-  ['post_universe_names', { ids: JSON.stringify([JITA]) }, 'esi.evetech.net', { ok: false, status: 503 }],
+  ['post_universe_names', { ids: JSON.stringify([JITA]) }, 'esi.evetech.net', { ok: false, status: 405 }],
   ['local_parallel_batch', { calls: [{ id: 'bad', tool: 'count_universe_objects', arguments_json: '{"target_kind":1}' }] }, null, { ok: false, blocked: true }],
   ['delegate_read_subagents', { tasks: [] }, null, { ok: false, blocked: true }],
 ];
