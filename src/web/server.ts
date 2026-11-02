@@ -20,6 +20,7 @@ import { registerMarketRoutes } from './market-routes.js';
 import { registerProfileRoutes } from './profile-routes.js';
 import { registerSecurityHeaders } from './security.js';
 import { registerSettingsRoutes } from './settings-routes.js';
+import { registerTradingRoutes } from './trading-routes.js';
 
 export async function createServer(db: Db) {
   const app = Fastify({
@@ -47,6 +48,7 @@ export async function createServer(db: Db) {
     registerProfileRoutes(app, db);
     registerMapRoutes(app, db, agentRequests);
     registerExamplesRoutes(app);
+    registerTradingRoutes(app, db);
     await registerWebApp(app);
   }
 
