@@ -168,13 +168,10 @@ async function cmdDraftAuto() {
     maxCapital: bd.singleItemCapIsk,
   });
 
-  const validOpps = haulOpps.filter(o => {
-    const riskCheck = PortfolioManager.validateTradeRisk(bd, o.capitalRequired, o.strategy, o.volumeM3 * o.suggestedQuantity);
-    return riskCheck.allowed;
-  });
+  const validOpps = haulOpps.filter(o => o.opportunityRating !== 'D' && !o.riskVetoReason);
 
   if (validOpps.length === 0) {
-    console.log("当前无满足全部风控条件的即时套利机会。");
+    console.log("当前无通过统一决策管线风控评估的高等级套利机会（所有候选机会已被 D 级一票否决）。");
     return;
   }
 
@@ -434,4 +431,5 @@ main().catch(err => {
   console.error(err);
   process.exit(1);
 });
+
 

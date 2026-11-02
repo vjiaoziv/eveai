@@ -33,6 +33,11 @@ export class DraftSystem {
     opp: TradeOpportunity,
     validHours = 24,
   ): TradeDraft {
+    // Stage 8 Guardrail: D-grade or vetoed opportunities can NEVER generate a draft in any pathway
+    if (opp.opportunityRating === 'D' || opp.riskVetoReason) {
+      throw new Error('【风控一票否决】该交易机会评级为 D (' + (opp.riskVetoReason || '高风险未通过') + ')，严禁生成交易订单草案！');
+    }
+
     const draftId = this.generateDraftId(db);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + validHours * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19);
@@ -217,3 +222,5 @@ export class DraftSystem {
     }));
   }
 }
+
+

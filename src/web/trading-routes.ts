@@ -107,17 +107,18 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
       maxCapital: bd.singleItemCapIsk,
     });
 
-    const validOpps = opps.filter(o => {
-      const risk = PortfolioManager.validateTradeRisk(bd, o.capitalRequired, o.strategy, o.volumeM3 * o.suggestedQuantity);
-      return risk.allowed;
-    });
-
+    // Enforce 10-stage pipeline: only A or approved B can generate drafts
+    const validOpps = opps.filter(o => o.opportunityRating !== 'D' && !o.riskVetoReason);
     if (validOpps.length === 0) {
-      return reply.status(409).send({ error: '当前无满足全部风控条件的即时套利机会' });
+      return reply.status(409).send({ error: '当前无通过统一决策管线风控评估的高等级套利机会' });
     }
 
-    const draft = DraftSystem.createDraft(db, char.characterId, validOpps[0], 24);
-    return { draft, opportunity: validOpps[0] };
+    try {
+      const draft = DraftSystem.createDraft(db, char.characterId, validOpps[0], 24);
+      return { draft, opportunity: validOpps[0] };
+    } catch (err: any) {
+      return reply.status(409).send({ error: err.message });
+    }
   });
 
   app.post<{ Params: { draftId: string } }>('/api/web/trading/drafts/:draftId/approve', async (request, reply) => {
@@ -172,3 +173,4 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     return PaperTradingSystem.getPortfolio(db, char.characterId);
   });
 }
+

@@ -167,3 +167,15 @@
 - **交付文档**：
   - 生成 `P8_5_1_READINESS_AUDIT.md`, `P8_5_1_FULL_TEST_REPORT.md`, `P8_5_1_BACKTEST_MODEL_AUDIT.md`, `P8_5_1_PERFORMANCE_METRICS_AUDIT.md`, `P8_5_1_ASSET_VALUATION_AUDIT.md`, `P8_5_1_DRAFT_AUDIT_ACCESS_AUDIT.md`, `P8_5_1_PAPER_TRADING_ARCHITECTURE.md`, `P8_5_1_PAPER_TRADING_TEST_REPORT.md`, `P8_5_1_DATA_RELIABILITY_REPORT.md`, `P8_5_1_DEPLOYMENT_GUIDE.md`, `P8_5_1_KNOWN_LIMITATIONS.md`, `P8_5_1_FINAL_ACCEPTANCE_REPORT.md` 共 12 份报告。
   - 正式授予系统 **`PAPER_TRADING_READY`** 准入资质，开启 30 天模拟盘观察期。
+
+### 13. 2026-11-02：完成 EVEAI P8.5.2 深度漏洞审计、系统强化与压力测试
+- **深层漏洞清零与代码加固**：
+  - `src/trading/draft-system.ts`: 在 `createDraft` 核心层增加 D 级机会一票否决强门禁，彻底封堵从 API 或 CLI 绕过决策管线创建高危草案的漏洞。
+  - `src/trading/paper-trading.ts`: 引入 `idempotency_key` 唯一键索引，消除网络重试导致的重复冻结扣款；将买单撮合税费修正为仅扣买方经纪人费（买方不付销售税），实现资产负债表严格对账；在订单撤单中退还未使用的挂单保底费缓冲；将订单 ID 与仓位 ID 升级为 UUID 防重；增加 `VALID_STATE_TRANSITIONS` 状态机跃迁保护。
+  - `src/web/trading-routes.ts` & `scripts/eve-cli.ts`: 自动草案生成严格过滤 D 级与被否决机会。
+- **全项目与高级压力测试**：
+  - 新增 `tests/unit/p8-5-2-stress.test.ts`，覆盖场景 A（100 并发订单争抢资金）、场景 B（100 次幂等重复提交）、场景 C（部分成交后连续撤单资金释放）、场景 H（直接绕过管线拦截）、场景 I（已撤销草案锁死）、场景 K & N（异常与边界值测试）、场景 L（双重记账资金资产对账）、场景 R（只读安全零写入验证）。
+  - 交易系统专项测试扩充至 6 套测试文件，**37 项关键单测全部 100% 通过**（耗时 1.45s）。
+  - TypeScript 0 错误，前端生产构建打包完全成功。
+- **交付文档**：
+  - 生成 `P8_5_2_CODE_AUDIT.md`, `P8_5_2_TRADING_PIPELINE_AUDIT.md`, `P8_5_2_ORDERBOOK_AUDIT.md`, `P8_5_2_FUND_AND_ORDER_STATE_AUDIT.md`, `P8_5_2_FEE_ENGINE_AUDIT.md`, `P8_5_2_PORTFOLIO_AUDIT.md`, `P8_5_2_BACKTEST_AUDIT.md`, `P8_5_2_STRATEGY_AUDIT.md`, `P8_5_2_DATA_RELIABILITY_AUDIT.md`, `P8_5_2_SECURITY_AUDIT.md`, `P8_5_2_FULL_TEST_REPORT.md`, `P8_5_2_FINAL_ACCEPTANCE_REPORT.md` 共 12 份专项报告。

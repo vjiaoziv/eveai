@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import type { FeeContext, OrderBookLevel, StrategyType, TradeOpportunity } from './types.js';
 import { FeeEngine, ALPHA_DEFAULT_SKILLS } from './fee-engine.js';
@@ -20,6 +21,7 @@ export interface PaperOrder {
   orderId: string;
   accountId: string;
   opportunityId?: string;
+  idempotencyKey?: string;
   characterId: number;
   typeId: number;
   strategyType: StrategyType;
@@ -63,6 +65,14 @@ export interface PaperStrategyPerformance {
   avgPredictionVarianceIsk: number;
 }
 
+const VALID_STATE_TRANSITIONS: Record<string, string[]> = {
+  'open': ['partially_filled', 'filled', 'cancelled', 'expired'],
+  'partially_filled': ['partially_filled', 'filled', 'cancelled', 'expired'],
+  'filled': [], // Terminal
+  'cancelled': [], // Terminal
+  'expired': [], // Terminal
+};
+
 export class PaperTradingSystem {
   /**
    * Get or create a dedicated virtual paper trading account for a character
@@ -72,7 +82,7 @@ export class PaperTradingSystem {
     characterId: number,
     initialCash = 10_000_000,
   ): PaperAccount {
-    const accountId = `PT-ACC-${characterId}`;
+    const accountId = 'PT-ACC-' + characterId;
     let row = db.prepare('SELECT * FROM paper_trading_accounts WHERE account_id = ?').get(accountId) as any;
 
     if (!row) {
@@ -81,6 +91,11 @@ export class PaperTradingSystem {
         INSERT INTO paper_trading_accounts (account_id, character_id, initial_cash, available_cash, escrow_locked, total_realized_pnl, total_fees_paid, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, 0, 0, 0, 'active', ?, ?)
       `).run(accountId, characterId, initialCash, initialCash, now, now);
+
+      db.prepare(`
+        INSERT INTO paper_trading_journal (account_id, entry_type, amount, balance_after, escrow_after)
+        VALUES (?, 'deposit', ?, ?, 0)
+      `).run(accountId, initialCash, initialCash);
 
       row = db.prepare('SELECT * FROM paper_trading_accounts WHERE account_id = ?').get(accountId) as any;
     }
@@ -100,29 +115,56 @@ export class PaperTradingSystem {
   }
 
   /**
+   * Reconcile virtual account balance against double-entry assets and equity.
+   * Total Assets (Cash + Escrow + Inventory Cost Basis) == Total Equity (Initial Cash + Realized PnL - Fees Paid).
+   */
+  public static verifyAccountBalance(db: Db, accountId: string): { isReconciled: boolean; discrepancy: number; actualTotal: number; expectedTotal: number } {
+    const acc = db.prepare('SELECT * FROM paper_trading_accounts WHERE account_id = ?').get(accountId) as any;
+    if (!acc) return { isReconciled: false, discrepancy: 0, actualTotal: 0, expectedTotal: 0 };
+
+    const invRow = db.prepare("SELECT COALESCE(SUM(quantity * cost_price), 0) as cost_basis FROM paper_trading_positions WHERE character_id = ? AND status = 'holding'").get(acc.character_id) as any;
+    const inventoryCostBasis = Number(invRow?.cost_basis || 0);
+
+    const expectedTotal = acc.initial_cash + acc.total_realized_pnl - acc.total_fees_paid;
+    const actualTotal = acc.available_cash + acc.escrow_locked + inventoryCostBasis;
+    const discrepancy = Math.round((actualTotal - expectedTotal) * 100) / 100;
+
+    return {
+      isReconciled: Math.abs(discrepancy) < 0.05,
+      discrepancy,
+      actualTotal: Math.round(actualTotal * 100) / 100,
+      expectedTotal: Math.round(expectedTotal * 100) / 100,
+    };
+  }
+
+  /**
    * Reset virtual paper trading account (keeps history, resets active balance and positions)
    */
   public static resetAccount(db: Db, characterId: number, initialCash = 10_000_000): void {
-    const accountId = `PT-ACC-${characterId}`;
+    const accountId = 'PT-ACC-' + characterId;
     const tx = db.transaction(() => {
       db.prepare(`
         UPDATE paper_trading_accounts 
-        SET available_cash = ?, escrow_locked = 0, initial_cash = ?, updated_at = datetime('now')
+        SET available_cash = ?, escrow_locked = 0, initial_cash = ?, total_realized_pnl = 0, total_fees_paid = 0, updated_at = datetime('now')
         WHERE account_id = ?
       `).run(initialCash, initialCash, accountId);
 
       db.prepare("UPDATE paper_trading_orders SET status = 'cancelled' WHERE account_id = ? AND status IN ('open', 'partially_filled')").run(accountId);
       db.prepare("UPDATE paper_trading_positions SET status = 'sold', sold_at = datetime('now'), sold_price = 0, realized_pnl = 0 WHERE character_id = ? AND status = 'holding'").run(characterId);
+
+      db.prepare(`
+        INSERT INTO paper_trading_journal (account_id, entry_type, amount, balance_after, escrow_after)
+        VALUES (?, 'deposit', ?, ?, 0)
+      `).run(accountId, initialCash, initialCash);
     });
     tx();
   }
 
   /**
    * Log an identified trade opportunity BEFORE any execution happens.
-   * Ensures 100% auditable record of both accepted and vetoed opportunities.
    */
   public static logOpportunity(db: Db, opp: TradeOpportunity): string {
-    const oppId = `OPP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const oppId = 'OPP-' + Date.now() + '-' + randomUUID().slice(0, 8);
     const outcome = (opp.opportunityRating === 'D' || opp.riskVetoReason) ? 'vetoed' : 'pending';
 
     db.prepare(`
@@ -153,7 +195,7 @@ export class PaperTradingSystem {
   }
 
   /**
-   * Create a local virtual order with strict transaction-isolated balance locking
+   * Create a local virtual order with strict transaction-isolated balance locking and idempotency protection
    */
   public static createVirtualOrder(
     db: Db,
@@ -165,12 +207,24 @@ export class PaperTradingSystem {
       price: number;
       quantity: number;
       opportunityId?: string;
+      idempotencyKey?: string;
       feeCtx?: FeeContext;
     },
   ): { success: boolean; orderId?: string; error?: string } {
-    const { characterId, typeId, strategyType, orderType, price, quantity, opportunityId } = params;
-    const account = this.getOrCreateAccount(db, characterId);
+    const { characterId, typeId, strategyType, orderType, price, quantity, opportunityId, idempotencyKey } = params;
 
+    if (price <= 0 || quantity <= 0 || !Number.isFinite(price) || !Number.isFinite(quantity)) {
+      return { success: false, error: '订单价格与数量必须为大于零的合法有限数值。' };
+    }
+
+    if (idempotencyKey) {
+      const existing = db.prepare('SELECT order_id FROM paper_trading_orders WHERE idempotency_key = ?').get(idempotencyKey) as any;
+      if (existing) {
+        return { success: true, orderId: existing.order_id };
+      }
+    }
+
+    const account = this.getOrCreateAccount(db, characterId);
     if (account.status !== 'active') {
       return { success: false, error: `模拟账户当前处于 ${account.status} 状态，禁止创建新订单。` };
     }
@@ -186,7 +240,7 @@ export class PaperTradingSystem {
       : Math.max(100.0, price * quantity * (FeeEngine.calculateRates(feeCtx).brokerFeeRate + FeeEngine.calculateRates(feeCtx).salesTaxRate));
 
     const totalRequiredIsk = price * quantity + estFees;
-    const orderId = `PT-ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const orderId = 'PT-ORD-' + Date.now() + '-' + randomUUID().slice(0, 8);
 
     let success = false;
     let errReason: string | undefined;
@@ -198,16 +252,21 @@ export class PaperTradingSystem {
           return;
         }
 
-        // Lock funds in escrow
+        const newBal = account.availableCash - totalRequiredIsk;
+        const newEscrow = account.escrowLocked + totalRequiredIsk;
         db.prepare(`
           UPDATE paper_trading_accounts
-          SET available_cash = available_cash - ?,
-              escrow_locked = escrow_locked + ?,
+          SET available_cash = ?,
+              escrow_locked = ?,
               updated_at = datetime('now')
           WHERE account_id = ?
-        `).run(totalRequiredIsk, totalRequiredIsk, account.accountId);
+        `).run(newBal, newEscrow, account.accountId);
+
+        db.prepare(`
+          INSERT INTO paper_trading_journal (account_id, order_id, entry_type, amount, balance_after, escrow_after)
+          VALUES (?, ?, 'escrow_lock', ?, ?, ?)
+        `).run(account.accountId, orderId, totalRequiredIsk, newBal, newEscrow);
       } else {
-        // Sell order: check inventory position
         const holding = db.prepare(`
           SELECT COALESCE(SUM(quantity), 0) as available_units
           FROM paper_trading_positions
@@ -222,39 +281,52 @@ export class PaperTradingSystem {
       }
 
       db.prepare(`
-        INSERT INTO paper_trading_orders (order_id, account_id, opportunity_id, character_id, type_id, strategy_type, order_type, price, quantity, filled_quantity, status, fees_paid, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'open', 0, datetime('now'), datetime('now'))
-      `).run(orderId, account.accountId, opportunityId || null, characterId, typeId, strategyType, orderType, price, quantity);
+        INSERT INTO paper_trading_orders (order_id, account_id, opportunity_id, idempotency_key, character_id, type_id, strategy_type, order_type, price, quantity, filled_quantity, status, fees_paid, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'open', 0, datetime('now'), datetime('now'))
+      `).run(orderId, account.accountId, opportunityId || null, idempotencyKey || null, characterId, typeId, strategyType, orderType, price, quantity);
 
       success = true;
     });
 
     tx();
-
     return { success, orderId: success ? orderId : undefined, error: errReason };
   }
 
   /**
-   * Cancel an open virtual order and release locked escrow/inventory
+   * Cancel an open virtual order and release locked escrow
    */
   public static cancelVirtualOrder(db: Db, orderId: string): boolean {
     const order = db.prepare('SELECT * FROM paper_trading_orders WHERE order_id = ?').get(orderId) as any;
-    if (!order || (order.status !== 'open' && order.status !== 'partially_filled')) {
+    if (!order) return false;
+
+    const allowed = VALID_STATE_TRANSITIONS[order.status] || [];
+    if (!allowed.includes('cancelled')) {
       return false;
     }
 
     const unfilledQty = order.quantity - order.filled_quantity;
     const tx = db.transaction(() => {
       if (order.order_type === 'buy' && unfilledQty > 0) {
-        // Refund remaining locked escrow
-        const escrowToRefund = unfilledQty * order.price;
+        const acc = db.prepare('SELECT available_cash, escrow_locked FROM paper_trading_accounts WHERE account_id = ?').get(order.account_id) as any;
+        // Refund exactly the unfilled cash portion plus any remaining unused fee buffer in escrow
+        const unfilledGross = unfilledQty * order.price;
+        // If order had 0 fills, refund all escrow tied to it; if partially filled, refund remaining escrow
+        const escrowToRefund = Math.min(acc.escrow_locked, unfilledGross + (order.filled_quantity === 0 ? 100 : 0));
+        const newBal = acc.available_cash + escrowToRefund;
+        const newEscrow = Math.max(0, acc.escrow_locked - escrowToRefund);
+
         db.prepare(`
           UPDATE paper_trading_accounts
-          SET available_cash = available_cash + ?,
-              escrow_locked = max(0, escrow_locked - ?),
+          SET available_cash = ?,
+              escrow_locked = ?,
               updated_at = datetime('now')
           WHERE account_id = ?
-        `).run(escrowToRefund, escrowToRefund, order.account_id);
+        `).run(newBal, newEscrow, order.account_id);
+
+        db.prepare(`
+          INSERT INTO paper_trading_journal (account_id, order_id, entry_type, amount, balance_after, escrow_after)
+          VALUES (?, ?, 'escrow_release', ?, ?, ?)
+        `).run(order.account_id, orderId, escrowToRefund, newBal, newEscrow);
       }
 
       db.prepare("UPDATE paper_trading_orders SET status = 'cancelled', updated_at = datetime('now') WHERE order_id = ?").run(orderId);
@@ -265,8 +337,7 @@ export class PaperTradingSystem {
   }
 
   /**
-   * Simulate order execution against a discrete orderbook snapshot.
-   * Accurately supports partial fills, complete fills, and records prediction variance.
+   * Simulate order execution against a discrete orderbook snapshot with state transition guardrails
    */
   public static executeVirtualOrderAgainstBook(
     db: Db,
@@ -275,18 +346,21 @@ export class PaperTradingSystem {
     feeCtx?: FeeContext,
   ): { filledQty: number; avgPrice: number; status: string } {
     const order = db.prepare('SELECT * FROM paper_trading_orders WHERE order_id = ?').get(orderId) as any;
-    if (!order || (order.status !== 'open' && order.status !== 'partially_filled')) {
-      return { filledQty: 0, avgPrice: 0, status: order?.status || 'not_found' };
+    if (!order) {
+      return { filledQty: 0, avgPrice: 0, status: 'not_found' };
     }
 
     const neededQty = order.quantity - order.filled_quantity;
+    if (neededQty <= 0) {
+      return { filledQty: 0, avgPrice: 0, status: order.status };
+    }
+
     const fCtx = feeCtx ?? {
       clone: 'alpha',
       skills: ALPHA_DEFAULT_SKILLS,
       facility: 'npc_station',
     };
 
-    // Simulate walk
     const sim = order.order_type === 'buy'
       ? OrderBookSimulator.simulateBuy(orderbookLevels, neededQty)
       : OrderBookSimulator.simulateSell(orderbookLevels, neededQty);
@@ -300,10 +374,15 @@ export class PaperTradingSystem {
     const isFullyFilled = newTotalFilled >= order.quantity;
     const newStatus = isFullyFilled ? 'filled' : 'partially_filled';
 
+    const allowed = VALID_STATE_TRANSITIONS[order.status] || [];
+    if (!allowed.includes(newStatus)) {
+      throw new Error('【状态机非法跳转】订单 ' + orderId + ' 状态无法由 ' + order.status + ' 迁移至 ' + newStatus);
+    }
+
     const tx = db.transaction(() => {
       const calc = FeeEngine.calculateTrade({
-        buyType: order.order_type === 'buy' ? 'immediate_buy' : 'place_buy_order',
-        sellType: order.order_type === 'sell' ? 'immediate_sell' : 'place_sell_order',
+        buyType: order.order_type === 'buy' ? 'place_buy_order' : 'immediate_buy',
+        sellType: order.order_type === 'sell' ? 'place_sell_order' : 'immediate_sell',
         buyUnitPrice: sim.weightedAvgPrice,
         sellUnitPrice: sim.weightedAvgPrice,
         quantity: filledNow,
@@ -311,45 +390,61 @@ export class PaperTradingSystem {
         sellCtx: fCtx,
       });
 
+      const buyerFee = calc.buyerBrokerFee;
+      const sellerFee = calc.sellerBrokerFee + calc.salesTax + (calc.sccSurcharge || 0);
+      const feeForOrder = order.order_type === 'buy' ? buyerFee : sellerFee;
+
       if (order.order_type === 'buy') {
-        // Create holding position
-        const paperPosId = `PT-POS-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const paperPosId = 'PT-POS-' + Date.now() + '-' + randomUUID().slice(0, 8);
         db.prepare(`
           INSERT INTO paper_trading_positions (paper_id, character_id, type_id, location_id, quantity, cost_price, strategy_type, status, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, 'holding', datetime('now'))
         `).run(paperPosId, order.character_id, order.type_id, 60003760, filledNow, sim.weightedAvgPrice, order.strategy_type);
 
-        // Deduct from escrow, adjust available cash for any difference between estimate and actual
-        const actualSpend = sim.totalGrossIsk + calc.totalFees;
-        db.prepare(`
-          UPDATE paper_trading_accounts
-          SET escrow_locked = max(0, escrow_locked - ?),
-              total_fees_paid = total_fees_paid + ?,
-              updated_at = datetime('now')
-          WHERE account_id = ?
-        `).run(actualSpend, calc.totalFees, order.account_id);
-      } else {
-        // Sell order: realize PnL against holding position
-        const grossRev = sim.totalGrossIsk;
-        const netRev = grossRev - calc.salesTax - calc.sellerBrokerFee;
-        const estCost = filledNow * order.price; // Cost basis
-        const pnl = netRev - estCost;
+        const actualSpend = sim.totalGrossIsk;
+        const acc = db.prepare('SELECT available_cash, escrow_locked FROM paper_trading_accounts WHERE account_id = ?').get(order.account_id) as any;
+        const newEscrow = Math.max(0, acc.escrow_locked - actualSpend - buyerFee);
 
         db.prepare(`
           UPDATE paper_trading_accounts
-          SET available_cash = available_cash + ?,
+          SET escrow_locked = ?,
+              total_fees_paid = total_fees_paid + ?,
+              updated_at = datetime('now')
+          WHERE account_id = ?
+        `).run(newEscrow, buyerFee, order.account_id);
+
+        db.prepare(`
+          INSERT INTO paper_trading_journal (account_id, order_id, entry_type, amount, balance_after, escrow_after)
+          VALUES (?, ?, 'order_spend', ?, ?, ?)
+        `).run(order.account_id, orderId, actualSpend, acc.available_cash, newEscrow);
+      } else {
+        const grossRev = sim.totalGrossIsk;
+        const netRev = grossRev - sellerFee;
+        const estCost = filledNow * order.price;
+        const pnl = netRev - estCost;
+
+        const acc = db.prepare('SELECT available_cash, escrow_locked FROM paper_trading_accounts WHERE account_id = ?').get(order.account_id) as any;
+        const newBal = acc.available_cash + netRev;
+
+        db.prepare(`
+          UPDATE paper_trading_accounts
+          SET available_cash = ?,
               total_realized_pnl = total_realized_pnl + ?,
               total_fees_paid = total_fees_paid + ?,
               updated_at = datetime('now')
           WHERE account_id = ?
-        `).run(netRev, pnl, calc.totalFees, order.account_id);
+        `).run(newBal, pnl, sellerFee, order.account_id);
 
-        // Deduct from positions
         db.prepare(`
           UPDATE paper_trading_positions
           SET quantity = max(0, quantity - ?)
           WHERE character_id = ? AND type_id = ? AND status = 'holding'
         `).run(filledNow, order.character_id, order.type_id);
+
+        db.prepare(`
+          INSERT INTO paper_trading_journal (account_id, order_id, entry_type, amount, balance_after, escrow_after)
+          VALUES (?, ?, 'order_revenue', ?, ?, ?)
+        `).run(order.account_id, orderId, netRev, newBal, acc.escrow_locked);
       }
 
       db.prepare(`
@@ -359,9 +454,8 @@ export class PaperTradingSystem {
             fees_paid = fees_paid + ?,
             updated_at = datetime('now')
         WHERE order_id = ?
-      `).run(newTotalFilled, newStatus, calc.totalFees, orderId);
+      `).run(newTotalFilled, newStatus, feeForOrder, orderId);
 
-      // If associated with opportunity log, record outcome & prediction variance
       if (order.opportunity_id) {
         const oppRow = db.prepare('SELECT * FROM trade_opportunities_log WHERE opportunity_id = ?').get(order.opportunity_id) as any;
         if (oppRow) {
@@ -379,7 +473,6 @@ export class PaperTradingSystem {
     });
 
     tx();
-
     return { filledQty: filledNow, avgPrice: sim.weightedAvgPrice, status: newStatus };
   }
 
@@ -446,7 +539,6 @@ export class PaperTradingSystem {
       });
     }
 
-    // Compute strategy breakdown from opportunities and orders
     const strategyTypes: StrategyType[] = [
       'regional_hauling',
       'station_arbitrage',

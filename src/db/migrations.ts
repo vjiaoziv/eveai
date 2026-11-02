@@ -782,6 +782,7 @@ function ensureWebAgentRequests(db: Db): void {
       order_id            TEXT PRIMARY KEY,
       account_id          TEXT NOT NULL,
       opportunity_id      TEXT,
+      idempotency_key     TEXT UNIQUE,
       character_id        INTEGER NOT NULL,
       type_id             INTEGER NOT NULL,
       strategy_type       TEXT NOT NULL DEFAULT 'regional_hauling',
@@ -794,6 +795,21 @@ function ensureWebAgentRequests(db: Db): void {
       created_at          TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_orders_idempotency
+      ON paper_trading_orders(idempotency_key);
+
+    CREATE TABLE IF NOT EXISTS paper_trading_journal (
+      journal_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id        TEXT NOT NULL,
+      order_id          TEXT,
+      entry_type        TEXT NOT NULL CHECK (entry_type IN ('deposit', 'escrow_lock', 'escrow_release', 'fee_payment', 'realized_pnl', 'order_spend', 'order_revenue')),
+      amount            REAL NOT NULL,
+      balance_after     REAL NOT NULL,
+      escrow_after      REAL NOT NULL,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_paper_journal_account
+      ON paper_trading_journal(account_id, created_at);
   `);
 
 }
@@ -814,5 +830,6 @@ const isMain = process.argv[1]
 if (isMain) {
   void main();
 }
+
 
 
