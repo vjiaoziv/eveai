@@ -351,6 +351,36 @@ export const webApi = {
       csrfToken,
     ),
   },
+  p9: {
+    overview: () => request<unknown>('/api/web/trading/p9/overview'),
+    settings: () => request<unknown>('/api/web/trading/p9/settings'),
+    saveSettings: (body: unknown, csrfToken: string) => request<unknown>('/api/web/trading/p9/settings', { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
+    scan: (csrfToken: string, typeIds: number[] = []) => request<unknown>('/api/web/trading/p9/scan', { method: 'POST', body: JSON.stringify({ typeIds }) }, csrfToken),
+    opportunities: (params: Record<string, string | number | undefined> = {}) => {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value));
+      return request<unknown>(`/api/web/trading/p9/opportunities?${search.toString()}`);
+    },
+    opportunity: (id: string) => request<unknown>(`/api/web/trading/p9/opportunities/${encodeURIComponent(id)}`),
+    transitionOpportunity: (id: string, state: string, csrfToken: string) => request<unknown>(`/api/web/trading/p9/opportunities/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ state }) }, csrfToken),
+    plans: (status?: string) => request<unknown>(`/api/web/trading/p9/plans${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+    createPlan: (opportunityId: string, csrfToken: string) => request<unknown>('/api/web/trading/p9/plans', { method: 'POST', body: JSON.stringify({ opportunityId }) }, csrfToken),
+    transitionPlan: (planId: string, status: string, csrfToken: string) => request<unknown>(`/api/web/trading/p9/plans/${encodeURIComponent(planId)}`, { method: 'PATCH', body: JSON.stringify({ status }) }, csrfToken),
+    inventory: () => request<unknown>('/api/web/trading/p9/inventory'),
+    createLot: (body: unknown, csrfToken: string) => request<unknown>('/api/web/trading/p9/inventory/lots', { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+    realTrades: (params: Record<string, string | number | undefined> = {}) => {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value));
+      return request<unknown>(`/api/web/trading/p9/real-trades?${search.toString()}`);
+    },
+    recordTrade: (body: unknown, csrfToken: string) => request<unknown>('/api/web/trading/p9/real-trades', { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+    updateTrade: (tradeId: string, body: unknown, csrfToken: string) => request<unknown>(`/api/web/trading/p9/real-trades/${encodeURIComponent(tradeId)}`, { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
+    syncEsiTrades: (csrfToken: string) => request<unknown>('/api/web/trading/p9/real-trades/esi-sync', { method: 'POST', body: '{}' }, csrfToken),
+    rebuildLedger: (csrfToken: string) => request<unknown>('/api/web/trading/p9/rebuild-ledger', { method: 'POST', body: '{}' }, csrfToken),
+    risk: () => request<unknown>('/api/web/trading/p9/risk'),
+    jobs: () => request<unknown>('/api/web/trading/p9/jobs'),
+    analyze: (body: unknown, csrfToken: string) => request<unknown>('/api/web/trading/p9/analyze', { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+  },
   trading: {
     overview: () => request<unknown>('/api/web/trading/paper/overview'),
     orders: (status?: string, limit = 100) => request<unknown>(

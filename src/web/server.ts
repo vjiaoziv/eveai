@@ -21,6 +21,8 @@ import { registerProfileRoutes } from './profile-routes.js';
 import { registerSecurityHeaders } from './security.js';
 import { registerSettingsRoutes } from './settings-routes.js';
 import { registerTradingRoutes } from './trading-routes.js';
+import { registerP9Routes } from './p9-routes.js';
+import { registerP9AiRoutes } from './p9-ai-routes.js';
 
 export async function createServer(db: Db) {
   const app = Fastify({
@@ -49,6 +51,8 @@ export async function createServer(db: Db) {
     registerMapRoutes(app, db, agentRequests);
     registerExamplesRoutes(app);
     registerTradingRoutes(app, db);
+    registerP9Routes(app, db);
+    registerP9AiRoutes(app, db);
     await registerWebApp(app);
   }
 

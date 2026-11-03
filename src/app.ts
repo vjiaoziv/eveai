@@ -80,6 +80,7 @@ async function main() {
   const { startMarketSnapshotWorker, stopMarketSnapshotWorker } = await import('./eve/market-snapshot.js');
   const { startMarketHistoryWorker, stopMarketHistoryWorker } = await import('./eve/market-history-worker.js');
   const { startMarketAlertsWorker, stopMarketAlertsWorker } = await import('./eve/market-alerts-worker.js');
+  const { startP9OpportunityWorker, stopP9OpportunityWorker } = await import('./trading/p9-opportunity-worker.js');
   const { startEveKillFeedPoller, stopEveKillFeedPoller } = await import('./eve-kill/feed-poll.js');
   const { setRouteMonitorSender } = await import('./eve/route-planner.js');
   const { restoreMonitors, shutdownRouteMonitors } = await import('./eve-board/monitor.js');
@@ -210,6 +211,7 @@ async function main() {
       log.info('Drained %d live map session(s).', drainedMapSessions);
     }
     stopHeartbeat();
+    stopP9OpportunityWorker();
     // Synchronous and instant: both only clear timers.
     stopUsageRollupScheduler();
     stopGcpBilling();
@@ -368,6 +370,9 @@ async function main() {
   // user's outbound lane (same resolution as heartbeat), gated on
   // MARKET_ALERTS_ENABLED.
   startMarketAlertsWorker(db);
+  // Real-market opportunity refresh only runs for characters that explicitly
+  // enable auto scan; the market snapshot sweep remains the data source.
+  startP9OpportunityWorker(db);
 
   const version = getAppVersion();
   const rows: BannerRow[] = [

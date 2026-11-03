@@ -188,6 +188,218 @@ export function runMigrations(db: Db): void {
       CREATE INDEX IF NOT EXISTS idx_paper_order_state_events_order
         ON paper_order_state_events(order_id, created_at, event_id);
     `);
+
+    // P9: real-market research and manually executed trading remain separate
+    // from every PAPER_* table above.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS p9_scan_settings (
+        character_id              INTEGER PRIMARY KEY,
+        hubs_json                 TEXT NOT NULL,
+        strategies_json           TEXT NOT NULL,
+        min_net_profit            REAL NOT NULL DEFAULT 100000,
+        min_roi_pct               REAL NOT NULL DEFAULT 5,
+        max_capital               REAL NOT NULL DEFAULT 100000000,
+        max_market_age_minutes    INTEGER NOT NULL DEFAULT 60,
+        max_results               INTEGER NOT NULL DEFAULT 100,
+        auto_scan_enabled         INTEGER NOT NULL DEFAULT 0 CHECK (auto_scan_enabled IN (0, 1)),
+        auto_scan_interval_minutes INTEGER NOT NULL DEFAULT 30,
+        updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS p9_real_opportunities (
+        opportunity_id           TEXT PRIMARY KEY,
+        character_id             INTEGER NOT NULL,
+        scan_key                 TEXT NOT NULL,
+        strategy                 TEXT NOT NULL,
+        type_id                  INTEGER NOT NULL,
+        type_name_en             TEXT,
+        type_name_zh             TEXT,
+        buy_location_id          INTEGER NOT NULL,
+        buy_location_name        TEXT,
+        sell_location_id         INTEGER NOT NULL,
+        sell_location_name       TEXT,
+        buy_region_id            INTEGER NOT NULL,
+        sell_region_id           INTEGER NOT NULL,
+        buy_price                REAL NOT NULL,
+        sell_price               REAL NOT NULL,
+        suggested_quantity       INTEGER NOT NULL,
+        executable_quantity      INTEGER NOT NULL,
+        purchase_amount          REAL NOT NULL,
+        sales_revenue            REAL NOT NULL,
+        broker_fees              REAL NOT NULL,
+        sales_tax                REAL NOT NULL,
+        other_fees               REAL NOT NULL DEFAULT 0,
+        theoretical_gross_profit REAL NOT NULL,
+        executable_gross_profit  REAL NOT NULL,
+        fee_net_profit           REAL NOT NULL,
+        comprehensive_net_profit REAL,
+        comprehensive_status     TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK (comprehensive_status IN ('CALCULATED', 'UNKNOWN')),
+        capital_required         REAL NOT NULL,
+        roi_pct                  REAL NOT NULL,
+        logistics_cost           REAL,
+        liquidity                TEXT NOT NULL DEFAULT 'UNKNOWN',
+        risk_level               TEXT NOT NULL DEFAULT 'MEDIUM',
+        risk_flags_json          TEXT NOT NULL DEFAULT '[]',
+        buy_snapshot_id          TEXT NOT NULL,
+        sell_snapshot_id         TEXT NOT NULL,
+        buy_snapshot_at          TEXT,
+        sell_snapshot_at         TEXT,
+        buy_snapshot_age_minutes REAL,
+        sell_snapshot_age_minutes REAL,
+        data_source              TEXT NOT NULL DEFAULT 'esi_market_orders',
+        data_complete            INTEGER NOT NULL DEFAULT 1 CHECK (data_complete IN (0, 1)),
+        data_fresh               INTEGER NOT NULL DEFAULT 0 CHECK (data_fresh IN (0, 1)),
+        calculation_version      TEXT NOT NULL,
+        original_snapshot_json   TEXT NOT NULL,
+        state                    TEXT NOT NULL DEFAULT 'NEW'
+          CHECK (state IN ('NEW', 'WATCHING', 'ACTIONABLE', 'STALE', 'EXPIRED', 'REJECTED', 'ARCHIVED')),
+        detected_at              TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at               TEXT NOT NULL DEFAULT (datetime('now')),
+        expires_at               TEXT NOT NULL,
+        UNIQUE (character_id, scan_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_p9_opportunities_char_state
+        ON p9_real_opportunities(character_id, state, updated_at);
+
+      CREATE TABLE IF NOT EXISTS p9_trade_plans (
+        plan_id             TEXT PRIMARY KEY,
+        character_id        INTEGER NOT NULL,
+        opportunity_id      TEXT NOT NULL,
+        strategy            TEXT NOT NULL,
+        type_id             INTEGER NOT NULL,
+        buy_location_id     INTEGER NOT NULL,
+        sell_location_id    INTEGER NOT NULL,
+        quantity            INTEGER NOT NULL,
+        buy_price           REAL NOT NULL,
+        sell_price          REAL NOT NULL,
+        estimated_buy_cost  REAL NOT NULL,
+        estimated_sell_revenue REAL NOT NULL,
+        estimated_fees      REAL NOT NULL,
+        estimated_fee_net_profit REAL NOT NULL,
+        estimated_comprehensive_profit REAL,
+        comprehensive_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        capital_required    REAL NOT NULL,
+        risk_flags_json     TEXT NOT NULL DEFAULT '[]',
+        valid_until         TEXT NOT NULL,
+        exit_plan           TEXT,
+        notes               TEXT,
+        status              TEXT NOT NULL DEFAULT 'PLANNED'
+          CHECK (status IN ('PLANNED', 'USER_CONFIRMED', 'PARTIALLY_EXECUTED', 'EXECUTED', 'HOLDING', 'PARTIALLY_EXITED', 'CLOSED', 'CANCELLED')),
+        created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_p9_plans_char_status
+        ON p9_trade_plans(character_id, status, updated_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_p9_plans_opportunity
+        ON p9_trade_plans(opportunity_id);
+
+      CREATE TABLE IF NOT EXISTS p9_real_trades (
+        trade_id        TEXT PRIMARY KEY,
+        character_id    INTEGER NOT NULL,
+        client_key      TEXT NOT NULL,
+        external_id     TEXT,
+        opportunity_id  TEXT,
+        plan_id         TEXT,
+        direction       TEXT NOT NULL CHECK (direction IN ('buy', 'sell')),
+        type_id         INTEGER NOT NULL,
+        location_id     INTEGER NOT NULL,
+        quantity        INTEGER NOT NULL CHECK (quantity > 0),
+        price           REAL NOT NULL CHECK (price >= 0),
+        fee             REAL NOT NULL DEFAULT 0 CHECK (fee >= 0),
+        fee_status      TEXT NOT NULL DEFAULT 'CONFIRMED' CHECK (fee_status IN ('CONFIRMED', 'UNKNOWN')),
+        trade_time      TEXT NOT NULL,
+        source          TEXT NOT NULL CHECK (source IN ('manual', 'esi')),
+        confirmed       INTEGER NOT NULL DEFAULT 1 CHECK (confirmed IN (0, 1)),
+        realized_pnl    REAL,
+        pnl_status      TEXT NOT NULL DEFAULT 'PENDING' CHECK (pnl_status IN ('PENDING', 'CALCULATED', 'UNKNOWN_COST')),
+        notes           TEXT,
+        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (character_id, client_key)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_p9_trades_external
+        ON p9_real_trades(character_id, external_id) WHERE external_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_p9_trades_char_time
+        ON p9_real_trades(character_id, trade_time, trade_id);
+
+      CREATE TABLE IF NOT EXISTS p9_inventory_lots (
+        lot_id            TEXT PRIMARY KEY,
+        character_id      INTEGER NOT NULL,
+        item_id           INTEGER,
+        type_id           INTEGER NOT NULL,
+        location_id       INTEGER NOT NULL,
+        quantity          INTEGER NOT NULL CHECK (quantity >= 0),
+        original_quantity INTEGER NOT NULL CHECK (original_quantity >= 0),
+        cost_per_unit     REAL,
+        cost_status       TEXT NOT NULL CHECK (cost_status IN ('CONFIRMED', 'UNKNOWN')),
+        source            TEXT NOT NULL CHECK (source IN ('manual', 'trade')),
+        acquired_at       TEXT NOT NULL,
+        trade_id          TEXT,
+        opportunity_id    TEXT,
+        notes             TEXT,
+        created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_p9_lots_char_type
+        ON p9_inventory_lots(character_id, type_id, acquired_at, lot_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_p9_lots_item
+        ON p9_inventory_lots(character_id, item_id) WHERE item_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS p9_inventory_moves (
+        move_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        character_id     INTEGER NOT NULL,
+        trade_id         TEXT NOT NULL,
+        lot_id           TEXT NOT NULL,
+        type_id          INTEGER NOT NULL,
+        quantity         INTEGER NOT NULL,
+        cost_per_unit    REAL,
+        exit_price       REAL NOT NULL,
+        allocated_fee    REAL NOT NULL,
+        realized_pnl     REAL,
+        pnl_status       TEXT NOT NULL CHECK (pnl_status IN ('CALCULATED', 'UNKNOWN_COST')),
+        created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_p9_moves_trade
+        ON p9_inventory_moves(trade_id);
+      CREATE INDEX IF NOT EXISTS idx_p9_moves_char_type
+        ON p9_inventory_moves(character_id, type_id);
+
+      CREATE TABLE IF NOT EXISTS p9_trade_audit_events (
+        event_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        character_id  INTEGER NOT NULL,
+        trade_id      TEXT,
+        lot_id        TEXT,
+        plan_id       TEXT,
+        action        TEXT NOT NULL,
+        before_json   TEXT,
+        after_json    TEXT,
+        actor         TEXT NOT NULL DEFAULT 'user',
+        created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_p9_audit_char_time
+        ON p9_trade_audit_events(character_id, created_at, event_id);
+
+      CREATE TABLE IF NOT EXISTS p9_esi_transaction_sync (
+        character_id        INTEGER PRIMARY KEY,
+        last_transaction_id INTEGER,
+        last_synced_at      TEXT,
+        status              TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok', 'error')),
+        error               TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS p9_job_runs (
+        job_id        TEXT PRIMARY KEY,
+        job_type      TEXT NOT NULL,
+        character_id  INTEGER,
+        status        TEXT NOT NULL CHECK (status IN ('running', 'ok', 'error')),
+        started_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        finished_at   TEXT,
+        summary_json  TEXT,
+        error         TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_p9_jobs_type_time
+        ON p9_job_runs(job_type, started_at);
+    `);
     backfillPaperTradingEscrow(db);
     // Alert push redelivery: per-event attempts with exponential backoff and
     // a terminal abandoned_at so undeliverable events stop blocking the queue.

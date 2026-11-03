@@ -20,6 +20,7 @@ const REVIEWED_CALL_SITES: Record<string, { calls: number; payer: string }> = {
   'src/agent/read-subagents.ts': { calls: 1, payer: 'turn lane via recordUsage (executor)' },
   'src/agent/compact.ts': { calls: 1, payer: 'thread owner, config model' },
   'src/agent/market-ai-search.ts': { calls: 1, payer: 'web session via route (market-ai-search-routes)' },
+  'src/trading/p9-ai-analysis.ts': { calls: 1, payer: 'web session via route (p9-ai-routes), usage converted with toUsageCounts' },
   'src/eve-map/advisor-prose.ts': { calls: 1, payer: 'perimeter thread owner via onUsage (map-routes)' },
   // One shared helper (callAdvisorModel) serves generateThreatAdvice and generateRouteIntelSummary.
   'src/eve-board/advisor.ts': { calls: 1, payer: 'route-monitor lane (UsagePayer), userId 0 if unowned' },
