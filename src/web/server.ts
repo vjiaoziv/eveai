@@ -23,6 +23,7 @@ import { registerSettingsRoutes } from './settings-routes.js';
 import { registerTradingRoutes } from './trading-routes.js';
 import { registerP9Routes } from './p9-routes.js';
 import { registerAssetRoutes } from './asset-routes.js';
+import { registerP93Routes } from './p9-3-routes.js';
 import { registerP9AiRoutes } from './p9-ai-routes.js';
 
 export async function createServer(db: Db) {
@@ -54,6 +55,7 @@ export async function createServer(db: Db) {
     registerTradingRoutes(app, db);
     registerP9Routes(app, db);
     registerAssetRoutes(app, db);
+    registerP93Routes(app, db);
     registerP9AiRoutes(app, db);
     await registerWebApp(app);
   }

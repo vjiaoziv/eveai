@@ -2,6 +2,7 @@ import type { Db } from '../db/sqlite.js';
 import { runModelText } from '../agent/model.js';
 import type { NativeUsage } from '../agent/native-responses.js';
 import type { UserContext } from '../auth/user-resolver.js';
+import { P93FifoService } from './p9-3-fifo-service.js';
 
 export type P9AnalysisMode = 'opportunity' | 'daily';
 
@@ -55,18 +56,35 @@ export function buildP9AnalysisPrompt(db: Db, characterId: number, input: P9Anal
       `).all(characterId) as any[];
 
   const trades = db.prepare(`
-    SELECT trade_id, direction, type_id, location_id, quantity, price, fee, fee_status,
-           realized_pnl, pnl_status, trade_time, source, opportunity_id, plan_id
-    FROM p9_real_trades WHERE character_id = ?
-    ORDER BY trade_time DESC LIMIT 20
+    SELECT r.record_id AS trade_id, lower(r.direction) AS direction, r.type_id, r.location_id,
+           r.quantity, r.unit_price AS price,
+           (SELECT COALESCE(SUM(amount), 0) FROM real_trade_fees
+             WHERE record_id = r.record_id AND treatment <> 'UNRELATED') AS fee,
+           r.fee_status, r.trade_time, lower(r.source_type) AS source,
+           r.verification_status, r.opportunity_id, r.plan_id,
+           CASE WHEN r.direction = 'SELL' THEN (
+             SELECT CASE WHEN SUM(CASE WHEN pnl_status = 'UNKNOWN_COST' THEN 1 ELSE 0 END) > 0 THEN NULL
+                         ELSE ROUND(SUM(realized_pnl), 2) END
+             FROM real_fifo_consumptions WHERE sell_record_id = r.record_id
+           ) ELSE NULL END AS realized_pnl,
+           CASE WHEN r.direction = 'SELL' AND EXISTS (
+             SELECT 1 FROM real_fifo_consumptions WHERE sell_record_id = r.record_id AND pnl_status = 'UNKNOWN_COST'
+           ) THEN 'UNKNOWN_COST' WHEN r.direction = 'SELL' THEN 'CALCULATED' ELSE 'PENDING' END AS pnl_status
+    FROM real_trade_records r
+    WHERE r.character_id = ? AND r.is_paper = 0
+      AND r.record_state = 'VERIFIED' AND r.verification_status = 'VERIFIED'
+    ORDER BY r.trade_time DESC LIMIT 20
   `).all(characterId) as any[];
   const portfolio = db.prepare(`
     SELECT
       (SELECT balance FROM character_wallet WHERE character_id = ?) AS wallet_balance,
-      (SELECT COUNT(*) FROM p9_inventory_lots WHERE character_id = ? AND quantity > 0) AS active_lots,
-      (SELECT COUNT(*) FROM p9_inventory_lots WHERE character_id = ? AND cost_status = 'UNKNOWN' AND quantity > 0) AS unknown_cost_lots,
+      (SELECT COUNT(*) FROM real_fifo_lots WHERE character_id = ? AND remaining_quantity > 0) AS active_lots,
+      (SELECT COUNT(*) FROM real_fifo_lots
+        WHERE character_id = ? AND remaining_quantity > 0 AND cost_status <> 'KNOWN') AS unknown_cost_lots,
       (SELECT COUNT(*) FROM p9_real_opportunities WHERE character_id = ? AND state = 'ACTIONABLE') AS actionable_count
   `).get(characterId, characterId, characterId, characterId) as any;
+  const realAccounting = P93FifoService.performance(db, characterId);
+  const unrealized = P93FifoService.unrealized(db, characterId);
 
   const payload = {
     mode: input.mode,
@@ -109,14 +127,15 @@ export function buildP9AnalysisPrompt(db: Db, characterId: number, input: P9Anal
         updatedAt: row.updated_at,
         expiresAt: row.expires_at,
       })),
-      recentTrades: trades,
-      portfolio,
+      recentVerifiedTrades: trades,
+      portfolio: { ...portfolio, realAccounting, unrealized },
     },
     hardLimits: [
       '不得自行加减乘除生成新的利润数字',
       '综合净利润 UNKNOWN 时不得推测为 0',
       '物流成本未知时不得把费用后净利润称为最终可实现利润',
       '不得输出真实自动交易或 REAL_TRADING_READY',
+      '不得把 USER_REPORTED、PENDING、DRAFT 或旧账本数据说成已核实真实交易',
     ],
   };
 

@@ -31,3 +31,6 @@ output/
 *.db-wal
 *.db-shm
 .DS_Store
+
+# Local audit scratch artifacts
+docs/audit/*/_work/

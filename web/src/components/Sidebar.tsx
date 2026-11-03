@@ -41,7 +41,7 @@ export function Sidebar({
   const nav: Array<{ id: AppView; label: string; count?: number }> = [
     { id: 'chat', label: t('chat'), count: conversations.length },
     { id: 'market', label: t('market') },
-    { id: 'p9', label: '交易工作台' },
+    { id: 'p9', label: 'REAL 交易账本' },
     { id: 'assets', label: '资产库存' },
     { id: 'trading', label: 'Paper Trading' },
     { id: 'map', label: t('perimeter') },

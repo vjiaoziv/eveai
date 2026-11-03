@@ -1,12 +1,13 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Db } from '../db/sqlite.js';
 import { requireMutationSession, requireSession } from './web-route-guards.js';
 import { getLinkedCharacter } from '../eve/sso.js';
 import type { WebSession } from './web-session.js';
 import { P9OpportunityService } from '../trading/p9-opportunity-service.js';
 import { P9RealPortfolioService } from '../trading/p9-real-portfolio.js';
-import { P9RealTradeService } from '../trading/p9-real-trades.js';
-import type { P9OpportunityState, P9PlanStatus, P9RealTradeInput } from '../trading/p9-types.js';
+import { P93FifoService } from '../trading/p9-3-fifo-service.js';
+import { P93LedgerService } from '../trading/p9-3-ledger-service.js';
+import type { P9OpportunityState, P9PlanStatus } from '../trading/p9-types.js';
 
 function sessionContext(session: WebSession) {
   return { userId: session.userId, chatId: session.chatId };
@@ -201,7 +202,13 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
     const portfolio = P9RealPortfolioService.overview(db, char.characterId);
-    const tradeSummary = P9RealTradeService.summary(db, char.characterId);
+    const accounting = P93FifoService.performance(db, char.characterId);
+    const ledgerSummary = P93LedgerService.summary(db, char.characterId);
+    const fifoLots = db.prepare(`
+      SELECT COUNT(*) AS lot_count,
+             SUM(CASE WHEN remaining_quantity > 0 THEN 1 ELSE 0 END) AS active_lot_count
+      FROM real_fifo_lots WHERE character_id = ?
+    `).get(char.characterId) as any;
     const settings = P9OpportunityService.getSettings(db, char.characterId);
     const latestJob = db.prepare(`
       SELECT * FROM p9_job_runs WHERE character_id = ? AND job_type = 'market_scan'
@@ -213,8 +220,36 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
       GROUP BY risk_level, state
     `).all(char.characterId) as any[];
     return {
-      portfolio,
-      trades: tradeSummary,
+      portfolio: {
+        ...portfolio,
+        funding: {
+          ...portfolio.funding,
+          knownInventoryCost: accounting.inventoryCost,
+          unknownInventoryExitValue: null,
+          note: 'REAL 财务指标来自 P9.3 已核实 FIFO；PAPER 不进入本统计。',
+        },
+        inventory: {
+          ...portfolio.inventory,
+          lotCount: Number(fifoLots?.active_lot_count || 0),
+          knownCost: accounting.inventoryCost,
+          unknownLotCount: accounting.unknownCostCount,
+          unknownExitValue: null,
+        },
+        performance: {
+          realizedNetPnl: accounting.realizedPnl,
+          knownRealizedPnl: accounting.knownRealizedPnl,
+          feesPaid: accounting.totalFees,
+          unrealizedPnl: accounting.unrealizedPnl,
+          tradeCount: accounting.tradeCount,
+          profitableTradeRatio: accounting.profitableTradeRatio,
+          averageHoldingDays: accounting.averageHoldingDays,
+        },
+      },
+      ledgerSummary,
+      trades: {
+        count: accounting.tradeCount,
+        verified: ledgerSummary.rows,
+      },
       settings,
       marketScan: latestJob || null,
       riskSummary: riskRows,
@@ -227,127 +262,29 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     };
   });
 
-  app.get('/api/web/trading/p9/inventory', async (request, reply) => {
-    const session = requireSession(db, request, reply);
+  const legacyAccountingGone = async (request: FastifyRequest, reply: FastifyReply) => {
+    const session = request.method === 'GET'
+      ? requireSession(db, request, reply)
+      : requireMutationSession(db, request, reply);
     if (!session) return;
-    const char = linkedCharacter(db, session, reply);
-    if (!char) return;
-    return P9RealPortfolioService.inventory(db, char.characterId);
-  });
-
-  app.post('/api/web/trading/p9/inventory/lots', async (request, reply) => {
-    const session = requireMutationSession(db, request, reply);
-    if (!session) return;
-    const char = linkedCharacter(db, session, reply);
-    if (!char) return;
-    try {
-      const body = asBody(request.body);
-      const costRaw = body.costPerUnit;
-      const lot = P9RealPortfolioService.upsertManualLot(db, char.characterId, {
-        itemId: body.itemId == null ? null : integer(body, 'itemId'),
-        typeId: integer(body, 'typeId'),
-        locationId: integer(body, 'locationId'),
-        quantity: integer(body, 'quantity'),
-        costPerUnit: costRaw == null ? null : number(body, 'costPerUnit'),
-        acquiredAt: typeof body.acquiredAt === 'string' ? body.acquiredAt : undefined,
-        notes: typeof body.notes === 'string' ? body.notes : undefined,
-      });
-      return { lot };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '库存成本保存失败。' });
-    }
-  });
-  app.get<{ Querystring: Record<string, string | undefined> }>('/api/web/trading/p9/real-trades', async (request, reply) => {
-    const session = requireSession(db, request, reply);
-    if (!session) return;
-    const char = linkedCharacter(db, session, reply);
-    if (!char) return;
-    return P9RealTradeService.list(db, char.characterId, {
-      direction: request.query.direction,
-      source: request.query.source,
-      limit: request.query.limit ? Number(request.query.limit) : undefined,
-      offset: request.query.offset ? Number(request.query.offset) : undefined,
+    return reply.status(410).send({
+      error: '旧 P9 真实交易/库存账本接口已停用。请使用 /api/web/trading/p9/real-ledger。',
+      replacement: '/api/web/trading/p9/real-ledger',
     });
-  });
-
-  app.post('/api/web/trading/p9/real-trades', async (request, reply) => {
-    const session = requireMutationSession(db, request, reply);
-    if (!session) return;
-    const char = linkedCharacter(db, session, reply);
-    if (!char) return;
-    try {
-      const body = asBody(request.body);
-      const input: P9RealTradeInput = {
-        clientKey: text(body, 'clientKey'),
-        direction: text(body, 'direction') as 'buy' | 'sell',
-        typeId: integer(body, 'typeId'),
-        locationId: integer(body, 'locationId'),
-        quantity: integer(body, 'quantity'),
-        price: number(body, 'price'),
-        fee: body.fee == null ? 0 : number(body, 'fee'),
-        tradeTime: text(body, 'tradeTime'),
-        opportunityId: typeof body.opportunityId === 'string' && body.opportunityId ? body.opportunityId : undefined,
-        planId: typeof body.planId === 'string' && body.planId ? body.planId : undefined,
-        notes: typeof body.notes === 'string' ? body.notes : undefined,
-        confirmed: body.confirmed == null ? true : Boolean(body.confirmed),
-      };
-      const trade = P9RealTradeService.recordManual(db, char.characterId, input);
-      return { trade, summary: P9RealTradeService.summary(db, char.characterId) };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '真实交易录入失败。' });
-    }
-  });
-
-  app.put<{ Params: { tradeId: string } }>('/api/web/trading/p9/real-trades/:tradeId', async (request, reply) => {
-    const session = requireMutationSession(db, request, reply);
-    if (!session) return;
-    const char = linkedCharacter(db, session, reply);
-    if (!char) return;
-    try {
-      const body = asBody(request.body);
-      const patch: Partial<P9RealTradeInput> & { feeStatus?: 'CONFIRMED' | 'UNKNOWN' } = {};
-      if (body.direction != null) patch.direction = text(body, 'direction') as 'buy' | 'sell';
-      if (body.typeId != null) patch.typeId = integer(body, 'typeId');
-      if (body.locationId != null) patch.locationId = integer(body, 'locationId');
-      if (body.quantity != null) patch.quantity = integer(body, 'quantity');
-      if (body.price != null) patch.price = number(body, 'price');
-      if (body.fee != null) patch.fee = number(body, 'fee');
-      if (body.tradeTime != null) patch.tradeTime = text(body, 'tradeTime');
-      if (body.opportunityId != null) patch.opportunityId = text(body, 'opportunityId');
-      if (body.planId != null) patch.planId = text(body, 'planId');
-      if (body.notes != null) patch.notes = typeof body.notes === 'string' ? body.notes : undefined;
-      if (body.confirmed != null) patch.confirmed = Boolean(body.confirmed);
-      if (body.feeStatus != null) patch.feeStatus = text(body, 'feeStatus') === 'UNKNOWN' ? 'UNKNOWN' : 'CONFIRMED';
-      const trade = P9RealTradeService.updateManual(db, char.characterId, request.params.tradeId, patch);
-      return { trade, summary: P9RealTradeService.summary(db, char.characterId) };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '交易记录修改失败。' });
-    }
-  });
-
-  app.post('/api/web/trading/p9/real-trades/esi-sync', async (request, reply) => {
-    const session = requireMutationSession(db, request, reply);
-    if (!session) return;
-    const char = linkedCharacter(db, session, reply);
-    if (!char) return;
-    const result = await P9RealTradeService.syncEsiTransactions(
-      db,
-      char.characterId,
-      { userId: session.userId, chatId: session.chatId },
-    );
-    if (result.errors.length > 0 && result.imported === 0) return reply.status(502).send(result);
-    return result;
-  });
-
-  app.post('/api/web/trading/p9/rebuild-ledger', async (request, reply) => {
-    const session = requireMutationSession(db, request, reply);
-    if (!session) return;
-    const char = linkedCharacter(db, session, reply);
-    if (!char) return;
-    P9RealTradeService.rebuild(db, char.characterId);
-    return { ok: true, summary: P9RealTradeService.summary(db, char.characterId) };
-  });
-
+  };
+  for (const route of [
+    { method: 'GET' as const, url: '/api/web/trading/p9/inventory' },
+    { method: 'POST' as const, url: '/api/web/trading/p9/inventory/lots' },
+    { method: 'GET' as const, url: '/api/web/trading/p9/real-trades' },
+    { method: 'POST' as const, url: '/api/web/trading/p9/real-trades' },
+    { method: 'PUT' as const, url: '/api/web/trading/p9/real-trades/:tradeId' },
+    { method: 'POST' as const, url: '/api/web/trading/p9/real-trades/esi-sync' },
+    { method: 'POST' as const, url: '/api/web/trading/p9/rebuild-ledger' },
+  ]) {
+    if (route.method === 'GET') app.get(route.url, legacyAccountingGone);
+    else if (route.method === 'POST') app.post(route.url, legacyAccountingGone);
+    else app.put(route.url, legacyAccountingGone);
+  }
   app.get('/api/web/trading/p9/risk', async (request, reply) => {
     const session = requireSession(db, request, reply);
     if (!session) return;
@@ -366,8 +303,8 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
       GROUP BY state
     `).all(char.characterId) as any[];
     const unknownCosts = db.prepare(`
-      SELECT COUNT(*) AS lots FROM p9_inventory_lots
-      WHERE character_id = ? AND cost_status = 'UNKNOWN'
+      SELECT COUNT(*) AS lots FROM real_fifo_lots
+      WHERE character_id = ? AND remaining_quantity > 0 AND cost_status <> 'KNOWN'
     `).get(char.characterId) as any;
     const syncErrors = db.prepare(`
       SELECT dataset, status, error FROM character_sync_state

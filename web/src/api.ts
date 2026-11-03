@@ -439,6 +439,30 @@ export const webApi = {
     jobs: () => request<unknown>('/api/web/trading/p9/jobs'),
     analyze: (body: unknown, csrfToken: string) => request<unknown>('/api/web/trading/p9/analyze', { method: 'POST', body: JSON.stringify(body) }, csrfToken),
   },
+  p93: {
+    overview: () => request<unknown>('/api/web/trading/p9/real-ledger/overview'),
+    records: (params: Record<string, string | number | undefined> = {}) => {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value));
+      return request<unknown>(`/api/web/trading/p9/real-ledger/records?${search.toString()}`);
+    },
+    record: (recordId: string) => request<unknown>(`/api/web/trading/p9/real-ledger/records/${encodeURIComponent(recordId)}`),
+    createRecord: (body: unknown, csrfToken: string) => request<unknown>('/api/web/trading/p9/real-ledger/records', { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+    updateRecord: (recordId: string, body: unknown, csrfToken: string) => request<unknown>(`/api/web/trading/p9/real-ledger/records/${encodeURIComponent(recordId)}`, { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
+    recordAction: (recordId: string, action: 'verify' | 'reject' | 'reverse', csrfToken: string, reason?: string) => request<unknown>(`/api/web/trading/p9/real-ledger/records/${encodeURIComponent(recordId)}/${action}`, { method: 'POST', body: JSON.stringify({ reason }) }, csrfToken),
+    correctRecord: (recordId: string, body: unknown, csrfToken: string) => request<unknown>(`/api/web/trading/p9/real-ledger/records/${encodeURIComponent(recordId)}/correct`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+    evidenceList: () => request<unknown>('/api/web/trading/p9/real-ledger/evidence'),
+    evidence: (body: unknown, csrfToken: string) => request<unknown>('/api/web/trading/p9/real-ledger/evidence', { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+    evidenceStatus: (evidenceId: string, status: string, csrfToken: string, reason?: string) => request<unknown>(`/api/web/trading/p9/real-ledger/evidence/${encodeURIComponent(evidenceId)}/status`, { method: 'POST', body: JSON.stringify({ status, reason }) }, csrfToken),
+    linkEvidence: (recordId: string, body: unknown, csrfToken: string) => request<unknown>(`/api/web/trading/p9/real-ledger/records/${encodeURIComponent(recordId)}/evidence-links`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+    costs: () => request<unknown>('/api/web/trading/p9/real-ledger/costs'),
+    syncEsiWallet: (csrfToken: string) => request<unknown>('/api/web/trading/p9/real-ledger/esi-wallet-sync', { method: 'POST', body: '{}' }, csrfToken),
+    recalculate: (csrfToken: string) => request<unknown>('/api/web/trading/p9/real-ledger/recalculate', { method: 'POST', body: '{}' }, csrfToken),
+    performance: () => request<unknown>('/api/web/trading/p9/real-ledger/performance'),
+    reconciliation: () => request<unknown>('/api/web/trading/p9/real-ledger/reconciliation'),
+    runReconciliation: (csrfToken: string) => request<unknown>('/api/web/trading/p9/real-ledger/reconciliation/run', { method: 'POST', body: '{}' }, csrfToken),
+    audit: () => request<unknown>('/api/web/trading/p9/real-ledger/audit'),
+  },
   trading: {
     overview: () => request<unknown>('/api/web/trading/paper/overview'),
     orders: (status?: string, limit = 100) => request<unknown>(

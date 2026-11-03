@@ -157,6 +157,9 @@ export class RealValuationService {
       }>;
 
       const rates = FeeEngine.calculateRates(DEFAULT_FEE_CONTEXT);
+      const marketTypeIds = new Set<number>((db.prepare(
+        'SELECT DISTINCT type_id FROM market_orders WHERE volume_remain > 0',
+      ).all() as Array<{ type_id: number }>).map((row) => row.type_id));
       const items: ValuationItemResult[] = [];
       // Batch lookups: one book per distinct (type, location) / (type, region).
       const bidCache = new Map<string, OrderBookLevel[]>();
@@ -202,9 +205,7 @@ export class RealValuationService {
           }
 
           const sdeMeta = DataCenter.getItemMetadata(db, row.type_id);
-          const anyOrders = db.prepare(
-            'SELECT 1 FROM market_orders WHERE type_id = ? LIMIT 1',
-          ).get(row.type_id) !== undefined;
+          const anyOrders = marketTypeIds.has(row.type_id);
 
           // A. market reference: region top-of-book ask (reference only).
           let marketReferenceValue: number | null = null;
@@ -449,6 +450,73 @@ export class RealValuationService {
         facility: DEFAULT_FEE_CONTEXT.facility,
         note: '角色技能/声望/设施未知时采用的默认假设；不得视为该角色真实费用。',
       },
+    };
+  }
+  /** Category and hub summaries for the valuation analysis page. */
+  static summaries(db: Db, characterId: number): {
+    latest: Record<string, unknown> | null;
+    buckets: any[];
+    hubs: any[];
+  } {
+    const latest = this.latestTotals(db, characterId);
+    const latestHeader = latest
+      ? db.prepare('SELECT valuation_id FROM real_asset_valuations WHERE valuation_id = ?')
+        .get(latest.valuationId) as { valuation_id: string } | undefined
+      : undefined;
+    const buckets = latestHeader
+      ? db.prepare(`
+          SELECT ${BUCKET_SQL_CASE} AS bucket,
+                 COUNT(*) AS items,
+                 COALESCE(SUM(a.quantity), 0) AS quantity,
+                 SUM(CASE WHEN vi.market_reference_value IS NOT NULL THEN 1 ELSE 0 END) AS reference_counted,
+                 SUM(CASE WHEN vi.bid_liquidation_net IS NOT NULL THEN 1 ELSE 0 END) AS liquidation_counted,
+                 SUM(CASE WHEN vi.statuses_json LIKE '%INSUFFICIENT_DEPTH%' THEN 1 ELSE 0 END) AS depth_short,
+                 SUM(CASE WHEN vi.statuses_json LIKE '%NO_MARKET_DATA%'
+                             OR vi.statuses_json LIKE '%LOCATION_UNKNOWN%'
+                             OR vi.statuses_json LIKE '%NOT_MARKETABLE%' THEN 1 ELSE 0 END) AS unknown_count,
+                 SUM(vi.market_reference_value) AS market_reference_value,
+                 SUM(vi.bid_liquidation_net) AS bid_liquidation_net,
+                 SUM(vi.ask_replacement_gross) AS ask_replacement_gross
+          FROM real_asset_snapshot_items a
+          JOIN real_asset_valuation_items vi
+            ON vi.item_id = a.item_id AND vi.valuation_id = ?
+          LEFT JOIN sde_types t ON t.type_id = a.type_id
+          LEFT JOIN sde_groups g ON g.group_id = t.group_id
+          LEFT JOIN sde_categories c ON c.category_id = g.category_id
+          GROUP BY bucket
+          ORDER BY items DESC
+        `).all(latestHeader.valuation_id) as any[]
+      : [];
+    const hubs = db.prepare(`
+      SELECT v.valuation_id, v.hub_location_id, v.hub_region_id, v.created_at,
+             v.market_snapshot_at, v.fee_model_version,
+             COUNT(vi.item_id) AS items,
+             SUM(CASE WHEN vi.market_reference_value IS NOT NULL THEN 1 ELSE 0 END) AS reference_counted,
+             SUM(CASE WHEN vi.bid_liquidation_net IS NOT NULL THEN 1 ELSE 0 END) AS liquidation_counted,
+             SUM(vi.market_reference_value) AS market_reference_value,
+             SUM(vi.bid_liquidation_net) AS bid_liquidation_net,
+             SUM(vi.ask_replacement_gross) AS ask_replacement_gross
+      FROM real_asset_valuations v
+      LEFT JOIN real_asset_valuation_items vi ON vi.valuation_id = v.valuation_id
+      WHERE v.character_id = ? AND v.status = 'COMPLETED'
+      GROUP BY v.valuation_id
+      ORDER BY v.created_at DESC
+      LIMIT 50
+    `).all(characterId) as any[];
+    return {
+      latest,
+      buckets: buckets.map((row) => ({
+        ...row,
+        marketReferenceValue: row.market_reference_value == null ? null : round2(row.market_reference_value),
+        bidLiquidationNet: row.bid_liquidation_net == null ? null : round2(row.bid_liquidation_net),
+        askReplacementGross: row.ask_replacement_gross == null ? null : round2(row.ask_replacement_gross),
+      })),
+      hubs: hubs.map((row) => ({
+        ...row,
+        marketReferenceValue: row.market_reference_value == null ? null : round2(row.market_reference_value),
+        bidLiquidationNet: row.bid_liquidation_net == null ? null : round2(row.bid_liquidation_net),
+        askReplacementGross: row.ask_replacement_gross == null ? null : round2(row.ask_replacement_gross),
+      })),
     };
   }
 }

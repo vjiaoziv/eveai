@@ -1004,7 +1004,20 @@ function openStream(reply: FastifyReply, request: FastifyRequest): SseStream {
       reply.raw.write(`id: ${sequence}\nevent: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
     },
     close,
-    onClose(handler) { closeHandlers.push(handler); },
+    onClose(handler) {
+      if (!closed) {
+        closeHandlers.push(handler);
+        return;
+      }
+      // The client can abort while the route is still attaching subscriptions.
+      // Invoke late handlers immediately so a missed close event cannot leak a
+      // live poller, timer, audience entry, or advisor reference.
+      try {
+        handler();
+      } catch (error) {
+        console.warn('[map-sse] late close handler failed: %s', (error as Error).message);
+      }
+    },
     // Used when the session was refused before any byte was written, so the
     // route can still answer with a normal JSON status code.
     abortBeforeStart() {

@@ -582,6 +582,401 @@ export function runMigrations(db: Db): void {
       CREATE INDEX IF NOT EXISTS idx_real_asset_matches_char
         ON real_asset_opportunity_matches(character_id, computed_at);
     `);
+
+
+    // P9.3: append-only REAL accounting ledger. These tables are deliberately
+    // separate from every PAPER_* table and from P9.2's observed asset history.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS real_trade_records (
+        record_id             TEXT PRIMARY KEY,
+        character_id          INTEGER NOT NULL,
+        ledger_key            TEXT NOT NULL,
+        record_state          TEXT NOT NULL DEFAULT 'DRAFT'
+          CHECK (record_state IN ('DRAFT', 'ACTIVE', 'VERIFIED', 'REJECTED', 'REVERSED', 'CORRECTED')),
+        verification_status   TEXT NOT NULL DEFAULT 'PENDING'
+          CHECK (verification_status IN ('VERIFIED', 'USER_REPORTED', 'PENDING', 'CONFLICT', 'REJECTED')),
+        trade_kind            TEXT NOT NULL
+          CHECK (trade_kind IN ('BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL', 'FEE_ADJUSTMENT', 'COST_ADJUSTMENT', 'INVENTORY_TRANSFER', 'REVERSAL')),
+        direction             TEXT NOT NULL CHECK (direction IN ('BUY', 'SELL', 'NONE')),
+        type_id               INTEGER NOT NULL,
+        location_id           INTEGER NOT NULL,
+        quantity              INTEGER NOT NULL CHECK (quantity >= 0),
+        unit_price            REAL NOT NULL DEFAULT 0 CHECK (unit_price >= 0),
+        gross_amount          REAL GENERATED ALWAYS AS (quantity * unit_price) STORED,
+        fee_status            TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK (fee_status IN ('COMPLETE', 'UNKNOWN')),
+        trade_time            TEXT NOT NULL,
+        source_type           TEXT NOT NULL,
+        source_ref            TEXT,
+        source_hash           TEXT,
+        order_id              TEXT,
+        fill_id               TEXT,
+        execution_status      TEXT NOT NULL DEFAULT 'MANUAL_ENTRY'
+          CHECK (execution_status IN ('FULL_FILL', 'PARTIAL_FILL', 'MULTI_BATCH', 'MANUAL_ENTRY', 'ADJUSTMENT', 'TRANSFER')),
+        opportunity_id        TEXT,
+        plan_id               TEXT,
+        notes                 TEXT,
+        adjustment_mode       TEXT CHECK (adjustment_mode IN ('INCREASE', 'DECREASE')),
+        adjustment_amount     REAL,
+        target_lot_id         TEXT,
+        from_location_id      INTEGER,
+        to_location_id        INTEGER,
+        supersedes_record_id  TEXT,
+        reverses_record_id    TEXT,
+        rejected_reason       TEXT,
+        verified_at           TEXT,
+        created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+        is_paper              INTEGER NOT NULL DEFAULT 0 CHECK (is_paper = 0),
+        UNIQUE (character_id, ledger_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_trade_records_char_time
+        ON real_trade_records(character_id, trade_time, record_id);
+      CREATE INDEX IF NOT EXISTS idx_real_trade_records_source
+        ON real_trade_records(character_id, source_type, source_ref);
+
+      CREATE TABLE IF NOT EXISTS real_trade_events (
+        event_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        character_id   INTEGER NOT NULL,
+        record_id      TEXT NOT NULL,
+        event_type     TEXT NOT NULL,
+        actor_type     TEXT NOT NULL CHECK (actor_type IN ('USER', 'SYSTEM', 'ESI_SYNC')),
+        actor_id       TEXT,
+        before_json    TEXT,
+        after_json     TEXT,
+        reason         TEXT,
+        created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_trade_events_record
+        ON real_trade_events(record_id, created_at, event_id);
+      CREATE INDEX IF NOT EXISTS idx_real_trade_events_char
+        ON real_trade_events(character_id, created_at, event_id);
+
+      CREATE TABLE IF NOT EXISTS real_trade_fees (
+        fee_id       TEXT PRIMARY KEY,
+        record_id    TEXT NOT NULL,
+        fee_kind     TEXT NOT NULL CHECK (fee_kind IN ('BROKER', 'TRANSACTION_TAX', 'OTHER', 'MANUAL')),
+        amount       REAL NOT NULL CHECK (amount >= 0),
+        treatment    TEXT NOT NULL CHECK (treatment IN ('CAPITALIZED', 'SELL_EXPENSE', 'PERIOD_EXPENSE', 'UNRELATED', 'UNKNOWN')),
+        evidence_id  TEXT,
+        notes        TEXT,
+        created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (record_id, fee_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_trade_fees_record
+        ON real_trade_fees(record_id);
+
+      CREATE TABLE IF NOT EXISTS real_trade_evidence (
+        evidence_id    TEXT PRIMARY KEY,
+        character_id   INTEGER NOT NULL,
+        evidence_type  TEXT NOT NULL CHECK (evidence_type IN ('ESI_WALLET_LOG', 'ESI_MARKET_ORDER', 'ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE', 'USER_ATTACHMENT', 'USER_CONFIRMATION')),
+        source_system  TEXT NOT NULL,
+        source_ref     TEXT,
+        captured_at    TEXT NOT NULL,
+        payload_hash   TEXT NOT NULL,
+        summary        TEXT,
+        metadata_json  TEXT NOT NULL DEFAULT '{}',
+        status         TEXT NOT NULL DEFAULT 'PENDING'
+          CHECK (status IN ('VERIFIED', 'USER_REPORTED', 'PENDING', 'CONFLICT', 'REJECTED')),
+        created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_trade_evidence_char_time
+        ON real_trade_evidence(character_id, captured_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_real_trade_evidence_source
+        ON real_trade_evidence(character_id, source_system, source_ref) WHERE source_ref IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS real_trade_evidence_links (
+        evidence_id  TEXT NOT NULL,
+        record_id    TEXT NOT NULL,
+        relation     TEXT NOT NULL CHECK (relation IN ('PRIMARY', 'CORROBORATING', 'CONFLICTING', 'ADJUSTMENT')),
+        confidence   TEXT NOT NULL DEFAULT 'MEDIUM' CHECK (confidence IN ('HIGH', 'MEDIUM', 'LOW')),
+        notes        TEXT,
+        created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (evidence_id, record_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS real_fifo_lots (
+        lot_id              TEXT PRIMARY KEY,
+        character_id        INTEGER NOT NULL,
+        type_id             INTEGER NOT NULL,
+        location_id         INTEGER NOT NULL,
+        source_record_id    TEXT NOT NULL,
+        original_quantity   INTEGER NOT NULL CHECK (original_quantity >= 0),
+        remaining_quantity  INTEGER NOT NULL CHECK (remaining_quantity >= 0),
+        base_cost           REAL NOT NULL,
+        capitalized_fees    REAL NOT NULL DEFAULT 0,
+        unit_cost           REAL,
+        remaining_cost      REAL,
+        cost_status         TEXT NOT NULL CHECK (cost_status IN ('KNOWN', 'PARTIAL', 'UNKNOWN')),
+        acquired_at         TEXT NOT NULL,
+        calculation_version TEXT NOT NULL,
+        created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_fifo_lots_fifo
+        ON real_fifo_lots(character_id, type_id, location_id, acquired_at, lot_id);
+
+      CREATE TABLE IF NOT EXISTS real_fifo_consumptions (
+        consumption_id       TEXT PRIMARY KEY,
+        character_id         INTEGER NOT NULL,
+        sell_record_id       TEXT NOT NULL,
+        lot_id               TEXT NOT NULL,
+        type_id              INTEGER NOT NULL,
+        location_id          INTEGER NOT NULL,
+        quantity             INTEGER NOT NULL CHECK (quantity >= 0),
+        unit_cost            REAL,
+        allocated_sell_fees  REAL NOT NULL DEFAULT 0,
+        realized_pnl         REAL,
+        pnl_status           TEXT NOT NULL CHECK (pnl_status IN ('CALCULATED', 'UNKNOWN_COST')),
+        calculation_version  TEXT NOT NULL,
+        created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_fifo_consumptions_sell
+        ON real_fifo_consumptions(character_id, sell_record_id);
+      CREATE INDEX IF NOT EXISTS idx_real_fifo_consumptions_lot
+        ON real_fifo_consumptions(lot_id, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_real_fifo_consumptions_unique_consumption
+        ON real_fifo_consumptions(sell_record_id, lot_id);
+
+      CREATE TABLE IF NOT EXISTS real_calculation_runs (
+        run_id               TEXT PRIMARY KEY,
+        character_id         INTEGER NOT NULL,
+        calculation_version  TEXT NOT NULL,
+        status               TEXT NOT NULL CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED')),
+        started_at           TEXT NOT NULL,
+        completed_at         TEXT,
+        record_count         INTEGER NOT NULL DEFAULT 0,
+        realized_pnl         REAL,
+        unknown_cost_count   INTEGER NOT NULL DEFAULT 0,
+        previous_run_id      TEXT,
+        before_hash          TEXT,
+        after_hash           TEXT,
+        differences_json     TEXT NOT NULL DEFAULT '{}',
+        error                TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_calc_runs_char_time
+        ON real_calculation_runs(character_id, completed_at);
+
+      CREATE TABLE IF NOT EXISTS real_reconciliation_runs (
+        run_id              TEXT PRIMARY KEY,
+        character_id        INTEGER NOT NULL,
+        snapshot_id         TEXT,
+        calculation_run_id  TEXT,
+        status              TEXT NOT NULL CHECK (status IN ('MATCHED', 'RECONCILIATION_REQUIRED', 'FAILED')),
+        created_at          TEXT NOT NULL,
+        completed_at        TEXT,
+        summary_json        TEXT NOT NULL DEFAULT '{}'
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_recon_runs_char_time
+        ON real_reconciliation_runs(character_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS real_reconciliation_items (
+        run_id             TEXT NOT NULL,
+        reconcile_key      TEXT NOT NULL,
+        type_id            INTEGER,
+        location_id        INTEGER,
+        ledger_quantity    INTEGER NOT NULL DEFAULT 0,
+        asset_quantity     INTEGER NOT NULL DEFAULT 0,
+        delta_quantity     INTEGER NOT NULL DEFAULT 0,
+        ledger_cost        REAL,
+        valuation_value    REAL,
+        status             TEXT NOT NULL CHECK (status IN ('MATCHED', 'UNMATCHED', 'PARTIAL_MATCH', 'QUANTITY_MISMATCH', 'VALUE_MISMATCH', 'UNKNOWN_SOURCE', 'RECONCILIATION_REQUIRED')),
+        reason             TEXT,
+        details_json       TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (run_id, reconcile_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_recon_items_status
+        ON real_reconciliation_items(run_id, status);
+
+      CREATE TABLE IF NOT EXISTS real_reconciliation_cases (
+        case_id          TEXT PRIMARY KEY,
+        run_id           TEXT NOT NULL,
+        character_id     INTEGER NOT NULL,
+        case_kind        TEXT NOT NULL,
+        status           TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'RESOLVED', 'DISMISSED')),
+        linked_record_id TEXT,
+        linked_change_id TEXT,
+        details_json     TEXT NOT NULL DEFAULT '{}',
+        resolution       TEXT,
+        created_at       TEXT NOT NULL,
+        resolved_at      TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_recon_cases_run
+        ON real_reconciliation_cases(run_id, status);
+
+      CREATE TABLE IF NOT EXISTS real_esi_transaction_sync (
+        character_id        INTEGER PRIMARY KEY,
+        last_transaction_id INTEGER,
+        last_synced_at      TEXT,
+        status              TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok', 'error')),
+        error               TEXT
+      );
+
+      DROP TRIGGER IF EXISTS real_trade_records_no_delete;
+      CREATE TRIGGER real_trade_records_no_delete
+      BEFORE DELETE ON real_trade_records
+      BEGIN
+        SELECT RAISE(ABORT, '真实交易记录不得直接删除；请使用冲正或更正');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_records_immutable_facts;
+      CREATE TRIGGER real_trade_records_immutable_facts
+      BEFORE UPDATE OF trade_kind, direction, type_id, location_id, quantity, unit_price,
+        fee_status, trade_time, source_type, source_ref, source_hash, order_id, fill_id,
+        execution_status, adjustment_mode, adjustment_amount, target_lot_id,
+        from_location_id, to_location_id, is_paper
+      ON real_trade_records
+      WHEN OLD.record_state <> 'DRAFT'
+      BEGIN
+        SELECT RAISE(ABORT, '非草稿交易事实不可原地覆盖');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_records_insert_unverified;
+      CREATE TRIGGER real_trade_records_insert_unverified
+      BEFORE INSERT ON real_trade_records
+      WHEN NEW.record_state = 'VERIFIED' OR NEW.verification_status = 'VERIFIED'
+      BEGIN
+        SELECT RAISE(ABORT, '交易记录必须先登记再经证据核实');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_records_verify_matching_evidence;
+      CREATE TRIGGER real_trade_records_verify_matching_evidence
+      BEFORE UPDATE OF record_state, verification_status ON real_trade_records
+      WHEN NEW.record_state = 'VERIFIED' AND NEW.verification_status = 'VERIFIED'
+        AND (OLD.record_state <> 'VERIFIED' OR OLD.verification_status <> 'VERIFIED')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM real_trade_evidence_links l
+          JOIN real_trade_evidence e ON e.evidence_id = l.evidence_id
+          WHERE l.record_id = NEW.record_id
+            AND e.character_id = NEW.character_id
+            AND e.status = 'VERIFIED'
+            AND l.relation IN ('PRIMARY', 'CORROBORATING')
+            AND (
+              e.evidence_type IN ('USER_ATTACHMENT', 'USER_CONFIRMATION')
+              OR (
+                e.evidence_type = 'ESI_WALLET_LOG'
+                AND e.source_system = 'ESI_WALLET_TRANSACTIONS'
+                AND NEW.source_type = 'ESI_WALLET_TRANSACTION'
+                AND e.source_ref = NEW.source_ref
+              )
+            )
+        )
+      BEGIN
+        SELECT RAISE(ABORT, '缺少与交易事实匹配的已核实证据');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_records_verify_conflicts;
+      CREATE TRIGGER real_trade_records_verify_conflicts
+      BEFORE UPDATE OF record_state, verification_status ON real_trade_records
+      WHEN NEW.record_state = 'VERIFIED' AND NEW.verification_status = 'VERIFIED'
+        AND (OLD.record_state <> 'VERIFIED' OR OLD.verification_status <> 'VERIFIED')
+        AND EXISTS (
+          SELECT 1
+          FROM real_trade_evidence_links l
+          JOIN real_trade_evidence e ON e.evidence_id = l.evidence_id
+          WHERE l.record_id = NEW.record_id
+            AND e.character_id = NEW.character_id
+            AND e.status IN ('VERIFIED', 'CONFLICT')
+            AND l.relation = 'CONFLICTING'
+        )
+      BEGIN
+        SELECT RAISE(ABORT, '存在冲突证据，不能核实交易');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_events_append_only_update;
+      CREATE TRIGGER real_trade_events_append_only_update
+      BEFORE UPDATE ON real_trade_events
+      BEGIN
+        SELECT RAISE(ABORT, '财务事件日志只允许追加');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_events_append_only_delete;
+      CREATE TRIGGER real_trade_events_append_only_delete
+      BEFORE DELETE ON real_trade_events
+      BEGIN
+        SELECT RAISE(ABORT, '财务事件日志只允许追加');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_evidence_verified_immutable_update;
+      CREATE TRIGGER real_trade_evidence_verified_immutable_update
+      BEFORE UPDATE ON real_trade_evidence
+      WHEN OLD.status = 'VERIFIED'
+      BEGIN
+        SELECT RAISE(ABORT, '已核实证据不可原地覆盖');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_evidence_verified_immutable_delete;
+      CREATE TRIGGER real_trade_evidence_verified_immutable_delete
+      BEFORE DELETE ON real_trade_evidence
+      WHEN OLD.status = 'VERIFIED'
+      BEGIN
+        SELECT RAISE(ABORT, '已核实证据不可删除');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_fees_non_draft_insert;
+      CREATE TRIGGER real_trade_fees_non_draft_insert
+      BEFORE INSERT ON real_trade_fees
+      WHEN COALESCE((SELECT record_state FROM real_trade_records WHERE record_id = NEW.record_id), 'MISSING') <> 'DRAFT'
+      BEGIN
+        SELECT RAISE(ABORT, '非草稿或孤儿交易的费用不可新增');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_fees_non_draft_update;
+      CREATE TRIGGER real_trade_fees_non_draft_update
+      BEFORE UPDATE ON real_trade_fees
+      WHEN COALESCE((SELECT record_state FROM real_trade_records WHERE record_id = OLD.record_id), 'MISSING') <> 'DRAFT'
+      BEGIN
+        SELECT RAISE(ABORT, '非草稿或孤儿交易的费用不可修改');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_fees_non_draft_delete;
+      CREATE TRIGGER real_trade_fees_non_draft_delete
+      BEFORE DELETE ON real_trade_fees
+      WHEN COALESCE((SELECT record_state FROM real_trade_records WHERE record_id = OLD.record_id), 'MISSING') <> 'DRAFT'
+      BEGIN
+        SELECT RAISE(ABORT, '非草稿或孤儿交易的费用不可删除');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_evidence_links_immutable_insert;
+      CREATE TRIGGER real_trade_evidence_links_immutable_insert
+      BEFORE INSERT ON real_trade_evidence_links
+      WHEN NOT EXISTS (
+        SELECT 1 FROM real_trade_records r
+        JOIN real_trade_evidence e ON e.evidence_id = NEW.evidence_id AND e.character_id = r.character_id
+        WHERE r.record_id = NEW.record_id
+      ) OR COALESCE((SELECT record_state FROM real_trade_records WHERE record_id = NEW.record_id), 'MISSING')
+        IN ('VERIFIED', 'REVERSED', 'CORRECTED')
+      BEGIN
+        SELECT RAISE(ABORT, '证据关系必须同角色存在，且已核实或终态记录不可新增证据关系');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_events_insert_valid_record;
+      CREATE TRIGGER real_trade_events_insert_valid_record
+      BEFORE INSERT ON real_trade_events
+      WHEN NOT EXISTS (
+        SELECT 1 FROM real_trade_records WHERE record_id = NEW.record_id AND character_id = NEW.character_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, '财务事件必须关联同角色交易记录');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_evidence_links_immutable_update;
+      CREATE TRIGGER real_trade_evidence_links_immutable_update
+      BEFORE UPDATE ON real_trade_evidence_links
+      WHEN (SELECT record_state FROM real_trade_records WHERE record_id = OLD.record_id)
+        IN ('VERIFIED', 'REVERSED', 'CORRECTED')
+      BEGIN
+        SELECT RAISE(ABORT, '已核实或终态记录不可修改证据关系');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_evidence_links_immutable_delete;
+      CREATE TRIGGER real_trade_evidence_links_immutable_delete
+      BEFORE DELETE ON real_trade_evidence_links
+      WHEN (SELECT record_state FROM real_trade_records WHERE record_id = OLD.record_id)
+        IN ('VERIFIED', 'REVERSED', 'CORRECTED')
+      BEGIN
+        SELECT RAISE(ABORT, '已核实或终态记录不可删除证据关系');
+      END;
+    `);
     backfillPaperTradingEscrow(db);
     // Alert push redelivery: per-event attempts with exponential backoff and
     // a terminal abandoned_at so undeliverable events stop blocking the queue.

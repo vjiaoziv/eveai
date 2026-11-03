@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { webApi } from '../api';
 import { ChartIcon, MenuIcon } from '../icons';
+import { P93AccountingPanel } from './P93AccountingPanel';
 
-type P9Tab = 'overview' | 'opportunities' | 'plans' | 'assets' | 'inventory' | 'trades' | 'performance' | 'risk' | 'settings';
+type P9Tab = 'overview' | 'accounting' | 'opportunities' | 'plans' | 'assets' | 'inventory' | 'trades' | 'performance' | 'risk' | 'settings';
 
 type P9Overview = {
   portfolio: {
@@ -123,7 +124,7 @@ const matchLevels = (levels: Array<{ price: number; volumeRemain: number }>, qua
 type Props = { onMenu: () => void; csrfToken: string };
 
 export function P9TradingScreen({ onMenu, csrfToken }: Props) {
-  const [tab, setTab] = useState<P9Tab>('overview');
+  const [tab, setTab] = useState<P9Tab>('accounting');
   const [overview, setOverview] = useState<P9Overview | null>(null);
   const [settings, setSettings] = useState<P9Settings | null>(null);
   const [opportunities, setOpportunities] = useState<P9Opportunity[]>([]);
@@ -273,15 +274,10 @@ export function P9TradingScreen({ onMenu, csrfToken }: Props) {
       ? <div className="screen-error" role="alert">{error}</div>
       : <div className="app-loading" aria-label="加载真实交易工作台"><span /><span /><span /></div>;
   }
-  const tabLabels: Record<P9Tab, string> = {
-    overview: '交易总览',
+  const tabLabels: Partial<Record<P9Tab, string>> = {
+    accounting: 'REAL 账本',
     opportunities: '机会中心',
     plans: '交易方案',
-    assets: '真实资产',
-    inventory: '库存管理',
-    trades: '真实交易记录',
-    performance: '策略绩效',
-    risk: '风险中心',
     settings: '系统设置',
   };
 
@@ -306,6 +302,8 @@ export function P9TradingScreen({ onMenu, csrfToken }: Props) {
       {error ? <div className="screen-error" role="alert">{error}</div> : null}
       {notice ? <div className="screen-success" role="status">{notice}</div> : null}
       {busy ? <p>处理中，请稍候…</p> : null}
+
+      {tab === 'accounting' ? <P93AccountingPanel csrfToken={csrfToken} /> : null}
 
       {tab === 'overview' ? (
         <>

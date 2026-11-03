@@ -231,6 +231,7 @@ export class RealInventoryService {
   static detail(db: Db, characterId: number, itemId: number): (InventoryRow & {
     changeHistory: unknown[];
     snapshotHistory: unknown[];
+    latestValuation: Record<string, unknown> | null;
   }) | null {
     const base = db.prepare(`
       SELECT a.item_id, a.type_id, a.quantity, a.location_id, a.location_type, a.location_flag,
@@ -291,7 +292,38 @@ export class RealInventoryService {
       ORDER BY s.completed_at DESC LIMIT 50
     `).all(characterId, itemId);
 
-    return { ...mapRow(base), changeHistory, snapshotHistory };
+    const valuationHeader = db.prepare(`
+      SELECT valuation_id, snapshot_id, hub_location_id, hub_region_id,
+             market_snapshot_at, fee_model_version, created_at, completed_at
+      FROM real_asset_valuations
+      WHERE character_id = ? AND status = 'COMPLETED'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(characterId) as any;
+    const valuationItem = valuationHeader
+      ? db.prepare(`
+          SELECT market_reference_value, bid_liquidation_gross, bid_liquidation_net,
+                 fillable_quantity, unfillable_quantity, ask_replacement_gross,
+                 ask_replacement_net, statuses_json, flags_json, price_source
+          FROM real_asset_valuation_items
+          WHERE valuation_id = ? AND item_id = ?
+        `).get(valuationHeader.valuation_id, itemId) as any
+      : undefined;
+    const latestValuation = valuationHeader
+      ? {
+          ...valuationHeader,
+          item: valuationItem
+            ? {
+                ...valuationItem,
+                statuses: JSON.parse(valuationItem.statuses_json || '[]'),
+                flags: JSON.parse(valuationItem.flags_json || '[]'),
+              }
+            : null,
+          feeAssumptions: {
+            note: '角色技能/声望/设施未知时采用默认 Alpha 技能 / NPC 空间站假设；不得视为该角色真实费用。',
+          },
+        }
+      : null;
+    return { ...mapRow(base), changeHistory, snapshotHistory, latestValuation };
   }
 
   static getTag(db: Db, characterId: number, itemId: number): AssetTag | null {

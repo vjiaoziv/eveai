@@ -62,6 +62,24 @@ function intQuery(value: string | undefined): number | undefined {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+/** Never expose filesystem paths, database details, or credential material. */
+function sanitizeAssetError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw
+    .replace(/\b(?:access_token|refresh_token|client_secret|password|bearer)\b\s*[:=]\s*[^\s,;]+/gi, '$1=[已隐藏]')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[凭证已隐藏]')
+    .replace(/(?:[A-Za-z]:\\|\/)[^\s'"`]+/g, '[路径已隐藏]')
+    .replace(/\b(?:sqlite|database(?:\s+path)?|\.db)\b/gi, '数据库')
+    .slice(0, 500);
+}
+
+function sanitizeAssetJob<T extends Record<string, unknown>>(job: T): T {
+  const copy: Record<string, unknown> = { ...job };
+  if (typeof copy.lastError === 'string') copy.lastError = sanitizeAssetError(copy.lastError);
+  if (typeof copy.last_error === 'string') copy.last_error = sanitizeAssetError(copy.last_error);
+  return copy as T;
+}
+
 export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
   app.addHook('onRequest', async (request, reply) => {
     if (request.url.startsWith('/api/web/assets/')) {
@@ -82,15 +100,48 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
         ORDER BY completed_at DESC LIMIT 1
       `).get(char.characterId) as any;
       const job = RealAssetSyncService.latestJob(db, char.characterId);
-      const currentItems = Number((db.prepare(
-        'SELECT COUNT(*) AS n FROM character_assets WHERE character_id = ?',
-      ).get(char.characterId) as any)?.n || 0);
+      const lastSuccess = db.prepare(`
+        SELECT job_id, finished_at, duration_ms, snapshot_id
+        FROM real_asset_sync_jobs
+        WHERE character_id = ? AND status = 'COMPLETED'
+        ORDER BY finished_at DESC LIMIT 1
+      `).get(char.characterId) as any;
+      const account = db.prepare(`
+        SELECT scopes_json FROM eve_accounts WHERE character_id = ?
+      `).get(char.characterId) as { scopes_json?: string } | undefined;
+      let scopes: string[] = [];
+      try { scopes = JSON.parse(account?.scopes_json || '[]') as string[]; } catch { scopes = []; }
+      const current = db.prepare(`
+        SELECT COUNT(*) AS items,
+               COUNT(DISTINCT type_id) AS unique_types,
+               COUNT(DISTINCT location_id) AS locations,
+               COALESCE(SUM(quantity), 0) AS quantity
+        FROM character_assets WHERE character_id = ?
+      `).get(char.characterId) as any;
+      const currentAssetItems = Number(current.items || 0);
+      const hasAssetScope = scopes.includes('esi-assets.read_assets.v1');
+      const dataIntegrity = !latestSnapshot
+        ? 'NO_SNAPSHOT'
+        : currentAssetItems === Number(latestSnapshot.total_items)
+          && Number(current.unique_types || 0) === Number(latestSnapshot.total_unique_types)
+          && Number(current.locations || 0) === Number(latestSnapshot.total_locations)
+          && Number(current.quantity || 0) === Number(latestSnapshot.total_quantity)
+          ? 'COMPLETE'
+          : 'INCONSISTENT';
       return {
         characterId: char.characterId,
         characterName: char.name,
-        currentAssetItems: currentItems,
+        currentAssetItems,
+        currentUniqueTypes: Number(current.unique_types || 0),
+        currentLocations: Number(current.locations || 0),
         latestSnapshot: latestSnapshot || null,
-        lastJob: job,
+        lastJob: job ? sanitizeAssetJob(job as unknown as Record<string, unknown>) : null,
+        lastSuccessAt: lastSuccess?.finished_at ?? latestSnapshot?.completed_at ?? null,
+        authorization: {
+          status: hasAssetScope ? 'AUTHORIZED' : scopes.length > 0 ? 'MISSING_ASSET_SCOPE' : 'NO_ACCOUNT',
+          hasAssetScope,
+        },
+        dataIntegrity,
         latestValuation: RealValuationService.latestTotals(db, char.characterId),
         syncIntervalMinutes: config.assetSync.intervalMinutes,
         syncEnabled: config.assetSync.enabled,
@@ -98,9 +149,27 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
     });
     const totals = characters.reduce((acc, row) => ({
       items: acc.items + row.currentAssetItems,
+      uniqueTypes: acc.uniqueTypes + row.currentUniqueTypes,
+      locations: acc.locations + row.currentLocations,
       characters: acc.characters + 1,
       withSnapshot: acc.withSnapshot + (row.latestSnapshot ? 1 : 0),
-    }), { items: 0, characters: 0, withSnapshot: 0 });
+      authorized: acc.authorized + (row.authorization.hasAssetScope ? 1 : 0),
+      lastSuccessAt: [acc.lastSuccessAt, row.lastSuccessAt].filter(Boolean).sort().at(-1) ?? null,
+      integrity: {
+        complete: acc.integrity.complete + (row.dataIntegrity === 'COMPLETE' ? 1 : 0),
+        inconsistent: acc.integrity.inconsistent + (row.dataIntegrity === 'INCONSISTENT' ? 1 : 0),
+        noSnapshot: acc.integrity.noSnapshot + (row.dataIntegrity === 'NO_SNAPSHOT' ? 1 : 0),
+      },
+    }), {
+      items: 0,
+      uniqueTypes: 0,
+      locations: 0,
+      characters: 0,
+      withSnapshot: 0,
+      authorized: 0,
+      lastSuccessAt: null as string | null,
+      integrity: { complete: 0, inconsistent: 0, noSnapshot: 0 },
+    });
     for (const row of characters) {
       (row as any).bucketSummary = RealInventoryService.bucketSummary(db, row.characterId);
     }
@@ -108,11 +177,44 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
       totals,
       buckets: Object.entries(BUCKET_LABELS_ZH).map(([bucket, labelZh]) => ({ bucket, labelZh })),
       characters,
-      // Perspectives are reported separately per valuation run; they are
-      // never summed into one fake net-worth number.
+      retentionPolicy: {
+        snapshots: 'permanent_immutable',
+        identicalSnapshots: 'sha256_deduplicated',
+        changes: 'diff_only',
+        valuationRuns: 'permanent_history',
+        currentSet: 'atomic_replace',
+        note: '不删除历史快照或变化；相同快照按哈希去重，变化仅存差异。',
+      },
       valuationNote: 'market_reference / bid_liquidation / ask_replacement / cost_basis are independent perspectives and must not be summed',
       realTradingExecutionDisabled: true,
     };
+  });
+
+  app.post('/api/web/assets/sync/all', async (request, reply) => {
+    const session = requireMutationSession(db, request, reply);
+    if (!session) return;
+    const linked = linkedCharacters(db, session);
+    if (linked.length === 0) return reply.status(404).send({ error: '尚未关联 EVE 角色。' });
+    const results: Array<Record<string, unknown>> = [];
+    for (const char of linked) {
+      try {
+        const result = await RealAssetSyncService.syncCharacter(
+          db,
+          char.characterId,
+          { ...sessionContext(session), characterId: char.characterId },
+          'api',
+        );
+        results.push({ characterId: char.characterId, ok: true, result });
+      } catch (error) {
+        results.push({
+          characterId: char.characterId,
+          ok: false,
+          error: sanitizeAssetError(error),
+          job: sanitizeAssetJob(((error as { job?: unknown }).job ?? {}) as Record<string, unknown>),
+        });
+      }
+    }
+    return { results, total: results.length, succeeded: results.filter((row) => row.ok).length };
   });
 
   app.get('/api/web/assets/characters', async (request, reply) => {
@@ -140,11 +242,12 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
       return { result };
     } catch (error) {
       const job = (error as { job?: unknown }).job;
-      const message = error instanceof Error ? error.message : String(error);
+      const message = sanitizeAssetError(error);
+      const safeJob = job ? sanitizeAssetJob(job as Record<string, unknown>) : null;
       if (message.includes('已有资产同步任务在运行')) {
-        return reply.status(409).send({ error: message, job: job ?? null });
+        return reply.status(409).send({ error: message, job: safeJob });
       }
-      return reply.status(502).send({ error: message, job: job ?? null });
+      return reply.status(502).send({ error: message, job: safeJob });
     }
   });
 
@@ -154,7 +257,10 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
     const target = requireLinkedCharacter(db, session, reply, intQuery(request.query.characterId));
     if (!target) return;
     const limit = Math.max(1, Math.min(500, Number(request.query.limit ?? 50) || 50));
-    return { jobs: RealAssetSyncService.listJobs(db, target.characterId, limit) };
+    return {
+      jobs: RealAssetSyncService.listJobs(db, target.characterId, limit)
+        .map((job) => sanitizeAssetJob(job as unknown as Record<string, unknown>)),
+    };
   });
 
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/web/assets/snapshots', async (request, reply) => {
@@ -248,7 +354,7 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
         db, target.characterId, request.params.fromSnapshotId, request.params.toSnapshotId,
       );
     } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '快照对比失败。' });
+      return reply.status(400).send({ error: sanitizeAssetError(error) || '快照对比失败。' });
     }
   });
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/web/assets/inventory', async (request, reply) => {
@@ -327,7 +433,7 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
     } catch (error) {
       const valuationId = (error as { valuationId?: string }).valuationId;
       return reply.status(500).send({
-        error: error instanceof Error ? error.message : '估值任务失败。',
+        error: sanitizeAssetError(error) || '估值任务失败。',
         valuationId: valuationId ?? null,
       });
     }
@@ -339,7 +445,8 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
     const target = requireLinkedCharacter(db, session, reply, intQuery(request.query.characterId));
     if (!target) return;
     return {
-      runs: RealValuationService.listRuns(db, target.characterId, Number(request.query.limit ?? 20)),
+      runs: RealValuationService.listRuns(db, target.characterId, Number(request.query.limit ?? 20))
+        .map((row) => sanitizeAssetJob(row as unknown as Record<string, unknown>)),
       latestTotals: RealValuationService.latestTotals(db, target.characterId),
     };
   });
@@ -381,7 +488,7 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
     try {
       return RealOpportunityMatchService.recompute(db, target.characterId);
     } catch (error) {
-      return reply.status(500).send({ error: error instanceof Error ? error.message : '库存机会联动计算失败。' });
+      return reply.status(500).send({ error: sanitizeAssetError(error) || '库存机会联动计算失败。' });
     }
   });
   app.put<{ Params: { itemId: string }; Body: unknown }>('/api/web/assets/tags/:itemId', async (request, reply) => {
@@ -407,7 +514,7 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
       const tag = RealInventoryService.setTag(db, owner.characterId, itemId, body.tag);
       return { itemId, tag, tagLabel: ASSET_TAG_LABELS_ZH[tag] };
     } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '标签保存失败。' });
+      return reply.status(400).send({ error: sanitizeAssetError(error) || '标签保存失败。' });
     }
   });
 }

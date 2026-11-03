@@ -150,6 +150,7 @@ const ORIGIN = 'http://localhost:3000';
 let threadIdSeen: string | null = null;
 let sequence = 100;
 let killmailId = 5000;
+const openClients: Client[] = [];
 
 function seedGraph(database: InstanceType<typeof Database>): void {
   database.exec(`
@@ -227,6 +228,7 @@ function openLive(query = '?radius=1'): Promise<Client> {
       response.on('end', () => { client.ended = true; });
       response.on('close', () => { client.ended = true; });
       client.close = () => { request.destroy(); };
+      openClients.push(client);
       resolve(client);
     });
     request.on('error', (error) => {
@@ -259,6 +261,19 @@ async function advance(ms: number, step = 250): Promise<void> {
     await flushIo(4);
     left -= slice;
   }
+}
+/** Advances fake time until an asynchronous SSE condition is observable. */
+async function advanceUntil(condition: () => boolean, label: string, maxMs = 15_000, step = 100): Promise<void> {
+  for (let elapsed = 0; elapsed < maxMs; elapsed += step) {
+    await advance(step, step);
+    if (condition()) return;
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+async function closeClientAndWait(client: Client, label = 'poller stopped'): Promise<void> {
+  client.close();
+  await flushIo();
+  await until(() => getLiveSessionStats().sessions === 0, label);
 }
 
 function of(client: Client, event: string): Frame[] {
@@ -363,9 +378,14 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await stopEveKillFeedPoller();
-  resetMapKillIndexForTests();
+  // A failed assertion can abort before the test closes its SSE clients. Close
+  // every socket, then drop in-process sessions and observers before waiting on
+  // the feed poller or the HTTP server.
+  for (const client of openClients.splice(0)) client.close();
+  await flushIo();
   resetLiveSessionsForTests();
+  resetMapKillIndexForTests();
+  await stopEveKillFeedPoller();
   await app.close();
   vi.useRealTimers();
   db.close();
@@ -410,7 +430,10 @@ describe('Perimeter live radar, end to end over real SSE', () => {
     const big = await feedKill(B, { value: 2_000_000_000 });
     await until(() => of(tab, 'kill').length === 1, 'kill frame');
     expect((of(tab, 'kill')[0]!.data.kill as { killmailId: number }).killmailId).toBe(big);
-    await advance(2_000);
+    await advanceUntil(
+      () => of(tab, 'intel').length >= intelBefore + 1 && rules(tab, 'value_spike').length >= 1,
+      'in-bubble intel and advisory',
+    );
     expect(of(tab, 'intel').length).toBe(intelBefore + 1);
     // Hull 587 has no dogma rows in this SDE: unknown, not "survival: dead".
     expect(rules(tab, 'capability_gap')).toHaveLength(0);
@@ -425,10 +448,13 @@ describe('Perimeter live radar, end to end over real SSE', () => {
 
     // A burst of two more in-bubble kills shares one rebuild; the second
     // expensive kill inside the cooldown collapses instead of repeating.
+    const intelBeforeBurst = of(tab, 'intel').length;
     await feedKill(A, { value: 3_000_000_000 });
     await feedKill(A);
-    const intelBeforeBurst = of(tab, 'intel').length;
-    await advance(2_000);
+    await advanceUntil(
+      () => of(tab, 'kill').length === 3 && of(tab, 'intel').length >= intelBeforeBurst + 1,
+      'burst kill frames and intel',
+    );
     expect(of(tab, 'kill')).toHaveLength(3);
     expect(of(tab, 'intel').length).toBe(intelBeforeBurst + 1);
     expect(rules(tab, 'value_spike')).toHaveLength(1);
@@ -437,8 +463,11 @@ describe('Perimeter live radar, end to end over real SSE', () => {
     // Jump A → B: a jumped location and an intel recentred on B; nothing
     // centred on A is published after the jump.
     script.systemId = B;
-    await advance(5_000);
-    await until(() => of(tab, 'intel').some((frame) => bubbleOrigin(frame) === B), 'intel on B');
+    await advanceUntil(
+      () => of(tab, 'location').some((frame) => (frame.data.location as { solarSystemId: number }).solarSystemId === B)
+        && of(tab, 'intel').some((frame) => bubbleOrigin(frame) === B),
+      'intel on B',
+    );
     const jumpB = of(tab, 'location').find(
       (frame) => (frame.data.location as { solarSystemId: number }).solarSystemId === B,
     )!;
@@ -448,8 +477,11 @@ describe('Perimeter live radar, end to end over real SSE', () => {
 
     // Jump B → C.
     script.systemId = C;
-    await advance(5_000);
-    await until(() => of(tab, 'intel').some((frame) => bubbleOrigin(frame) === C), 'intel on C');
+    await advanceUntil(
+      () => of(tab, 'location').some((frame) => (frame.data.location as { solarSystemId: number }).solarSystemId === C)
+        && of(tab, 'intel').some((frame) => bubbleOrigin(frame) === C),
+      'intel on C',
+    );
     const jumpC = of(tab, 'location').find(
       (frame) => (frame.data.location as { solarSystemId: number }).solarSystemId === C,
     )!;
@@ -462,7 +494,11 @@ describe('Perimeter live radar, end to end over real SSE', () => {
     const advisoriesBefore = of(tab, 'advisory').length;
     await feedKill(B, { attacker: 666 });
     await feedKill(C, { attacker: 666 });
-    await advance(2_000);
+    await advanceUntil(
+      () => of(tab, 'advisory').slice(advisoriesBefore)
+        .some((frame) => (frame.data.advisory as { rule: string }).rule === 'pursuit'),
+      'pursuit advisory',
+    );
     const pursuit = of(tab, 'advisory').slice(advisoriesBefore)
       .find((frame) => (frame.data.advisory as { rule: string }).rule === 'pursuit');
     expect(pursuit?.data.advisory).toMatchObject({ severity: 'danger' });
@@ -533,9 +569,9 @@ describe('Perimeter live radar, end to end over real SSE', () => {
 
   it('shares one poller across tabs, and both tabs hear an advisory said once', async () => {
     const first = await openLive();
-    await until(() => of(first, 'intel').length >= 1, 'first tab intel');
+    await until(() => of(first, 'ready').length === 1 && of(first, 'intel').length >= 1, 'first tab ready and intel');
     const second = await openLive();
-    await until(() => of(second, 'intel').length >= 1, 'second tab intel');
+    await until(() => of(second, 'ready').length === 1 && of(second, 'intel').length >= 1, 'second tab ready and intel');
     expect(getLiveSessionStats()).toEqual({ sessions: 1, subscribers: 2 });
     expect(bubbleOrigin(of(second, 'intel')[0]!)).toBe(A);
 
@@ -545,7 +581,10 @@ describe('Perimeter live radar, end to end over real SSE', () => {
     expect(script.locationCalls).toBe(calls + 1);
 
     const big = await feedKill(B, { value: 4_000_000_000 });
-    await advance(2_000);
+    await advanceUntil(
+      () => [first, second].every((tab) => rules(tab, 'value_spike').length >= 1),
+      'shared value_spike advisory',
+    );
     for (const tab of [first, second]) {
       expect(of(tab, 'kill').map((frame) => (frame.data.kill as { killmailId: number }).killmailId)).toEqual([big]);
       const said = rules(tab, 'value_spike').map((frame) => frame.data.advisory as { repeats: number });
@@ -563,18 +602,18 @@ describe('Perimeter live radar, end to end over real SSE', () => {
     // of the tab-duplicated evaluation.
     await advance(125_000, 1_000);
     await feedKill(B, { value: 6_000_000_000 });
-    await advance(2_000);
+    await advanceUntil(() => spikesInThread().length === 2, 'second value_spike advisory');
     expect(spikesInThread()).toEqual([
       { rule: 'value_spike', repeats: 0 },
       { rule: 'value_spike', repeats: 0 },
     ]);
 
     first.close();
+    await flushIo();
     await until(() => getLiveSessionStats().subscribers === 1, 'first tab detached');
     expect(getLiveSessionStats().sessions).toBe(1);
     expect(sharedAdvisorRefsForTests(CHARACTER_ID)).toBe(1);
-    second.close();
-    await until(() => getLiveSessionStats().sessions === 0, 'poller stopped');
+    await closeClientAndWait(second);
     expect(sharedAdvisorRefsForTests(CHARACTER_ID)).toBe(0);
   }, 30_000);
 
@@ -592,13 +631,16 @@ describe('Perimeter live radar, end to end over real SSE', () => {
 
     // And the pilot jumps to B before that build finishes.
     script.systemId = B;
-    await advance(5_000);
-    await until(() => of(tab, 'location').length === 2, 'jump location');
+    await advanceUntil(() => of(tab, 'location').length === 2, 'jump location');
 
     script.buildGate = null;
     gate.resolve();
-    await until(() => of(tab, 'intel').length >= 1, 'intel after gate');
-    await advance(500);
+    await advanceUntil(
+      () => of(tab, 'intel').length >= 1
+        && of(tab, 'kill').length === 1
+        && rules(tab, 'value_spike').length >= 1,
+      'intel, kill and advisory after gate',
+    );
     // The A bubble is never published; the first intel is centred on B.
     expect(of(tab, 'intel').map(bubbleOrigin)).toEqual([B]);
     // The early kill is announced after the bubble that contains it, and judged.
@@ -606,8 +648,7 @@ describe('Perimeter live radar, end to end over real SSE', () => {
     expect(indexOf(tab, (frame) => frame.event === 'kill'))
       .toBeGreaterThan(indexOf(tab, (frame) => frame.event === 'intel'));
     expect(of(tab, 'advisory').map((frame) => (frame.data.advisory as { rule: string }).rule)).toContain('value_spike');
-    tab.close();
-    await until(() => getLiveSessionStats().sessions === 0, 'poller stopped');
+    await closeClientAndWait(tab);
   }, 30_000);
 
   it('says so when the kill feed goes stale instead of looking quietly clear', async () => {
@@ -615,14 +656,17 @@ describe('Perimeter live radar, end to end over real SSE', () => {
     await until(() => of(tab, 'intel').length >= 1, 'first intel');
     script.feedFail = 'EVE-KILL 503';
     // Intel ticks every 15 s; the feed is considered stale after 90 s.
-    await advance(120_000, 1_000);
-    const layer = (of(tab, 'intel').at(-1)!.data.bubble as {
-      freshness: Array<{ layer: string; status: string; error: string | null }>;
-    }).freshness.find((entry) => entry.layer === 'kills')!;
-    expect(layer.status).toBe('cached');
-    expect(layer.error).toContain('stale');
-    tab.close();
-    await until(() => getLiveSessionStats().sessions === 0, 'poller stopped');
+    let staleLayer: { layer: string; status: string; error: string | null } | undefined;
+    await advanceUntil(() => {
+      const bubble = of(tab, 'intel').at(-1)?.data.bubble as {
+        freshness?: Array<{ layer: string; status: string; error: string | null }>;
+      } | undefined;
+      staleLayer = bubble?.freshness?.find((entry) => entry.layer === 'kills');
+      return staleLayer?.status === 'cached' && String(staleLayer.error).includes('stale');
+    }, 'stale intel', 120_000, 1_000);
+    expect(staleLayer?.status).toBe('cached');
+    expect(staleLayer?.error).toContain('stale');
+    await closeClientAndWait(tab);
   }, 30_000);
 
   it('keeps the radar alive while the pilot watches, and times out a forgotten tab', async () => {
