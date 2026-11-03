@@ -99,7 +99,6 @@ async function registerWebApp(app: FastifyInstance): Promise<void> {
     maxAge: '30d',
     immutable: true,
   });
-  const html = await readFile(resolve(distRoot, 'index.html'), 'utf8');
   const sendApp = async (request: FastifyRequest, reply: FastifyReply) => {
     const canonicalUrl = buildCanonicalLoopbackUrl(
       config.web.baseUrl,
@@ -108,8 +107,10 @@ async function registerWebApp(app: FastifyInstance): Promise<void> {
       request.headers.host,
     );
     if (canonicalUrl) return reply.redirect(canonicalUrl);
-    // The shell must revalidate on every load, or a deploy strands users on
-    // an old bundle graph until the browser cache expires.
+    // Read the shell per request: caching it at startup strands every user on
+    // the old bundle graph after `npm run build` until the service restarts.
+    // The file is a few hundred bytes; revalidation must stay honest.
+    const html = await readFile(resolve(distRoot, 'index.html'), 'utf8');
     return reply
       .type('text/html; charset=utf-8')
       .header('Cache-Control', 'no-cache')

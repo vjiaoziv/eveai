@@ -174,6 +174,7 @@ export class P9RealPortfolioService {
     const opportunities = db.prepare(`
       SELECT COUNT(*) AS total,
              SUM(CASE WHEN state = 'ACTIONABLE' THEN 1 ELSE 0 END) AS actionable,
+             SUM(CASE WHEN state = 'WATCHING' THEN 1 ELSE 0 END) AS watching,
              SUM(CASE WHEN state = 'STALE' OR state = 'EXPIRED' THEN 1 ELSE 0 END) AS stale
       FROM p9_real_opportunities WHERE character_id = ?
     `).get(characterId) as any;
@@ -211,6 +212,7 @@ export class P9RealPortfolioService {
       opportunities: {
         total: Number(opportunities?.total || 0),
         actionable: Number(opportunities?.actionable || 0),
+        watching: Number(opportunities?.watching || 0),
         staleOrExpired: Number(opportunities?.stale || 0),
       },
       sync: sync.map((item) => ({

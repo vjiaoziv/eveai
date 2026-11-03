@@ -95,6 +95,12 @@ export interface P9Opportunity {
   dataSource: string;
   dataComplete: boolean;
   dataFresh: boolean;
+  spreadDetected: boolean;
+  marketExecutable: boolean;
+  profitAfterKnownFees: boolean;
+  logisticsKnown: boolean;
+  overallProfitKnown: boolean;
+  tradePlanComplete: boolean;
   calculationVersion: string;
   originalSnapshot: Record<string, unknown>;
   state: P9OpportunityState;

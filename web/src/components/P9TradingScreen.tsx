@@ -67,6 +67,12 @@ type P9Opportunity = {
   sellSnapshotAgeMinutes: number | null;
   dataComplete: boolean;
   dataFresh: boolean;
+  spreadDetected: boolean;
+  marketExecutable: boolean;
+  profitAfterKnownFees: boolean;
+  logisticsKnown: boolean;
+  overallProfitKnown: boolean;
+  tradePlanComplete: boolean;
   dataSource: string;
   calculationVersion: string;
   buySnapshotId: string;
@@ -88,7 +94,16 @@ const num = (value: unknown, digits = 2): string => typeof value === 'number' &&
   ? value.toLocaleString('zh-CN', { maximumFractionDigits: digits })
   : 'N/A';
 const pct = (value: unknown): string => typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}%` : 'N/A';
-const dateTime = (value: unknown): string => typeof value === 'string' && value ? value.replace('T', ' ').slice(0, 19) : 'N/A';
+// All P9 timestamps are UTC (ISO strings or SQLite datetime('now')); render
+// them in the viewer's local timezone instead of showing raw UTC digits.
+const dateTime = (value: unknown): string => {
+  if (typeof value !== 'string' || !value) return 'N/A';
+  const normalized = value.includes('T') ? value : value.replace(' ', 'T');
+  const withZone = /Z|[+-]\d{2}:\d{2}$/.test(normalized) ? normalized : `${normalized}Z`;
+  const parsed = new Date(withZone);
+  if (Number.isNaN(parsed.getTime())) return value.replace('T', ' ').slice(0, 19);
+  return parsed.toLocaleString('zh-CN', { hour12: false });
+};
 const matchLevels = (levels: Array<{ price: number; volumeRemain: number }>, quantity: number, descending: boolean) => {
   const sorted = [...levels].sort((a, b) => descending ? b.price - a.price : a.price - b.price);
   let remaining = quantity;
@@ -299,7 +314,8 @@ export function P9TradingScreen({ onMenu, csrfToken }: Props) {
             <div className="metric-card"><span>可用资金</span><strong>{num(overview.portfolio.funding.availableIsk, 0)}</strong></div>
             <div className="metric-card"><span>挂单占用</span><strong>{num(overview.portfolio.funding.openOrderEscrow, 0)}</strong></div>
             <div className="metric-card"><span>已知库存成本</span><strong>{num(overview.portfolio.funding.knownInventoryCost, 0)}</strong></div>
-            <div className="metric-card"><span>有效机会</span><strong>{num(overview.portfolio.opportunities.actionable, 0)}</strong></div>
+            <div className="metric-card"><span>完整条件机会</span><strong>{num(overview.portfolio.opportunities.actionable, 0)}</strong></div>
+            <div className="metric-card"><span>观察中（条件未完备）</span><strong>{num(overview.portfolio.opportunities.watching, 0)}</strong></div>
             <div className="metric-card"><span>过期/陈旧</span><strong>{num(overview.portfolio.opportunities.staleOrExpired, 0)}</strong></div>
             <div className="metric-card"><span>真实交易</span><strong>{num(overview.trades.count, 0)}</strong></div>
             <div className="metric-card"><span>已实现净盈亏</span><strong>{num(overview.portfolio.performance.realizedNetPnl, 2)}</strong></div>
@@ -370,7 +386,7 @@ export function P9TradingScreen({ onMenu, csrfToken }: Props) {
               <tbody>
                 {opportunities.map((row) => (
                   <tr key={row.opportunityId}>
-                    <td><strong>{row.typeNameZh || row.typeNameEn}</strong><br /><small>{row.typeId} · {row.state}</small></td>
+                    <td><strong>{row.typeNameZh || row.typeNameEn}</strong><br /><small>{row.typeId} · {row.state === 'WATCHING' ? 'WATCHING 观察中' : row.state === 'ACTIONABLE' ? 'ACTIONABLE 完整条件' : row.state}</small></td>
                     <td>{row.strategy === 'station_arbitrage' ? '站内套利' : '跨贸易中心'}<br /><small>{row.buyLocationName}<br />→ {row.sellLocationName}</small></td>
                     <td>{row.suggestedQuantity}<br /><small>可执行 {row.executableQuantity}</small></td>
                     <td>
@@ -380,7 +396,7 @@ export function P9TradingScreen({ onMenu, csrfToken }: Props) {
                       综合 {row.comprehensiveNetProfit == null ? row.comprehensiveStatus : num(row.comprehensiveNetProfit, 0)}
                     </td>
                     <td>{num(row.capitalRequired, 0)}<br />{pct(row.roiPct)}</td>
-                    <td>{row.riskLevel} · 流动性 {row.liquidity}<br /><small>{row.riskFlags.join('、') || '无额外标记'}</small><br /><small>更新 {dateTime(row.updatedAt)}<br />有效至 {dateTime(row.expiresAt)}</small></td>
+                    <td>{row.riskLevel} · 流动性 {row.liquidity}<br /><small>价差 {row.spreadDetected ? '已发现' : '无'} · 订单簿 {row.marketExecutable ? '可执行' : '不可执行'} · 费后利润 {row.profitAfterKnownFees ? '为正' : '非正'} · 物流 {row.logisticsKnown ? '已知' : 'UNKNOWN'} · 完整条件 {row.tradePlanComplete ? '已满足' : '未满足'}</small><br /><small>{row.riskFlags.join('、') || '无额外标记'}</small><br /><small>更新 {dateTime(row.updatedAt)}<br />有效至 {dateTime(row.expiresAt)}</small></td>
                     <td>
                       <button type="button" disabled={busy} onClick={() => void openDetail(row.opportunityId)}>详情</button>
                       <button type="button" disabled={busy} onClick={() => void createPlan(row.opportunityId)}>生成方案</button>
@@ -399,7 +415,7 @@ export function P9TradingScreen({ onMenu, csrfToken }: Props) {
       {tab === 'plans' ? (
         <div className="data-table-wrap">
           <table className="data-table">
-            <thead><tr><th>方案</th><th>状态/有效期</th><th>商品与数量</th><th>预计成本/收入</th><th>预计费后利润</th><th>综合利润</th><th>操作</th></tr></thead>
+            <thead><tr><th>方案</th><th>状态/有效期</th><th>商品与数量</th><th>预计成本/收入</th><th>预计费后利润</th><th>运输成本</th><th>综合利润</th><th>操作</th></tr></thead>
             <tbody>
               {plans.map((row) => (
                 <tr key={row.planId}>
@@ -408,6 +424,7 @@ export function P9TradingScreen({ onMenu, csrfToken }: Props) {
                   <td>{String(row.typeId)} × {row.quantity}</td>
                   <td>{num(row.estimatedBuyCost, 0)}<br />{num(row.estimatedSellRevenue, 0)}</td>
                   <td>{num(row.estimatedFeeNetProfit, 0)}</td>
+                  <td>{String(row.strategy) === 'regional_hauling' ? 'UNKNOWN' : '0'}</td>
                   <td>{row.comprehensiveStatus === 'UNKNOWN' || row.estimatedComprehensiveProfit == null ? 'UNKNOWN' : num(row.estimatedComprehensiveProfit, 0)}</td>
                   <td>{row.status === 'PLANNED' ? <button type="button" disabled={busy} onClick={() => void confirmPlan(row.planId)}>人工确认</button> : <small>等待真实成交回填</small>}</td>
                 </tr>
@@ -599,7 +616,14 @@ export function P9TradingScreen({ onMenu, csrfToken }: Props) {
               <div className="metric-card"><span>资金需求</span><strong>{num(detail.opportunity.capitalRequired, 0)}</strong></div>
               <div className="metric-card"><span>ROI</span><strong>{pct(detail.opportunity.roiPct)}</strong></div>
               <div className="metric-card"><span>风险</span><strong>{detail.opportunity.riskLevel}</strong></div>
+              <div className="metric-card"><span>价差</span><strong>{detail.opportunity.spreadDetected ? '已发现' : '无'}</strong></div>
+              <div className="metric-card"><span>订单簿</span><strong>{detail.opportunity.marketExecutable ? '可执行' : '不可执行'}</strong></div>
+              <div className="metric-card"><span>费后利润</span><strong>{detail.opportunity.profitAfterKnownFees ? '为正' : '非正'}</strong></div>
+              <div className="metric-card"><span>运输成本</span><strong>{detail.opportunity.logisticsKnown ? num(detail.opportunity.logisticsCost, 2) : 'UNKNOWN'}</strong></div>
+              <div className="metric-card"><span>综合利润可知</span><strong>{detail.opportunity.overallProfitKnown ? '是' : '否'}</strong></div>
+              <div className="metric-card"><span>完整交易条件</span><strong>{detail.opportunity.tradePlanComplete ? '已满足' : '未满足'}</strong></div>
             </div>
+            <p>费用后净利润 {num(detail.opportunity.feeNetProfit, 2)}（仅扣除已知费用）；运输成本 {detail.opportunity.logisticsKnown ? num(detail.opportunity.logisticsCost, 2) : 'UNKNOWN'}；综合净利润 {detail.opportunity.comprehensiveNetProfit == null ? 'UNKNOWN' : num(detail.opportunity.comprehensiveNetProfit, 2)}；未知成本：{detail.opportunity.logisticsKnown ? '无' : '运输成本待确认，不得视为 0'}。</p>
             <p>风险标记：{detail.opportunity.riskFlags.join('、') || '无'}。数据源：{detail.opportunity.dataSource} · 计算版本：{detail.opportunity.calculationVersion || String(detail.originalSnapshot?.calculation?.version || 'N/A')}</p>
             <p>买入快照：{detail.opportunity.buySnapshotId || 'N/A'} · {dateTime(detail.opportunity.buySnapshotAt)}（{detail.opportunity.buySnapshotAgeMinutes ?? 'N/A'} 分钟）<br />卖出快照：{detail.opportunity.sellSnapshotId || 'N/A'} · {dateTime(detail.opportunity.sellSnapshotAt)}（{detail.opportunity.sellSnapshotAgeMinutes ?? 'N/A'} 分钟）</p>
             <h3>买入订单簿（最低卖单优先）</h3>

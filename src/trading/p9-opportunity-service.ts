@@ -129,10 +129,20 @@ function riskLevel(flags: string[]): P9Opportunity['riskLevel'] {
   return 'LOW';
 }
 
-function stateFor(flags: string[], feeNet: number, roiPct: number, settings: P9ScanSettings): P9OpportunityState {
+function stateFor(params: {
+  flags: string[];
+  feeNet: number;
+  roiPct: number;
+  settings: P9ScanSettings;
+  tradePlanComplete: boolean;
+}): P9OpportunityState {
+  const { flags, feeNet, roiPct, settings, tradePlanComplete } = params;
   if (flags.includes('DATA_INCOMPLETE') || flags.includes('DATA_STALE')) return 'STALE';
   if (feeNet < settings.minNetProfit || roiPct < settings.minRoiPct) return 'REJECTED';
-  return 'ACTIONABLE';
+  // A spread that clears the thresholds but has unresolved costs (e.g. unknown
+  // inter-hub logistics) is a candidate under observation, not a fully
+  // verified executable plan.
+  return tradePlanComplete ? 'ACTIONABLE' : 'WATCHING';
 }
 
 function hubPairs(hubs: P9Hub[]): Array<[P9Hub, P9Hub]> {
@@ -231,6 +241,12 @@ function mapOpportunity(row: any): P9Opportunity {
     dataSource: row.data_source,
     dataComplete: Boolean(row.data_complete),
     dataFresh: Boolean(row.data_fresh),
+    spreadDetected: Boolean(row.spread_detected),
+    marketExecutable: Boolean(row.market_executable),
+    profitAfterKnownFees: Boolean(row.profit_after_known_fees),
+    logisticsKnown: Boolean(row.logistics_known),
+    overallProfitKnown: Boolean(row.overall_profit_known),
+    tradePlanComplete: Boolean(row.trade_plan_complete),
     calculationVersion: row.calculation_version,
     originalSnapshot: parseJson<Record<string, unknown>>(row.original_snapshot_json, {}),
     state: row.state,
@@ -302,10 +318,31 @@ function buildCandidate(params: {
   if (trade.totalFees <= 0) flags.push('FEE_INCOMPLETE');
   if (buyObs.lastError || sellObs.lastError) flags.push('SNAPSHOT_LOAD_ERROR');
 
+  // Independent truth values; several can hold at once and none of them alone
+  // means "ready to trade".
+  const spreadDetected = sellObs.levels.buys[0].price > buyObs.levels.sells[0].price;
+  const marketExecutable = optimal.buySim.isComplete && optimal.sellSim.isComplete && optimal.optimalQuantity > 0;
+  const profitAfterKnownFees = feeNet > 0;
+  const logisticsKnown = strategy === 'station_arbitrage';
+  const overallProfitKnown = logisticsKnown && !flags.includes('FEE_INCOMPLETE');
+  const dataComplete = buyObs.complete && sellObs.complete;
+  const dataFresh = buyObs.fresh && sellObs.fresh;
+  const tradePlanComplete = spreadDetected
+    && marketExecutable
+    && profitAfterKnownFees
+    && logisticsKnown
+    && overallProfitKnown
+    && dataComplete
+    && dataFresh;
+
   const now = Date.parse(isoNow());
-  const expiryCandidates = [buyObs.snapshotExpiresAt, sellObs.snapshotExpiresAt]
+  // Validity = snapshot age window (maxMarketAgeMinutes), the same rule that
+  // drives DATA_STALE. ESI's cache Expires only gates refetching and must not
+  // date an opportunity in the past while the data is still fresh.
+  const expiryCandidates = [buyObs.snapshotAt, sellObs.snapshotAt]
     .filter((value): value is string => Boolean(value))
-    .map((value) => Date.parse(value.endsWith('Z') ? value : value.replace(' ', 'T') + 'Z'))
+    .map((value) => Date.parse(value.endsWith('Z') ? value : value.replace(' ', 'T') + 'Z')
+      + settings.maxMarketAgeMinutes * 60_000)
     .filter((value) => Number.isFinite(value));
   const configuredExpiry = now + settings.maxMarketAgeMinutes * 60_000;
   const expiresAt = new Date(expiryCandidates.length > 0
@@ -319,7 +356,7 @@ function buildCandidate(params: {
     .update(`${settings.characterId}|${scanKey}`)
     .digest('hex')
     .slice(0, 20);
-  const state = stateFor(flags, feeNet, roiPct, settings);
+  const state = stateFor({ flags, feeNet, roiPct, settings, tradePlanComplete });
   const liquidity = optimal.optimalQuantity >= 50 ? 'A' : optimal.optimalQuantity >= 10 ? 'B' : 'C';
 
   return {
@@ -363,8 +400,14 @@ function buildCandidate(params: {
     buySnapshotAgeMinutes: buyObs.snapshotAgeMinutes,
     sellSnapshotAgeMinutes: sellObs.snapshotAgeMinutes,
     dataSource: 'esi_market_orders',
-    dataComplete: buyObs.complete && sellObs.complete,
-    dataFresh: buyObs.fresh && sellObs.fresh,
+    dataComplete,
+    dataFresh,
+    spreadDetected,
+    marketExecutable,
+    profitAfterKnownFees,
+    logisticsKnown,
+    overallProfitKnown,
+    tradePlanComplete,
     calculationVersion: P9_CALCULATION_VERSION,
     originalSnapshot: {
       coverage: 'public ESI regional market orders; contracts, private structures and unobserved orders are not assumed absent',
@@ -518,7 +561,7 @@ export class P9OpportunityService {
   private static upsert(db: Db, opportunity: P9Opportunity): void {
     const existing = db.prepare('SELECT state FROM p9_real_opportunities WHERE opportunity_id = ?').get(opportunity.opportunityId) as any;
     const state = existing?.state === 'ARCHIVED' ? 'ARCHIVED' : opportunity.state;
-    const placeholders = Array.from({ length: 48 }, () => '?').join(', ');
+    const placeholders = Array.from({ length: 54 }, () => '?').join(', ');
     const values = [
       opportunity.opportunityId,
       opportunity.characterId,
@@ -562,6 +605,12 @@ export class P9OpportunityService {
       opportunity.dataSource,
       opportunity.dataComplete ? 1 : 0,
       opportunity.dataFresh ? 1 : 0,
+      opportunity.spreadDetected ? 1 : 0,
+      opportunity.marketExecutable ? 1 : 0,
+      opportunity.profitAfterKnownFees ? 1 : 0,
+      opportunity.logisticsKnown ? 1 : 0,
+      opportunity.overallProfitKnown ? 1 : 0,
+      opportunity.tradePlanComplete ? 1 : 0,
       opportunity.calculationVersion,
       JSON.stringify(opportunity.originalSnapshot),
       state,
@@ -579,6 +628,8 @@ export class P9OpportunityService {
         comprehensive_status, capital_required, roi_pct, logistics_cost, liquidity, risk_level,
         risk_flags_json, buy_snapshot_id, sell_snapshot_id, buy_snapshot_at, sell_snapshot_at,
         buy_snapshot_age_minutes, sell_snapshot_age_minutes, data_source, data_complete, data_fresh,
+        spread_detected, market_executable, profit_after_known_fees, logistics_known,
+        overall_profit_known, trade_plan_complete,
         calculation_version, original_snapshot_json, state, detected_at, updated_at, expires_at
       ) VALUES (${placeholders})
       ON CONFLICT(character_id, scan_key) DO UPDATE SET
@@ -614,6 +665,12 @@ export class P9OpportunityService {
         sell_snapshot_age_minutes = excluded.sell_snapshot_age_minutes,
         data_complete = excluded.data_complete,
         data_fresh = excluded.data_fresh,
+        spread_detected = excluded.spread_detected,
+        market_executable = excluded.market_executable,
+        profit_after_known_fees = excluded.profit_after_known_fees,
+        logistics_known = excluded.logistics_known,
+        overall_profit_known = excluded.overall_profit_known,
+        trade_plan_complete = excluded.trade_plan_complete,
         calculation_version = excluded.calculation_version,
         original_snapshot_json = excluded.original_snapshot_json,
         state = CASE WHEN p9_real_opportunities.state = 'ARCHIVED' THEN 'ARCHIVED' ELSE excluded.state END,
@@ -622,6 +679,24 @@ export class P9OpportunityService {
     `;
     db.prepare(sql).run(...values);
   }
+  /**
+   * Flip opportunities whose data-validity window has passed to EXPIRED.
+   * expires_at is stored as an ISO string (T + Z); comparing it directly with
+   * SQLite's datetime('now') ("YYYY-MM-DD HH:MM:SS") never matches because of
+   * the separator, so normalize before comparing.
+   */
+  public static expireDue(db: Db, characterId: number): number {
+    const result = db.prepare(`
+      UPDATE p9_real_opportunities
+      SET state = CASE WHEN state IN ('NEW', 'WATCHING', 'ACTIONABLE', 'STALE') THEN 'EXPIRED' ELSE state END,
+          updated_at = datetime('now')
+      WHERE character_id = ?
+        AND datetime(substr(replace(expires_at, 'T', ' '), 1, 19)) < datetime('now')
+        AND state NOT IN ('EXPIRED', 'ARCHIVED')
+    `).run(characterId);
+    return result.changes;
+  }
+
   public static scan(db: Db, characterId: number, options: { typeIds?: number[] } = {}): { scanned: number; stored: number; jobRunId: string; errors: string[] } {
     const jobId = 'P9JOB-' + Date.now() + '-' + randomUUID().slice(0, 8);
     db.prepare(`INSERT INTO p9_job_runs (job_id, job_type, character_id, status) VALUES (?, 'market_scan', ?, 'running')`).run(jobId, characterId);
@@ -669,12 +744,7 @@ export class P9OpportunityService {
           this.upsert(db, opportunity);
           stored += 1;
         }
-        db.prepare(`
-          UPDATE p9_real_opportunities
-          SET state = CASE WHEN state IN ('NEW', 'WATCHING', 'ACTIONABLE', 'STALE') THEN 'EXPIRED' ELSE state END,
-              updated_at = datetime('now')
-          WHERE character_id = ? AND expires_at < datetime('now') AND state NOT IN ('EXPIRED', 'ARCHIVED')
-        `).run(characterId);
+        this.expireDue(db, characterId);
       });
       tx();
       const summary = { scanned, stored, errors };

@@ -15,6 +15,14 @@ type LockOwner = {
   runtime: string;
   createdAt: string;
   processStartedAt: number;
+  /**
+   * Identity of the owner's *distro* boot. WSL restarts the distro's systemd
+   * (fresh pid namespace, recycled pids) while the kernel boot id can stay the
+   * same, so this combines the kernel boot id with PID 1's start time: it is
+   * stable for the life of one distro boot and changes on every restart. A
+   * lock from another boot is always stale even if its pid looks alive now.
+   */
+  bootId?: string;
 };
 
 export type RuntimeLock = {
@@ -47,6 +55,7 @@ export function acquireRuntimeLock(dbPath: string, runtime: string): RuntimeLock
     runtime,
     createdAt: new Date().toISOString(),
     processStartedAt: SELF_PROCESS_STARTED_AT,
+    ...(CURRENT_BOOT_ID ? { bootId: CURRENT_BOOT_ID } : {}),
   };
   const candidate = `${lockPath}.candidate-${owner.token}`;
   mkdirSync(candidate, { mode: 0o700 });
@@ -60,7 +69,15 @@ export function acquireRuntimeLock(dbPath: string, runtime: string): RuntimeLock
       } catch (error) {
         if (!isAlreadyExists(error)) throw error;
         const current = readOwner(lockPath);
-        if (current && isProcessAlive(current.pid)) {
+        // A lock written by a previous boot can never belong to a live owner in
+        // this boot: the pid may have been recycled by an unrelated process and
+        // its start time is meaningless across boots. Reclaim it immediately
+        // instead of failing closed (WSL distro restarts used to wedge startup
+        // with "process identity cannot be verified").
+        const previousBoot = Boolean(
+          current?.bootId && CURRENT_BOOT_ID && current.bootId !== CURRENT_BOOT_ID,
+        );
+        if (current && !previousBoot && isProcessAlive(current.pid)) {
           const observedStart = getProcessStartedAt(current.pid);
           if (observedStart === null) {
             throw new RuntimeLockError(
@@ -137,6 +154,25 @@ function readOwner(lockPath: string): LockOwner | null {
 // crash. `ps` receives only a fixed executable and a validated numeric PID;
 // failure is handled fail-closed for a live foreign process.
 const SELF_PROCESS_STARTED_AT = Math.floor((Date.now() - process.uptime() * 1_000) / 1_000);
+
+const CURRENT_BOOT_ID = readDistroBootId();
+
+function readDistroBootId(): string | null {
+  try {
+    const kernelBootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    // /proc/1/stat field 22 (starttime): jiffies at which this boot's PID 1
+    // was exec'd. A distro restart re-execs PID 1 even when the WSL kernel
+    // keeps running, so the pair changes on every distro boot.
+    const stat = readFileSync('/proc/1/stat', 'utf8');
+    const closeParen = stat.lastIndexOf(')');
+    const fields = closeParen >= 0 ? stat.slice(closeParen + 1).trim().split(/\s+/) : [];
+    const pid1StartTicks = fields[19];
+    if (!kernelBootId || !pid1StartTicks) return null;
+    return `${kernelBootId}:${pid1StartTicks}`;
+  } catch {
+    return null;
+  }
+}
 
 function getProcessStartedAt(pid: number): number | null {
   if (pid === process.pid) return SELF_PROCESS_STARTED_AT;

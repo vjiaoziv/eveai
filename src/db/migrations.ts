@@ -249,6 +249,12 @@ export function runMigrations(db: Db): void {
         data_source              TEXT NOT NULL DEFAULT 'esi_market_orders',
         data_complete            INTEGER NOT NULL DEFAULT 1 CHECK (data_complete IN (0, 1)),
         data_fresh               INTEGER NOT NULL DEFAULT 0 CHECK (data_fresh IN (0, 1)),
+        spread_detected          INTEGER NOT NULL DEFAULT 0 CHECK (spread_detected IN (0, 1)),
+        market_executable        INTEGER NOT NULL DEFAULT 0 CHECK (market_executable IN (0, 1)),
+        profit_after_known_fees  INTEGER NOT NULL DEFAULT 0 CHECK (profit_after_known_fees IN (0, 1)),
+        logistics_known          INTEGER NOT NULL DEFAULT 0 CHECK (logistics_known IN (0, 1)),
+        overall_profit_known     INTEGER NOT NULL DEFAULT 0 CHECK (overall_profit_known IN (0, 1)),
+        trade_plan_complete      INTEGER NOT NULL DEFAULT 0 CHECK (trade_plan_complete IN (0, 1)),
         calculation_version      TEXT NOT NULL,
         original_snapshot_json   TEXT NOT NULL,
         state                    TEXT NOT NULL DEFAULT 'NEW'
@@ -400,6 +406,15 @@ export function runMigrations(db: Db): void {
       CREATE INDEX IF NOT EXISTS idx_p9_jobs_type_time
         ON p9_job_runs(job_type, started_at);
     `);
+    // P9.1.1: independent opportunity attributes. Existing P9.1 tables get the
+    // columns here; ACTIONABLE now requires trade_plan_complete, so a price
+    // spread with unknown logistics stays WATCHING instead of actionable.
+    addColumnIfMissing(db, 'p9_real_opportunities', 'spread_detected', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, 'p9_real_opportunities', 'market_executable', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, 'p9_real_opportunities', 'profit_after_known_fees', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, 'p9_real_opportunities', 'logistics_known', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, 'p9_real_opportunities', 'overall_profit_known', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, 'p9_real_opportunities', 'trade_plan_complete', 'INTEGER NOT NULL DEFAULT 0');
     backfillPaperTradingEscrow(db);
     // Alert push redelivery: per-event attempts with exponential backoff and
     // a terminal abandoned_at so undeliverable events stop blocking the queue.

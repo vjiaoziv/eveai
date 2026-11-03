@@ -75,13 +75,32 @@ describe('P9 real-market minimum closed loop', () => {
 
     const result = P9OpportunityService.list(db, 9001, { sort: 'net', limit: 50 });
     expect(result.total).toBeGreaterThan(0);
-    const actionable = result.rows.filter((row) => row.state === 'ACTIONABLE');
-    expect(actionable.length).toBeGreaterThan(0);
-    const station = actionable.find((row) => row.strategy === 'station_arbitrage');
-    const cross = actionable.find((row) => row.strategy === 'regional_hauling');
+    const station = result.rows.find((row) => row.strategy === 'station_arbitrage');
+    const cross = result.rows.find((row) => row.strategy === 'regional_hauling');
     expect(station).toBeDefined();
     expect(cross).toBeDefined();
+
+    // Station arbitrage: every cost is known, so a threshold-clearing spread
+    // with complete fresh data is fully actionable.
+    expect(station!.state).toBe('ACTIONABLE');
+    expect(station!.spreadDetected).toBe(true);
+    expect(station!.marketExecutable).toBe(true);
+    expect(station!.profitAfterKnownFees).toBe(true);
+    expect(station!.logisticsKnown).toBe(true);
+    expect(station!.overallProfitKnown).toBe(true);
+    expect(station!.tradePlanComplete).toBe(true);
     expect(station!.logisticsCost).toBe(0);
+
+    // Inter-haul: executable and profitable after known fees, but logistics
+    // cost is unknown, so it must stay WATCHING and never ACTIONABLE.
+    expect(cross!.state).toBe('WATCHING');
+    expect(cross!.spreadDetected).toBe(true);
+    expect(cross!.marketExecutable).toBe(true);
+    expect(cross!.profitAfterKnownFees).toBe(true);
+    expect(cross!.logisticsKnown).toBe(false);
+    expect(cross!.overallProfitKnown).toBe(false);
+    expect(cross!.tradePlanComplete).toBe(false);
+    expect(cross!.state).not.toBe('ACTIONABLE');
     expect(cross!.logisticsCost).toBeNull();
     expect(cross!.comprehensiveStatus).toBe('UNKNOWN');
     expect(cross!.comprehensiveNetProfit).toBeNull();
@@ -95,6 +114,35 @@ describe('P9 real-market minimum closed loop', () => {
     const confirmed = P9OpportunityService.transitionPlan(db, 9001, plan.planId, 'USER_CONFIRMED');
     expect(confirmed.status).toBe('USER_CONFIRMED');
     expect(() => P9OpportunityService.transitionPlan(db, 9001, plan.planId, 'PLANNED')).toThrow();
+    db.close();
+  });
+
+  it('keeps fresh opportunities valid into the future and expires only past the data window', () => {
+    const db = createDb();
+    P9OpportunityService.saveSettings(db, {
+      characterId: 9008,
+      minNetProfit: 10,
+      minRoiPct: 0.1,
+      maxCapital: 10_000,
+      maxMarketAgeMinutes: 60,
+    });
+    const scan = P9OpportunityService.scan(db, 9008);
+    expect(scan.errors).toEqual([]);
+    const rows = P9OpportunityService.list(db, 9008, { limit: 500 }).rows;
+    expect(rows.length).toBeGreaterThan(0);
+    // Fresh snapshot + 60-minute window: every stored validity end is ahead of now
+    // (previously ESI's 5-minute cache Expires dated them in the past).
+    expect(rows.every((row) => Date.parse(row.expiresAt) > Date.now())).toBe(true);
+
+    const victim = rows.find((row) => row.state === 'WATCHING');
+    expect(victim).toBeDefined();
+    db.prepare("UPDATE p9_real_opportunities SET expires_at = '2020-01-01T00:00:00.000Z' WHERE opportunity_id = ?")
+      .run(victim!.opportunityId);
+    const changed = P9OpportunityService.expireDue(db, 9008);
+    expect(changed).toBe(1);
+    expect(P9OpportunityService.get(db, 9008, victim!.opportunityId)!.state).toBe('EXPIRED');
+    // Re-running on untouched rows must be a no-op.
+    expect(P9OpportunityService.expireDue(db, 9008)).toBe(0);
     db.close();
   });
 
