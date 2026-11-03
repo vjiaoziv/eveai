@@ -21,6 +21,7 @@ import { MapScreen } from './components/map/MapScreen';
 import { MarketScreen } from './components/MarketScreen';
 import { TradingScreen } from './components/TradingScreen';
 import { P9TradingScreen } from './components/P9TradingScreen';
+import { AssetScreen } from './components/AssetScreen';
 import { PilotProfileScreen } from './components/PilotProfileScreen';
 import { SettingsScreen } from './components/SettingsScreen';
 import { SupportScreen } from './components/SupportScreen';
@@ -581,6 +582,7 @@ export default function App() {
       {activeView === 'market' ? <MarketScreen onMenu={() => setSidebarOpen(true)} csrfToken={session.csrfToken} /> : null}
       {activeView === 'trading' ? <TradingScreen onMenu={() => setSidebarOpen(true)} /> : null}
       {activeView === 'p9' ? <P9TradingScreen onMenu={() => setSidebarOpen(true)} csrfToken={session.csrfToken} /> : null}
+      {activeView === 'assets' ? <AssetScreen onMenu={() => setSidebarOpen(true)} csrfToken={session.csrfToken} /> : null}
       {activeView === 'map' ? <MapScreen onMenu={() => setSidebarOpen(true)} csrfToken={session.csrfToken} /> : null}
       {activeView === 'profile' ? <PilotProfileScreen character={session.character} csrfToken={session.csrfToken} busy={busy} onProfileLoaded={setProfile} onMenu={() => setSidebarOpen(true)} onConnect={() => void connectEve()} onUnlink={unlinkCharacter} /> : null}
       {activeView === 'settings' ? <SettingsScreen csrfToken={session.csrfToken} onMenu={() => setSidebarOpen(true)} /> : null}

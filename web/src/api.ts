@@ -198,7 +198,65 @@ export const webApi = {
       csrfToken,
     ),
   },
-  market: {
+  assets: {
+    overview: () => request<unknown>('/api/web/assets/overview'),
+    characters: () => request<unknown>('/api/web/assets/characters'),
+    sync: (characterId: number, csrfToken: string) => request<unknown>(
+      '/api/web/assets/sync',
+      { method: 'POST', body: JSON.stringify({ characterId }) },
+      csrfToken,
+    ),
+    syncJobs: (characterId: number, limit = 50) =>
+      request<unknown>(`/api/web/assets/sync/jobs?characterId=${characterId}&limit=${limit}`),
+    snapshots: (params: Record<string, string | number | undefined> = {}) => {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value));
+      return request<unknown>(`/api/web/assets/snapshots?${search.toString()}`);
+    },
+    snapshot: (snapshotId: string) =>
+      request<unknown>(`/api/web/assets/snapshots/${encodeURIComponent(snapshotId)}`),
+    changes: (params: Record<string, string | number | undefined> = {}) => {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value));
+      return request<unknown>(`/api/web/assets/changes?${search.toString()}`);
+    },
+    historyTotals: (characterId: number, limit = 100) =>
+      request<unknown>(`/api/web/assets/history/totals?characterId=${characterId}&limit=${limit}`),
+    itemHistory: (itemId: number) =>
+      request<unknown>(`/api/web/assets/history/item/${itemId}`),
+    compareSnapshots: (fromSnapshotId: string, toSnapshotId: string) =>
+      request<unknown>(`/api/web/assets/history/compare/${encodeURIComponent(fromSnapshotId)}/${encodeURIComponent(toSnapshotId)}`),
+    inventory: (params: Record<string, string | number | boolean | undefined> = {}) => {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value));
+      return request<unknown>(`/api/web/assets/inventory?${search.toString()}`);
+    },
+    item: (itemId: number) => request<unknown>(`/api/web/assets/inventory/${itemId}`),
+    setTag: (itemId: number, tag: string | null, csrfToken: string) => request<unknown>(
+      `/api/web/assets/tags/${itemId}`,
+      { method: 'PUT', body: JSON.stringify({ tag }) },
+      csrfToken,
+    ),
+    valuations: (characterId: number, limit = 20) =>
+      request<unknown>(`/api/web/assets/valuations?characterId=${characterId}&limit=${limit}`),
+    valuation: (valuationId: string) =>
+      request<unknown>(`/api/web/assets/valuations/${encodeURIComponent(valuationId)}`),
+    runValuation: (body: Record<string, unknown>, csrfToken: string) => request<unknown>(
+      '/api/web/assets/valuations',
+      { method: 'POST', body: JSON.stringify(body) },
+      csrfToken,
+    ),
+    opportunityMatches: (params: Record<string, string | number | undefined> = {}) => {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value));
+      return request<unknown>(`/api/web/assets/opportunity-matches?${search.toString()}`);
+    },
+    recomputeMatches: (characterId: number, csrfToken: string) => request<unknown>(
+      '/api/web/assets/opportunity-matches/recompute',
+      { method: 'POST', body: JSON.stringify({ characterId }) },
+      csrfToken,
+    ),
+  },  market: {
     status: () => request<{ snapshot: MarketSnapshotMeta }>('/api/web/market/status'),
     regions: () => request<{ regions: MarketRegion[] }>('/api/web/market/regions'),
     search: (q: string, limit?: number) => request<{ results: MarketTypeSearchRow[] }>(

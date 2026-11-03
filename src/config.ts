@@ -310,6 +310,15 @@ export const config = {
     // broken endpoint is not hammered on every character_sql call.
     errorRetrySeconds: boundedPositiveInt('CHARACTER_SYNC_ERROR_RETRY_SECONDS', 120, 10, 3600),
   },
+  // P9.2 real-asset snapshot sync: separate cadence from the market sweep so
+  // one long-running job never blocks the other (task book 4.4).
+  assetSync: {
+    enabled: optionalBoolean('ASSET_SYNC_ENABLED', true),
+    intervalMinutes: boundedPositiveInt('ASSET_SYNC_INTERVAL_MINUTES', 30, 5, 1440),
+    // A RUNNING job older than this is presumed crashed and is failed so the
+    // next tick can take over (prevents a wedged lock on the sync lane).
+    staleJobMinutes: boundedPositiveInt('ASSET_SYNC_STALE_JOB_MINUTES', 30, 2, 1440),
+  },
   server: {
     port: optionalInt('PORT', 3000),
     host: optional('HOST', '127.0.0.1'),

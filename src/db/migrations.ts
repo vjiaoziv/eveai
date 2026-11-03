@@ -415,6 +415,173 @@ export function runMigrations(db: Db): void {
     addColumnIfMissing(db, 'p9_real_opportunities', 'logistics_known', 'INTEGER NOT NULL DEFAULT 0');
     addColumnIfMissing(db, 'p9_real_opportunities', 'overall_profit_known', 'INTEGER NOT NULL DEFAULT 0');
     addColumnIfMissing(db, 'p9_real_opportunities', 'trade_plan_complete', 'INTEGER NOT NULL DEFAULT 0');
+
+    // P9.2 real assets: character_assets stays the mutable current set; these
+    // tables add job history, immutable snapshots, resolution cache, change
+    // history, local tags, valuations and opportunity matches. All CREATE IF
+    // NOT EXISTS so the migration is safely re-runnable on production data.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS real_asset_sync_jobs (
+        job_id          TEXT PRIMARY KEY,
+        character_id    INTEGER NOT NULL,
+        trigger         TEXT NOT NULL DEFAULT 'manual' CHECK (trigger IN ('manual', 'auto', 'api')),
+        status          TEXT NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED')),
+        phase           TEXT NOT NULL DEFAULT 'fetch' CHECK (phase IN ('fetch', 'validate', 'commit', 'done')),
+        pages_total     INTEGER,
+        pages_fetched   INTEGER,
+        items_fetched   INTEGER,
+        items_committed INTEGER,
+        items_skipped   INTEGER NOT NULL DEFAULT 0,
+        started_at      TEXT NOT NULL,
+        finished_at     TEXT,
+        duration_ms     INTEGER,
+        snapshot_id     TEXT,
+        last_error      TEXT,
+        source          TEXT NOT NULL DEFAULT 'esi_character_assets'
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_asset_jobs_char_started
+        ON real_asset_sync_jobs(character_id, started_at);
+
+      CREATE TABLE IF NOT EXISTS real_asset_snapshots (
+        snapshot_id         TEXT PRIMARY KEY,
+        character_id        INTEGER NOT NULL,
+        job_id              TEXT,
+        started_at          TEXT NOT NULL,
+        completed_at        TEXT,
+        status              TEXT NOT NULL CHECK (status IN ('RUNNING', 'COMPLETED', 'PARTIAL', 'FAILED', 'SUPERSEDED')),
+        total_items         INTEGER NOT NULL DEFAULT 0,
+        total_unique_types  INTEGER NOT NULL DEFAULT 0,
+        total_locations     INTEGER NOT NULL DEFAULT 0,
+        total_quantity      INTEGER NOT NULL DEFAULT 0,
+        data_hash           TEXT NOT NULL,
+        source              TEXT NOT NULL DEFAULT 'esi_character_assets',
+        error_summary       TEXT,
+        is_latest           INTEGER NOT NULL DEFAULT 0 CHECK (is_latest IN (0, 1))
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_asset_snapshots_char_completed
+        ON real_asset_snapshots(character_id, completed_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_real_asset_snapshots_latest
+        ON real_asset_snapshots(character_id) WHERE is_latest = 1;
+
+      CREATE TABLE IF NOT EXISTS real_asset_snapshot_items (
+        snapshot_id       TEXT NOT NULL,
+        item_id           INTEGER NOT NULL,
+        type_id           INTEGER NOT NULL,
+        quantity          INTEGER NOT NULL DEFAULT 1,
+        location_id       INTEGER NOT NULL,
+        location_type     TEXT,
+        location_flag     TEXT,
+        is_singleton      INTEGER NOT NULL DEFAULT 0,
+        is_blueprint_copy INTEGER,
+        parent_item_id    INTEGER,
+        raw_json          TEXT NOT NULL,
+        PRIMARY KEY (snapshot_id, item_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_asset_snap_items_type
+        ON real_asset_snapshot_items(snapshot_id, type_id);
+      CREATE INDEX IF NOT EXISTS idx_real_asset_snap_items_location
+        ON real_asset_snapshot_items(snapshot_id, location_id);
+
+      CREATE TABLE IF NOT EXISTS real_asset_locations (
+        location_id        INTEGER PRIMARY KEY,
+        location_type      TEXT NOT NULL,
+        location_name      TEXT,
+        solar_system_id    INTEGER,
+        solar_system_name  TEXT,
+        region_id          INTEGER,
+        region_name        TEXT,
+        parent_location_id INTEGER,
+        resolution_status  TEXT NOT NULL CHECK (resolution_status IN ('RESOLVED', 'PARTIALLY_RESOLVED', 'UNKNOWN', 'ACCESS_RESTRICTED')),
+        resolution_source  TEXT NOT NULL,
+        raw_json           TEXT,
+        resolved_at        TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS real_asset_changes (
+        change_id          TEXT PRIMARY KEY,
+        character_id       INTEGER NOT NULL,
+        item_id            INTEGER NOT NULL,
+        type_id            INTEGER NOT NULL,
+        change_type        TEXT NOT NULL CHECK (change_type IN ('ADDED', 'QTY_INCREASED', 'QTY_DECREASED', 'MOVED', 'REMOVED', 'REAPPEARED', 'CONTAINER_CHANGED')),
+        prev_quantity      INTEGER,
+        new_quantity       INTEGER,
+        prev_location_id   INTEGER,
+        new_location_id    INTEGER,
+        source_class       TEXT NOT NULL DEFAULT 'OBSERVED_CHANGE' CHECK (source_class IN ('OBSERVED_CHANGE', 'EVIDENCE_CORRELATED', 'SOURCE_CONFIRMED', 'SOURCE_UNKNOWN')),
+        confidence         TEXT NOT NULL DEFAULT 'HIGH' CHECK (confidence IN ('HIGH', 'MEDIUM', 'LOW')),
+        from_snapshot_id   TEXT,
+        to_snapshot_id     TEXT NOT NULL,
+        detected_at        TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_asset_changes_char_detected
+        ON real_asset_changes(character_id, detected_at);
+      CREATE INDEX IF NOT EXISTS idx_real_asset_changes_item
+        ON real_asset_changes(character_id, item_id, detected_at);
+
+      CREATE TABLE IF NOT EXISTS real_asset_tags (
+        character_id INTEGER NOT NULL,
+        item_id      INTEGER NOT NULL,
+        tag          TEXT NOT NULL CHECK (tag IN ('SELF_USE', 'FOR_SALE', 'PRODUCTION', 'MISSION', 'SPARE', 'TRADE_STOCK', 'HOLD')),
+        updated_at   TEXT NOT NULL,
+        PRIMARY KEY (character_id, item_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS real_asset_valuations (
+        valuation_id       TEXT PRIMARY KEY,
+        character_id       INTEGER NOT NULL,
+        snapshot_id        TEXT NOT NULL,
+        hub_location_id    INTEGER NOT NULL,
+        hub_region_id      INTEGER NOT NULL,
+        market_snapshot_at TEXT,
+        fee_model_version  TEXT NOT NULL,
+        status             TEXT NOT NULL CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED')),
+        created_at         TEXT NOT NULL,
+        completed_at       TEXT,
+        items_valued       INTEGER NOT NULL DEFAULT 0,
+        items_unknown      INTEGER NOT NULL DEFAULT 0,
+        last_error         TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_asset_valuations_char_created
+        ON real_asset_valuations(character_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS real_asset_valuation_items (
+        valuation_id             TEXT NOT NULL,
+        item_id                  INTEGER NOT NULL,
+        type_id                  INTEGER NOT NULL,
+        quantity                 INTEGER NOT NULL,
+        market_reference_value   REAL,
+        bid_liquidation_gross    REAL,
+        bid_liquidation_net      REAL,
+        fillable_quantity        INTEGER,
+        unfillable_quantity      INTEGER,
+        ask_replacement_gross    REAL,
+        ask_replacement_net      REAL,
+        statuses_json            TEXT NOT NULL DEFAULT '[]',
+        flags_json               TEXT NOT NULL DEFAULT '[]',
+        price_source             TEXT,
+        PRIMARY KEY (valuation_id, item_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_asset_val_items_type
+        ON real_asset_valuation_items(valuation_id, type_id);
+
+      CREATE TABLE IF NOT EXISTS real_asset_opportunity_matches (
+        match_id          TEXT PRIMARY KEY,
+        character_id      INTEGER NOT NULL,
+        opportunity_id    TEXT NOT NULL,
+        type_id           INTEGER NOT NULL,
+        held_quantity     INTEGER NOT NULL DEFAULT 0,
+        accessible_quantity INTEGER NOT NULL DEFAULT 0,
+        required_quantity INTEGER NOT NULL DEFAULT 0,
+        support_class     TEXT NOT NULL CHECK (support_class IN ('SUPPORTED', 'PARTIAL', 'NEEDS_PURCHASE', 'UNAVAILABLE', 'UNKNOWN')),
+        needs_transport   INTEGER NOT NULL DEFAULT 0 CHECK (needs_transport IN (0, 1)),
+        locations_json    TEXT NOT NULL DEFAULT '[]',
+        snapshot_id       TEXT,
+        computed_at       TEXT NOT NULL,
+        UNIQUE (character_id, opportunity_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_real_asset_matches_char
+        ON real_asset_opportunity_matches(character_id, computed_at);
+    `);
     backfillPaperTradingEscrow(db);
     // Alert push redelivery: per-event attempts with exponential backoff and
     // a terminal abandoned_at so undeliverable events stop blocking the queue.
