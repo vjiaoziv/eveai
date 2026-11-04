@@ -117,7 +117,7 @@ export class PaperTradingRuntimeValidation {
     const expiredOpportunities = count(db, `
       SELECT COUNT(*) AS n FROM trade_opportunities_log p
       WHERE p.opportunity_expires_at IS NOT NULL AND p.opportunity_expires_at < datetime('now')
-        AND p.outcome_status NOT IN ('expired', 'vetoed')
+        AND p.outcome_status = 'pending'
         AND EXISTS (
           SELECT 1 FROM paper_trading_orders owner
           WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?

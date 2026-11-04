@@ -40,3 +40,6 @@ docs/audit/*/_work/
 !docs/audit/project-audit-20261103/evidence/*.png
 !docs/audit/project-audit-20261103/evidence/*.jpg
 !docs/audit/project-audit-20261103/evidence/*.jpeg
+
+# Audit/API logs are local-only
+**/logs/
