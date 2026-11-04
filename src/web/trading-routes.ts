@@ -12,6 +12,7 @@ import { PerformanceAnalytics } from '../trading/performance-analytics.js';
 import { PaperTradingRuntimeValidation } from '../trading/runtime-validation.js';
 import { getLinkedCharacter } from '../eve/sso.js';
 import type { WebSession } from './web-session.js';
+import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
 function sessionContext(session: WebSession) { return { userId: session.userId, chatId: session.chatId }; }
 
 export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
@@ -31,7 +32,7 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   app.get<{ Querystring: { stationId?: string } }>('/api/web/trading/scan/station', async (request, reply) => {
     const session = requireSession(db, request, reply);
     if (!session) return;
-    const stationId = request.query.stationId ? Number(request.query.stationId) : 60003760; // Jita 4-4
+    const stationId = clampPositiveInteger(request.query.stationId, 60003760, Number.MAX_SAFE_INTEGER); // Jita 4-4 by default
     const opps = StationArbitrageStrategy.scan(db, {
       stationId,
       regionId: 10000002,
@@ -46,11 +47,14 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   app.get<{ Querystring: { routeIndex?: string; mode?: string } }>('/api/web/trading/scan/hauling', async (request, reply) => {
     const session = requireSession(db, request, reply);
     if (!session) return;
-    const idx = request.query.routeIndex ? Number(request.query.routeIndex) : 0;
+    const idx = clampNonNegativeInteger(request.query.routeIndex, 0, Math.max(0, STANDARD_HIGHSEC_ROUTES.length - 1));
     const route = STANDARD_HIGHSEC_ROUTES[idx] || STANDARD_HIGHSEC_ROUTES[0];
+    const mode = request.query.mode === 'instant_fill' || request.query.mode === 'listed_sell' || request.query.mode === 'all'
+      ? request.query.mode
+      : 'all';
     const opps = RegionalHaulingStrategy.scan(db, {
       route,
-      mode: (request.query.mode as any) || 'all',
+      mode,
       minNetMarginPct: 6.0,
       minNetProfit: 100_000,
       maxCapital: 50_000_000,
@@ -63,7 +67,8 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   app.get<{ Params: { typeId: string } }>('/api/web/trading/reprocess/:typeId', async (request, reply) => {
     const session = requireSession(db, request, reply);
     if (!session) return;
-    const typeId = Number(request.params.typeId);
+    const typeId = clampPositiveInteger(request.params.typeId, 0, Number.MAX_SAFE_INTEGER);
+    if (!typeId) return reply.status(400).send({ error: 'typeId 必须是正整数' });
     const analysis = ManufacturingArbitrageStrategy.analyzeReprocessing(db, typeId);
     if (!analysis) {
       return reply.status(404).send({ error: '该物品无法再处理或缺少矿物数据' });
@@ -75,8 +80,9 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   app.get<{ Params: { typeId: string }; Querystring: { regionId?: string } }>('/api/web/trading/trend/:typeId', async (request, reply) => {
     const session = requireSession(db, request, reply);
     if (!session) return;
-    const typeId = Number(request.params.typeId);
-    const regionId = request.query.regionId ? Number(request.query.regionId) : 10000002;
+    const typeId = clampPositiveInteger(request.params.typeId, 0, Number.MAX_SAFE_INTEGER);
+    if (!typeId) return reply.status(400).send({ error: 'typeId 必须是正整数' });
+    const regionId = clampPositiveInteger(request.query.regionId, 10000002, Number.MAX_SAFE_INTEGER);
     const trend = TrendAnalysisStrategy.analyzeTrend(db, typeId, regionId);
     if (!trend) {
       return reply.status(404).send({ error: '暂无该物品的历史价格点' });
@@ -126,8 +132,10 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   app.post<{ Params: { draftId: string } }>('/api/web/trading/drafts/:draftId/approve', async (request, reply) => {
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
+    const char = getLinkedCharacter(db, sessionContext(session));
+    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
     try {
-      const ok = DraftSystem.updateStatus(db, request.params.draftId, 'approved');
+      const ok = DraftSystem.updateStatus(db, request.params.draftId, 'approved', undefined, char.characterId);
       if (!ok) return reply.status(404).send({ error: '草案不存在' });
       return { success: true };
     } catch (err: any) {
@@ -138,7 +146,9 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   app.post<{ Params: { draftId: string } }>('/api/web/trading/drafts/:draftId/reject', async (request, reply) => {
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
-    const ok = DraftSystem.updateStatus(db, request.params.draftId, 'rejected');
+    const char = getLinkedCharacter(db, sessionContext(session));
+    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    const ok = DraftSystem.updateStatus(db, request.params.draftId, 'rejected', undefined, char.characterId);
     if (!ok) return reply.status(404).send({ error: '草案不存在' });
     return { success: true };
   });
@@ -149,6 +159,8 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   }>('/api/web/trading/drafts/:draftId/execute', async (request, reply) => {
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
+    const char = getLinkedCharacter(db, sessionContext(session));
+    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
     const b = request.body;
     try {
       const ok = DraftSystem.recordManualExecution(db, {
@@ -158,6 +170,7 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
         actualQuantity: Number(b.actualQuantity),
         actualFees: Number(b.actualFees || 0),
         notes: b.notes,
+        characterId: char.characterId,
       });
       if (!ok) return reply.status(404).send({ error: '草案不存在' });
       return { success: true };
@@ -172,7 +185,18 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
     if (!char) return { positions: [], totalInvested: 0, totalCurrentValue: 0, totalUnrealizedPnl: 0, totalRealizedPnl: 0 };
-    return PaperTradingSystem.getPortfolio(db, char.characterId);
+    if (!PaperTradingSystem.getAccount(db, char.characterId)) {
+      return {
+        initialized: false,
+        message: 'Paper Trading 尚未初始化；读取接口不会创建模拟账户。',
+        positions: [],
+        totalInvested: 0,
+        totalCurrentValue: 0,
+        totalUnrealizedPnl: 0,
+        totalRealizedPnl: 0,
+      };
+    }
+    return { initialized: true, ...PaperTradingSystem.getPortfolio(db, char.characterId) };
   });
 
   app.get('/api/web/trading/paper/overview', async (request, reply) => {
@@ -180,7 +204,17 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
     if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    if (!PaperTradingSystem.getAccount(db, char.characterId)) {
+      return reply.status(200).send({
+        initialized: false,
+        message: 'Paper Trading 尚未初始化；读取接口不会创建模拟账户。',
+        portfolio: null,
+        performance: null,
+        runtime: null,
+      });
+    }
     return {
+      initialized: true,
       portfolio: PaperTradingSystem.getPortfolio(db, char.characterId),
       performance: PerformanceAnalytics.compute(db, char.characterId),
       runtime: PaperTradingRuntimeValidation.build(db, char.characterId),
@@ -192,7 +226,7 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
     if (!char) return { orders: [] };
-    const limit = Math.max(1, Math.min(500, Number(request.query.limit || 100)));
+    const limit = clampPositiveInteger(request.query.limit, 100, 500);
     const params: unknown[] = [char.characterId];
     let sql = `
       SELECT o.*, COALESCE(COUNT(f.fill_id), 0) AS fill_count,
@@ -214,11 +248,17 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   app.get<{ Querystring: { limit?: string } }>('/api/web/trading/paper/opportunities', async (request, reply) => {
     const session = requireSession(db, request, reply);
     if (!session) return;
-    const limit = Math.max(1, Math.min(500, Number(request.query.limit || 100)));
+    const char = getLinkedCharacter(db, sessionContext(session));
+    if (!char) return { opportunities: [] };
+    const limit = clampPositiveInteger(request.query.limit, 100, 500);
     const rows = db.prepare(`
-      SELECT * FROM trade_opportunities_log
-      ORDER BY detected_at DESC LIMIT ?
-    `).all(limit) as any[];
+      SELECT p.* FROM trade_opportunities_log p
+      WHERE EXISTS (
+        SELECT 1 FROM paper_trading_orders owner
+        WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?
+      )
+      ORDER BY p.detected_at DESC LIMIT ?
+    `).all(char.characterId, limit) as any[];
     return {
       opportunities: rows.map((row) => ({
         ...row,
@@ -231,12 +271,20 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   app.get<{ Querystring: { orderId?: string; limit?: string } }>('/api/web/trading/paper/fills', async (request, reply) => {
     const session = requireSession(db, request, reply);
     if (!session) return;
-    const limit = Math.max(1, Math.min(1000, Number(request.query.limit || 200)));
+    const char = getLinkedCharacter(db, sessionContext(session));
+    if (!char) return { fills: [] };
+    const limit = clampPositiveInteger(request.query.limit, 200, 1000);
     if (request.query.orderId) {
+      const owned = db.prepare('SELECT 1 FROM paper_trading_orders WHERE order_id = ? AND character_id = ?')
+        .get(request.query.orderId, char.characterId);
+      if (!owned) return reply.status(404).send({ error: '订单不存在' });
       return {
         fills: db.prepare(`
-          SELECT * FROM paper_fills WHERE order_id = ? ORDER BY filled_at, rowid
-        `).all(request.query.orderId),
+          SELECT f.* FROM paper_fills f
+          JOIN paper_trading_orders o ON o.order_id = f.order_id
+          WHERE f.order_id = ? AND o.character_id = ?
+          ORDER BY f.filled_at, f.rowid
+        `).all(request.query.orderId, char.characterId),
       };
     }
     return {
@@ -244,9 +292,10 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
         SELECT f.*, o.strategy_type, o.order_type, o.status AS order_status
         FROM paper_fills f
         JOIN paper_trading_orders o ON o.order_id = f.order_id
+        WHERE o.character_id = ?
         ORDER BY f.filled_at DESC, f.rowid DESC
         LIMIT ?
-      `).all(limit),
+      `).all(char.characterId, limit),
     };
   });
 
@@ -255,7 +304,10 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
     if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
-    return { performance: PerformanceAnalytics.compute(db, char.characterId) };
+    if (!PaperTradingSystem.getAccount(db, char.characterId)) {
+      return { initialized: false, message: 'Paper Trading 尚未初始化；读取接口不会创建模拟账户。', performance: null };
+    }
+    return { initialized: true, performance: PerformanceAnalytics.compute(db, char.characterId) };
   });
 
   app.get('/api/web/trading/paper/runtime-validation', async (request, reply) => {
@@ -263,7 +315,10 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
     if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
-    return { validation: PaperTradingRuntimeValidation.build(db, char.characterId) };
+    if (!PaperTradingSystem.getAccount(db, char.characterId)) {
+      return { initialized: false, message: 'Paper Trading 尚未初始化；读取接口不会创建模拟账户。', validation: null };
+    }
+    return { initialized: true, validation: PaperTradingRuntimeValidation.build(db, char.characterId) };
   });
 
   app.get('/api/web/trading/paper/risk', async (request, reply) => {
@@ -271,16 +326,23 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
     if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    if (!PaperTradingSystem.getAccount(db, char.characterId)) {
+      return { initialized: false, message: 'Paper Trading 尚未初始化；读取接口不会创建模拟账户。', risk: null };
+    }
     const validation = PaperTradingRuntimeValidation.build(db, char.characterId);
     return {
       risk: {
         flags: validation.performance.riskFlags,
         gates: validation.gates,
         highRiskOpportunities: db.prepare(`
-          SELECT * FROM trade_opportunities_log
-          WHERE risk_rating IN ('C', 'D') OR outcome_status = 'vetoed'
-          ORDER BY detected_at DESC LIMIT 100
-        `).all(),
+          SELECT p.* FROM trade_opportunities_log p
+          WHERE (p.risk_rating IN ('C', 'D') OR p.outcome_status = 'vetoed')
+            AND EXISTS (
+              SELECT 1 FROM paper_trading_orders owner
+              WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?
+            )
+          ORDER BY p.detected_at DESC LIMIT 100
+        `).all(char.characterId),
         staleSnapshots: db.prepare(`
           SELECT * FROM market_snapshot_regions
           WHERE expires_at IS NULL OR expires_at < datetime('now')

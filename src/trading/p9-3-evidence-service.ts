@@ -113,7 +113,7 @@ export class P93EsiEvidenceService {
             tradeTime: payload.date,
           },
           initialStatus: 'VERIFIED',
-        });
+        }, 'ESI_SYNC');
         P93LedgerService.linkEvidence(db, characterId, record.recordId, evidence.evidenceId, 'PRIMARY', 'HIGH', undefined, 'ESI_SYNC', 'esi-wallet-sync');
         // ESI evidence establishes that a wallet transaction exists, but it
         // does not by itself make the REAL trade record verified. A human must

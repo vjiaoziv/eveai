@@ -1,0 +1,59 @@
+{
+  "full_check": {
+    "command": "npm run check",
+    "exit_code": 0,
+    "test_files_passed": 230,
+    "test_files_total": 230,
+    "tests_passed": 2124,
+    "tests_total": 2124,
+    "typescript": "passed",
+    "web_typescript": "passed",
+    "eslint": "passed"
+  },
+  "targeted_suite": {
+    "command": "npx vitest run <20 files>",
+    "exit_code": 0,
+    "test_files_passed": 20,
+    "test_files_total": 20,
+    "tests_passed": 189,
+    "tests_total": 189
+  },
+  "perimeter_radar": {
+    "single_full_file_tests_passed": 5,
+    "single_full_file_tests_total": 5,
+    "consecutive_full_file_runs_passed": 10,
+    "consecutive_full_file_runs_total": 10,
+    "root_cause": "test fake-clock and real socket I/O scheduling race",
+    "business_assertions_weakened": false
+  },
+  "build": {
+    "command": "npm run build",
+    "exit_code": 0,
+    "modules_transformed": 234,
+    "js_chunk": {
+      "file": "index-B1RHFRtu.js",
+      "bytes": 608202,
+      "gzip_bytes": 172130,
+      "warning": "chunk larger than 500 kB"
+    },
+    "css_chunk": {
+      "file": "index-C2j3Jj-C.css",
+      "bytes": 129688,
+      "gzip_bytes": 20880
+    }
+  },
+  "dependency_audit": {
+    "command": "npm audit --omit=dev",
+    "exit_code": 0,
+    "vulnerabilities": 0,
+    "force_fix_used": false
+  },
+  "diff_check": {
+    "command": "git diff --check",
+    "exit_code": 0
+  },
+  "security_scanner": {
+    "available": false,
+    "error": "Could not read local file: node_modules\\.bin\\acorn"
+  }
+}

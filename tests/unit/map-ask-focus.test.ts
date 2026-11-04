@@ -59,5 +59,8 @@ describe('Perimeter ask focus', () => {
     };
     expect(planRoute.parameters.properties.avoid).toBeDefined();
     expect(planRoute.parameters.required).toContain('avoid');
+    expect((planRoute as unknown as { description?: string }).description).toContain('read-only route');
+    expect((planRoute.parameters.properties.set_autopilot as { description?: string }).description)
+      .toContain('Must be false or null');
   });
 });

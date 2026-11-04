@@ -128,6 +128,30 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
           && Number(current.quantity || 0) === Number(latestSnapshot.total_quantity)
           ? 'COMPLETE'
           : 'INCONSISTENT';
+      const latestValuation = RealValuationService.latestTotals(db, char.characterId);
+      const latestSnapshotId = typeof latestSnapshot?.snapshot_id === 'string' ? latestSnapshot.snapshot_id : null;
+      const latestValuationSnapshotId = typeof latestValuation?.snapshotId === 'string' ? latestValuation.snapshotId : null;
+      const valuationStatus = !latestValuation
+        ? 'NO_VALUATION'
+        : !latestSnapshotId
+          ? 'NO_LATEST_SNAPSHOT'
+          : latestValuationSnapshotId === latestSnapshotId
+            ? 'CURRENT'
+            : 'STALE';
+      const valuationFreshness = {
+        status: valuationStatus,
+        latestSnapshotId,
+        valuationSnapshotId: latestValuationSnapshotId,
+        valuationItems: Number(latestValuation?.items ?? 0),
+        currentAssetItems,
+        message: valuationStatus === 'NO_VALUATION'
+          ? '尚无完成的资产估值；市场参考和可执行估值均不可得。'
+          : valuationStatus === 'STALE'
+            ? '最近估值绑定的资产快照不是当前最新快照；该估值只代表旧快照，不代表当前库存。'
+            : valuationStatus === 'NO_LATEST_SNAPSHOT'
+              ? '没有最新完整资产快照可供估值。'
+              : '估值绑定当前最新完整资产快照。',
+      };
       return {
         characterId: char.characterId,
         characterName: char.name,
@@ -142,7 +166,8 @@ export function registerAssetRoutes(app: FastifyInstance, db: Db): void {
           hasAssetScope,
         },
         dataIntegrity,
-        latestValuation: RealValuationService.latestTotals(db, char.characterId),
+        latestValuation,
+        valuationFreshness,
         syncIntervalMinutes: config.assetSync.intervalMinutes,
         syncEnabled: config.assetSync.enabled,
       };

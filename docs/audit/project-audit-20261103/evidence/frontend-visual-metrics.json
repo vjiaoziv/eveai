@@ -1,0 +1,52 @@
+{
+  "captured_at_local": "2026-11-04T04:19:30+08:00",
+  "browser": "Chrome extension",
+  "page": "http://localhost:3000/app",
+  "viewports": {
+    "desktop_1440x900": {
+      "inner_width": 1440,
+      "scroll_width": 1440,
+      "page_overflow": false,
+      "p9_screen_width": 1190
+    },
+    "tablet_1024x768": {
+      "inner_width": 1024,
+      "scroll_width": 1024,
+      "page_overflow": false,
+      "p9_screen_width": 774,
+      "p93_tab_group": {
+        "client_width": 692,
+        "scroll_width": 692,
+        "overflow_x": "auto"
+      }
+    },
+    "mobile_390x844": {
+      "inner_width": 390,
+      "scroll_width": 390,
+      "page_overflow": false,
+      "asset_title_height_px": 20.8,
+      "p93_tab_group": {
+        "client_width": 345,
+        "scroll_width": 485,
+        "overflow_x": "auto"
+      },
+      "rightmost_tab_reachable": "审计中心"
+    }
+  },
+  "mobile_small_touch_targets": [
+    {"label": "关闭菜单", "width": 36, "height": 36},
+    {"label": "聊天", "width": 275, "height": 34},
+    {"label": "市场", "width": 275, "height": 34},
+    {"label": "REAL 交易账本", "width": 275, "height": 34},
+    {"label": "资产库存", "width": 275, "height": 34},
+    {"label": "Paper Trading", "width": 275, "height": 33},
+    {"label": "删除对话", "width": 30, "height": 30}
+  ],
+  "asset_valuation_freshness": {
+    "status": "STALE",
+    "warning_visible": true,
+    "duplicate_punctuation_removed": true
+  },
+  "viewport_reset_after_check": true,
+  "unredacted_real_screenshots_committed": false
+}

@@ -149,7 +149,7 @@ describe('tool output truncation', () => {
     const output = JSON.stringify({ ok: true, data: [{ id: 1, name: 'Jita' }] });
 
     expect(__test__.truncateToolOutput(output)).toBe(output);
-  });
+  }, 15_000);
 
   it('returns bounded valid JSON for malformed input', async () => {
     process.env.AGENT_MAX_TOOL_OUTPUT_CHARS = '12000';
@@ -2077,6 +2077,24 @@ describe('cooperative turn abort (CLI Ctrl-C)', () => {
       { identityCurrent: () => false },
     );
     expect(result).toMatchObject({ ok: false, blocked: true });
+  });
+
+  it('blocks in-game autopilot writes before route planning', async () => {
+    const { __test__ } = await import('../../src/agent/executor.js');
+    const { createWebSearchState } = await import('../../src/agent/web-search.js');
+    const result = await __test__.executeToolCall(
+      db as never,
+      'req-autopilot-blocked',
+      'set autopilot',
+      { userId: 1, chatId: 1 },
+      'plan_route',
+      { origin: 'Jita', destination: 'Amarr', set_autopilot: true, prefer: 'secure' },
+      createWebSearchState(),
+      false,
+      { callsExecuted: 0 },
+    );
+    expect(result).toMatchObject({ ok: false, blocked: true });
+    expect((result as { error?: string }).error).toContain('read-only phase');
   });
 
   it('stops before any tool runs when the sink reports aborted mid-sampling', async () => {

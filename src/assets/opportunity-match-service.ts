@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
+import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
 
 /**
  * P9.2.6 deterministic linkage between current real inventory and P9.1
@@ -313,8 +314,8 @@ export class RealOpportunityMatchService {
     limit: number;
     offset: number;
   } {
-    const limit = Math.max(1, Math.min(500, Number(filters.limit ?? 100) || 100));
-    const offset = Math.max(0, Number(filters.offset) || 0);
+    const limit = clampPositiveInteger(filters.limit, 100, 500);
+    const offset = clampNonNegativeInteger(filters.offset);
     const where = ['m.character_id = ?'];
     const params: unknown[] = [characterId];
     if (filters.supportClass) {

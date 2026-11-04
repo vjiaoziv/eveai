@@ -227,15 +227,15 @@ const ALWAYS_ON_FUNCTION_TOOLS: NativeFunctionTool[] = [
   {
     type: 'function',
     name: 'plan_route',
-    description: 'Plan a route between two EVE systems. Returns up to 3 variants (secure/shortest/insecure) with jump count, security, recent EVE-KILL activity, danger systems with detailed killmails, and formatted_summary ready for output. Includes one shared danger baseline; do not issue a second kill search. Sets autopilot waypoints when requested. Accepts system names or IDs.',
+    description: 'Plan a read-only route between two EVE systems. Returns up to 3 variants (secure/shortest/insecure) with jump count, security, recent EVE-KILL activity, danger systems with detailed killmails, and formatted_summary ready for output. Includes one shared danger baseline; do not issue a second kill search. Accepts system names or IDs. In-game autopilot writes are disabled in this phase.',
     strict: true,
     parameters: {
       type: 'object',
       properties: {
         origin: { type: 'string', description: 'Origin system name or ID. Use "current" to use the current location from prompt context.' },
         destination: { type: 'string', description: 'Destination system name or ID' },
-        set_autopilot: { type: ['boolean', 'null'], description: 'Set autopilot to the preferred route only when explicitly true (default false)' },
-        prefer: { type: ['string', 'null'], enum: ['secure', 'shortest', 'insecure', 'thera_shortcut', null], description: 'Which variant to prefer: it is the one drawn on the pilot\'s map and, when set_autopilot is true, sent to autopilot. thera_shortcut sets waypoints for WH shortcut: entry system → exit system → destination (default: secure)' },
+        set_autopilot: { type: ['boolean', 'null'], description: 'Reserved for compatibility. Must be false or null: in-game autopilot writes are blocked in this read-only phase.' },
+        prefer: { type: ['string', 'null'], enum: ['secure', 'shortest', 'insecure', 'thera_shortcut', null], description: 'Which variant to prefer: it is the one drawn on the pilot\'s map. thera_shortcut selects the WH shortcut variant: entry system → exit system → destination (default: secure). This never writes in-game autopilot.' },
         avoid: { type: ['array', 'null'], items: { type: 'integer' }, description: 'Extra system IDs to avoid for this route only ("обойди Tama"), on top of the pilot\'s stored avoid list. Resolve names to IDs first.' },
       },
       required: ['origin', 'destination', 'set_autopilot', 'prefer', 'avoid'],
@@ -293,7 +293,7 @@ const ROUTE_MONITOR_TOOL_NAME = 'route_monitor';
 const ROUTE_MONITOR_TOOL: NativeFunctionTool = {
   type: 'function',
   name: ROUTE_MONITOR_TOOL_NAME,
-  description: 'Control real-time route monitoring. Auto-starts when autopilot is set via plan_route. Use to check monitoring status or stop active monitoring.',
+  description: 'Inspect or stop real-time route monitoring. New monitoring cannot start while autopilot writes are blocked; use to check status or stop an already-active monitor.',
   strict: true,
   parameters: {
     type: 'object',
@@ -714,13 +714,13 @@ export type { PlanRouteArgs } from '../eve/route-planner.js';
 
 export async function getToolPolicy(
   name: string,
-  args: Readonly<Record<string, unknown>> = {},
+  _args: Readonly<Record<string, unknown>> = {},
 ): Promise<'read' | 'write' | 'ui' | null> {
   // Tools that mutate local state must be 'write' so the executor runs them
   // sequentially, never in the parallel read path (avoids lost-update races on
   // USER.md, intel_notes, heartbeat_config, and route monitors).
   if (name === 'plan_route') {
-    return args.set_autopilot === true ? 'ui' : 'read';
+    return 'read';
   }
   if (
     name === 'update_plan'

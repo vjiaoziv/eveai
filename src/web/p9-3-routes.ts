@@ -180,7 +180,7 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     }
   });
 
-  for (const action of ['verify', 'reject', 'reverse'] as const) {
+  for (const action of ['submit', 'verify', 'reject', 'reverse'] as const) {
     app.post<{ Params: { recordId: string } }>(`${base}/records/:recordId/${action}`, async (request, reply) => {
       const session = requireMutationSession(db, request, reply);
       if (!session) return;
@@ -190,11 +190,13 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
         const body = asBody(request.body ?? {});
         const actor = `user:${session.userId}`;
         const reason = optionalText(body, 'reason');
-        const record = action === 'verify'
-          ? P93LedgerService.verify(db, char.characterId, request.params.recordId, actor, reason)
-          : action === 'reject'
-            ? P93LedgerService.setVerification(db, char.characterId, request.params.recordId, 'REJECTED', actor, reason)
-            : P93LedgerService.reverse(db, char.characterId, request.params.recordId, actor, reason ?? '');
+        const record = action === 'submit'
+          ? P93LedgerService.submitDraft(db, char.characterId, request.params.recordId, actor)
+          : action === 'verify'
+            ? P93LedgerService.verify(db, char.characterId, request.params.recordId, actor, reason)
+            : action === 'reject'
+              ? P93LedgerService.setVerification(db, char.characterId, request.params.recordId, 'REJECTED', actor, reason)
+              : P93LedgerService.reverse(db, char.characterId, request.params.recordId, actor, reason ?? '');
         return { record };
       } catch (error) {
         return reply.status(400).send({ error: error instanceof Error ? error.message : '交易状态处理失败。' });
@@ -339,12 +341,17 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     return { performance: P93FifoService.performance(db, char.characterId), unrealized: P93FifoService.unrealized(db, char.characterId) };
   });
 
-  app.get(`${base}/reconciliation`, async (request, reply) => {
+  app.get<{ Querystring: { limit?: string; offset?: string } }>(`${base}/reconciliation`, async (request, reply) => {
     const session = requireSession(db, request, reply);
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
-    return { reconciliation: P93ReconciliationService.latest(db, char.characterId) };
+    return {
+      reconciliation: P93ReconciliationService.latest(db, char.characterId, {
+        limit: request.query.limit,
+        offset: request.query.offset,
+      }),
+    };
   });
 
   app.post(`${base}/reconciliation/run`, async (request, reply) => {
@@ -368,7 +375,7 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
       events: P93AuditService.events(db, char.characterId, undefined, 500),
       calculationRuns: P93AuditService.calculationRuns(db, char.characterId),
       reconciliationRuns: P93AuditService.reconciliationRuns(db, char.characterId),
-      integrity: P93AuditService.integrityCheck(db),
+      integrity: P93AuditService.integrityCheck(db, char.characterId),
     };
   });
 }

@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import { initDb } from '../../src/db/sqlite.js';
 import { PaperTradingSystem } from '../../src/trading/paper-trading.js';
 import { DraftSystem } from '../../src/trading/draft-system.js';
 import type { TradeOpportunity } from '../../src/trading/types.js';
@@ -23,8 +23,7 @@ type CredentialArgs = {
 type WorkerArgs = OrderArgs | CredentialArgs;
 
 const args = JSON.parse(process.argv[2] ?? '{}') as WorkerArgs;
-const db = new Database(args.dbPath);
-db.pragma('busy_timeout = 5000');
+const db = initDb(args.dbPath);
 
 function finish(payload: Record<string, unknown>): never {
   process.stdout.write(JSON.stringify(payload));

@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { setTimeout as realDelay } from 'node:timers/promises';
 
 const env = vi.hoisted(() => {
   process.env.MAP_LIVE_SESSION_MAX_FAILURES = '3';
@@ -122,7 +123,7 @@ const { buildMapGraph, invalidateMapGraphCache } = await import('../../src/eve/m
 const { getLiveSessionStats, resetLiveSessionsForTests } = await import('../../src/eve-map/live-session.js');
 const { resetSharedAdvisorStatesForTests, sharedAdvisorRefsForTests } = await import('../../src/eve-map/advisor.js');
 const { resetMapKillIndexForTests, startMapKillIndex } = await import('../../src/eve-map/kill-index.js');
-const { startEveKillFeedPoller, stopEveKillFeedPoller } = await import('../../src/eve-kill/feed-poll.js');
+const { getEveKillFeedRuntimeStatus, startEveKillFeedPoller, stopEveKillFeedPoller } = await import('../../src/eve-kill/feed-poll.js');
 const { readPerimeterHistory } = await import('../../src/eve-map/thread.js');
 const { resetActiveRoutesForTests } = await import('../../src/eve-map/active-route.js');
 const { resetNameCacheForTests } = await import('../../src/eve-map/names.js');
@@ -248,8 +249,11 @@ async function until(condition: () => boolean, label: string, rounds = 400): Pro
   for (let index = 0; index < rounds; index += 1) {
     if (condition()) return;
     await new Promise<void>((resolve) => setImmediate(resolve));
+    // Socket close and SSE teardown run outside Vitest's fake clock. Yield one
+    // real millisecond so the fixed spin cannot finish before kernel I/O.
+    await realDelay(1);
   }
-  throw new Error(`timed out waiting for ${label}`);
+  throw new Error('timed out waiting for ' + label);
 }
 
 /** Advance fake time in small steps so real I/O keeps up with timer callbacks. */
@@ -268,7 +272,9 @@ async function advanceUntil(condition: () => boolean, label: string, maxMs = 15_
     await advance(step, step);
     if (condition()) return;
   }
-  throw new Error(`timed out waiting for ${label}`);
+  // SSE frames are parsed by real socket I/O after fake timers have fired.
+  // Give those pending reads a brief real-time window before declaring failure.
+  await until(condition, label, 1_000);
 }
 async function closeClientAndWait(client: Client, label = 'poller stopped'): Promise<void> {
   client.close();
@@ -369,6 +375,9 @@ beforeEach(async () => {
   startMapKillIndex(db);
   startEveKillFeedPoller(db, async () => {}, { pollIntervalMs: 250 });
   await advance(300, 100);
+  // A fire-and-forget poller can still be bootstrapping under load. Stale-feed
+  // assertions require a real last-success timestamp, not merely a started loop.
+  await until(() => getEveKillFeedRuntimeStatus().lastSuccessAt !== null, 'feed bootstrap');
 
   app = Fastify({ bodyLimit: 64 * 1024 });
   await app.register(fastifyCookie);
@@ -631,7 +640,17 @@ describe('Perimeter live radar, end to end over real SSE', () => {
 
     // And the pilot jumps to B before that build finishes.
     script.systemId = B;
-    await advanceUntil(() => of(tab, 'location').length === 2, 'jump location');
+    try {
+      await advanceUntil(() => of(tab, 'location').length === 2, 'jump location');
+    } catch (error) {
+      const diagnostics = {
+        error: (error as Error).message,
+        events: tab.frames.map((frame) => frame.event),
+        warnings: of(tab, 'warning').map((frame) => frame.data),
+        live: getLiveSessionStats(),
+      };
+      throw new Error("jump location failed: " + JSON.stringify(diagnostics));
+    }
 
     script.buildGate = null;
     gate.resolve();

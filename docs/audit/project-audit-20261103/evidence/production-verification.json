@@ -1,0 +1,57 @@
+{
+  "captured_at_local": "2026-11-04T04:20:30+08:00",
+  "service": {
+    "name": "eveai.service",
+    "active_state": "active",
+    "sub_state": "running",
+    "main_pid": 804492,
+    "started_at": "2026-11-04 04:14:41 CST"
+  },
+  "health": {
+    "http_status": 200,
+    "status": "ok",
+    "database": "ok",
+    "web_agent_queue": {
+      "queued": 0,
+      "running": 0,
+      "stale": 0
+    },
+    "telegram_bot": "skipped",
+    "discord_bot": "skipped"
+  },
+  "app": {
+    "initial_status": 302,
+    "canonical_location": "http://localhost:3000/app",
+    "followed_status": 200
+  },
+  "unauthenticated_real_routes": {
+    "/api/web/trading/p9/real-ledger/overview": 401,
+    "/api/web/trading/p9/real-ledger/records": 401,
+    "/api/web/trading/p9/real-ledger/reconciliation": 401,
+    "/api/web/trading/p9/real-trades": 401
+  },
+  "served_assets": {
+    "/web-assets/assets/index-B1RHFRtu.js": "eb1c2a613c839e60a529e308e67ffb7d0e32c555fa92c1859aae4178c98a6fb4",
+    "/web-assets/assets/index-C2j3Jj-C.css": "71582b6f10c800fd998fbc693e3a745d9d09a94643cf0a6a25409cbaa4b25c0f"
+  },
+  "security_headers_observed": [
+    "Content-Security-Policy",
+    "X-Frame-Options: DENY",
+    "X-Content-Type-Options: nosniff",
+    "Referrer-Policy: no-referrer",
+    "Permissions-Policy"
+  ],
+  "build_archive": {
+    "path": "data/backups/project-audit-dist-final-20261103T201336Z.tgz",
+    "size": 3860999,
+    "sha256": "c53de3a924d0bd20cc4e25d6dd7e9069bf0abafe74c8c3d934d3bf3f14ea769a"
+  },
+  "database_backup": {
+    "path": "data/backups/eveai-project-audit-20261103T193218Z.db",
+    "size": 1142943744,
+    "sha256": "6b177a3f7922df9016e575382c7e5351d2063f33f22e0ec15064431acface26b"
+  },
+  "npm_audit_omit_dev": {
+    "vulnerabilities": 0
+  }
+}

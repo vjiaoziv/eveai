@@ -47,9 +47,11 @@ type Runtime = {
 };
 
 type Overview = {
-  portfolio: { account: Record<string, unknown>; strategyBreakdown: Array<Record<string, unknown>> };
-  performance: Performance;
-  runtime: Runtime;
+  initialized?: boolean;
+  message?: string;
+  portfolio: { account: Record<string, unknown>; strategyBreakdown: Array<Record<string, unknown>> } | null;
+  performance: Performance | null;
+  runtime: Runtime | null;
 };
 
 type OrderRow = Record<string, unknown> & {
@@ -116,6 +118,9 @@ export function TradingScreen({ onMenu }: Props) {
   if (loading) return <div className="app-loading" aria-label="加载 Paper Trading"><span /><span /><span /></div>;
   if (error) return <div className="screen-error" role="alert">{error}</div>;
   if (!overview) return <div className="screen-empty">暂无 Paper Trading 数据</div>;
+  if (overview.initialized === false || !overview.performance || !overview.runtime) {
+    return <div className="screen-empty">{overview.message || 'Paper Trading 尚未初始化；读取接口不会创建模拟账户。'}</div>;
+  }
 
   const performance = overview.performance;
   const runtime = overview.runtime;

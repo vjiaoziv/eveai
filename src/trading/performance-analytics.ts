@@ -275,10 +275,15 @@ export class PerformanceAnalytics {
     const opportunityStats = db.prepare(`
       SELECT COUNT(*) AS total,
              SUM(CASE WHEN EXISTS (
-               SELECT 1 FROM paper_trading_orders o WHERE o.opportunity_id = trade_opportunities_log.opportunity_id
+               SELECT 1 FROM paper_trading_orders o
+               WHERE o.opportunity_id = p.opportunity_id AND o.character_id = ?
              ) THEN 1 ELSE 0 END) AS realized
-      FROM trade_opportunities_log
-    `).get() as any;
+      FROM trade_opportunities_log p
+      WHERE EXISTS (
+        SELECT 1 FROM paper_trading_orders owner
+        WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?
+      )
+    `).get(characterId, characterId) as any;
 
     const fillRate = pct(Number(orderStats?.filled || 0), Number(orderStats?.submitted || 0));
     const realizationRate = pct(Number(opportunityStats?.realized || 0), Number(opportunityStats?.total || 0));
@@ -299,7 +304,15 @@ export class PerformanceAnalytics {
         : 'INSUFFICIENT_SAMPLE';
 
     const strategyMetrics: StrategyPerformanceMetrics[] = STRATEGY_TYPES.map((strategy) => {
-      const opp = db.prepare('SELECT COUNT(*) AS n FROM trade_opportunities_log WHERE strategy_type = ?').get(strategy) as any;
+      const opp = db.prepare(`
+        SELECT COUNT(DISTINCT p.opportunity_id) AS n
+        FROM trade_opportunities_log p
+        WHERE p.strategy_type = ?
+          AND EXISTS (
+            SELECT 1 FROM paper_trading_orders owner
+            WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?
+          )
+      `).get(strategy, characterId) as any;
       const orders = db.prepare(`
         SELECT
           COUNT(*) AS submitted,
@@ -309,24 +322,25 @@ export class PerformanceAnalytics {
           SUM(CASE WHEN status IN ('open', 'partially_filled') THEN quantity - filled_quantity ELSE 0 END) AS unfilled_qty,
           SUM(CASE WHEN status IN ('open', 'partially_filled') THEN quantity ELSE 0 END) AS open_qty,
           COALESCE(SUM(fees_paid), 0) AS fees
-        FROM paper_trading_orders WHERE strategy_type = ?
-      `).get(strategy) as any;
+        FROM paper_trading_orders
+        WHERE strategy_type = ? AND character_id = ?
+      `).get(strategy, characterId) as any;
       const exits = db.prepare(`
         SELECT COALESCE(SUM(e.gross_pnl), 0) AS gross
         FROM paper_position_exits e
         JOIN paper_trading_orders o ON o.order_id = e.order_id
-        WHERE o.strategy_type = ?
-      `).get(strategy) as any;
+        WHERE o.strategy_type = ? AND o.character_id = ?
+      `).get(strategy, characterId) as any;
       const inventory = db.prepare(`
         SELECT COALESCE(SUM(quantity * cost_price), 0) AS cost
         FROM paper_trading_positions
-        WHERE strategy_type = ? AND status = 'holding'
-      `).get(strategy) as any;
+        WHERE strategy_type = ? AND character_id = ? AND status = 'holding'
+      `).get(strategy, characterId) as any;
       const holding = db.prepare(`
         SELECT AVG((julianday(sold_at) - julianday(created_at)) * 24) AS hours
         FROM paper_trading_positions
-        WHERE strategy_type = ? AND status = 'sold' AND sold_at IS NOT NULL
-      `).get(strategy) as any;
+        WHERE strategy_type = ? AND character_id = ? AND status = 'sold' AND sold_at IS NOT NULL
+      `).get(strategy, characterId) as any;
       const submitted = Number(orders?.submitted || 0);
       const filled = Number(orders?.filled || 0);
       const completed = Number(orders?.completed || 0);
@@ -338,10 +352,11 @@ export class PerformanceAnalytics {
                COALESCE(SUM(e.gross_pnl), 0) - COALESCE(o.fees_paid, 0) AS net
         FROM paper_trading_orders o
         LEFT JOIN paper_position_exits e ON e.order_id = o.order_id
-        WHERE o.strategy_type = ? AND o.order_type = 'sell' AND o.status = 'filled'
+        WHERE o.strategy_type = ? AND o.character_id = ?
+          AND o.order_type = 'sell' AND o.status = 'filled'
         GROUP BY o.order_id
         ORDER BY o.updated_at
-      `).all(strategy) as any[];
+      `).all(strategy, characterId) as any[];
       let peak = 0;
       let strategyDrawdown = 0;
       for (const event of strategyEvents) {
@@ -361,7 +376,7 @@ export class PerformanceAnalytics {
         partialOrders: Number(orders?.partial || 0),
         fillRatePct: pct(filled, submitted),
         opportunityRealizationRatePct: pct(
-          ((db.prepare('SELECT COUNT(DISTINCT opportunity_id) AS n FROM paper_trading_orders WHERE strategy_type = ? AND opportunity_id IS NOT NULL').get(strategy) as any)?.n || 0),
+          ((db.prepare('SELECT COUNT(DISTINCT opportunity_id) AS n FROM paper_trading_orders WHERE strategy_type = ? AND character_id = ? AND opportunity_id IS NOT NULL').get(strategy, characterId) as any)?.n || 0),
           Number(opp?.n || 0),
         ),
         grossProfit: round2(gross),
@@ -389,20 +404,29 @@ export class PerformanceAnalytics {
     const topProfitStrategy = [...strategyMetrics].sort((a, b) => b.realizedNetPnl - a.realizedNetPnl)[0];
     const topLossStrategy = [...strategyMetrics].sort((a, b) => a.realizedNetPnl - b.realizedNetPnl)[0];
     const topType = db.prepare(`
-      SELECT type_id, SUM(gross_pnl) AS gross FROM paper_position_exits GROUP BY type_id ORDER BY gross DESC LIMIT 1
-    `).get() as any;
+      SELECT e.type_id, SUM(e.gross_pnl) AS gross
+      FROM paper_position_exits e
+      JOIN paper_trading_orders o ON o.order_id = e.order_id
+      WHERE o.character_id = ? AND e.character_id = ?
+      GROUP BY e.type_id ORDER BY gross DESC LIMIT 1
+    `).get(characterId, characterId) as any;
     const topLocation = db.prepare(`
       SELECT p.location_id, SUM(e.gross_pnl) AS gross
       FROM paper_position_exits e
       JOIN paper_trading_positions p ON p.paper_id = e.paper_id
+      WHERE e.character_id = ? AND p.character_id = ?
       GROUP BY p.location_id ORDER BY gross DESC LIMIT 1
-    `).get() as any;
+    `).get(characterId, characterId) as any;
     const variance = db.prepare(`
-      SELECT opportunity_id, expected_net_profit, actual_simulated_pnl, prediction_variance
-      FROM trade_opportunities_log
-      WHERE actual_simulated_pnl IS NOT NULL AND prediction_variance IS NOT NULL
-      ORDER BY ABS(prediction_variance) DESC LIMIT 1
-    `).get() as any;
+      SELECT p.opportunity_id, p.expected_net_profit, p.actual_simulated_pnl, p.prediction_variance
+      FROM trade_opportunities_log p
+      WHERE p.actual_simulated_pnl IS NOT NULL AND p.prediction_variance IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM paper_trading_orders owner
+          WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?
+        )
+      ORDER BY ABS(p.prediction_variance) DESC LIMIT 1
+    `).get(characterId) as any;
 
     const riskFlags: string[] = [];
     if (sampleStatus === 'INSUFFICIENT_SAMPLE') riskFlags.push('INSUFFICIENT_SAMPLE');
@@ -410,10 +434,16 @@ export class PerformanceAnalytics {
     if (Math.abs(reconciledActual - reconciledExpected) >= 0.05) riskFlags.push('LEDGER_DISCREPANCY');
     if (Number(orderStats?.partial || 0) > 0) riskFlags.push('PARTIAL_FILLS_PRESENT');
     if (Number(orderStats?.unfilled_qty || 0) > 0) riskFlags.push('UNFILLED_ORDERS_PRESENT');
-    if (db.prepare("SELECT COUNT(*) AS n FROM trade_opportunities_log WHERE opportunity_expires_at IS NOT NULL AND opportunity_expires_at < datetime('now')").get() as any) {
-      const expired = db.prepare("SELECT COUNT(*) AS n FROM trade_opportunities_log WHERE opportunity_expires_at IS NOT NULL AND opportunity_expires_at < datetime('now')").get() as any;
-      if (Number(expired?.n || 0) > 0) riskFlags.push('EXPIRED_OPPORTUNITIES_PRESENT');
-    }
+    const expired = db.prepare(`
+      SELECT COUNT(*) AS n FROM trade_opportunities_log p
+      WHERE p.opportunity_expires_at IS NOT NULL
+        AND p.opportunity_expires_at < datetime('now')
+        AND EXISTS (
+          SELECT 1 FROM paper_trading_orders owner
+          WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?
+        )
+    `).get(characterId) as any;
+    if (Number(expired?.n || 0) > 0) riskFlags.push('EXPIRED_OPPORTUNITIES_PRESENT');
 
     return {
       characterId: String(characterId),
@@ -477,7 +507,7 @@ export class PerformanceAnalytics {
    * Causal-order audit for Paper Trading and persisted backtests.
    * This function only reads timestamps; it never generates expected returns.
    */
-  public static auditTemporalIntegrity(db: Db): TemporalAuditResult {
+  public static auditTemporalIntegrity(db: Db, characterId?: number): TemporalAuditResult {
     const violations: string[] = [];
     let checked = 0;
     const timestamp = (value: unknown): number | null => {
@@ -491,7 +521,8 @@ export class PerformanceAnalytics {
       SELECT f.fill_id, f.filled_at, o.created_at, o.submitted_at
       FROM paper_fills f
       JOIN paper_trading_orders o ON o.order_id = f.order_id
-    `).all() as any[];
+      ${characterId == null ? '' : 'WHERE o.character_id = ?'}
+    `).all(...(characterId == null ? [] : [characterId])) as any[];
     for (const row of fills) {
       checked += 1;
       const submittedAt = timestamp(row.submitted_at || row.created_at);
@@ -505,7 +536,8 @@ export class PerformanceAnalytics {
       SELECT o.order_id, o.created_at, p.detected_at, p.buy_snapshot_timestamp, p.sell_snapshot_timestamp
       FROM paper_trading_orders o
       JOIN trade_opportunities_log p ON p.opportunity_id = o.opportunity_id
-    `).all() as any[];
+      ${characterId == null ? '' : 'WHERE o.character_id = ?'}
+    `).all(...(characterId == null ? [] : [characterId])) as any[];
     for (const row of linkedOrders) {
       checked += 1;
       const detectedAt = timestamp(row.detected_at);
@@ -521,7 +553,9 @@ export class PerformanceAnalytics {
       }
     }
 
-    const backtests = db.prepare('SELECT run_id, metrics_json FROM backtest_runs').all() as any[];
+    const backtests = characterId == null
+      ? db.prepare('SELECT run_id, metrics_json FROM backtest_runs').all() as any[]
+      : [];
     for (const run of backtests) {
       checked += 1;
       try {

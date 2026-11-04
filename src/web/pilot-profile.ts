@@ -118,7 +118,7 @@ export async function loadWebPilotProfile(
         ? {
             typeId: shipTypeId,
             typeName: lookupName(db, 'sde_types', 'type_id', shipTypeId),
-            name: boundedString(shipData?.['ship_name']),
+            name: decodeDisplayString(shipData?.['ship_name']),
           }
         : null,
       skills: skillsResult.enabled && skillsResult.result.ok
@@ -226,6 +226,18 @@ function normalizeScopes(scopes: string[]): string {
   return JSON.stringify([...new Set(scopes)].sort());
 }
 
+function decodeDisplayString(value: unknown): string | null {
+  const text = boundedString(value);
+  if (!text) return null;
+  const quote = text[1];
+  if ((text[0] !== 'u' && text[0] !== 'U') || (quote !== "'" && quote !== '"') || text[text.length - 1] !== quote) return text;
+  const body = text.slice(2, -1);
+  if (!/\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8}/.test(body)) return text;
+  return body.replace(/\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})/g, (match, short, long) => {
+    const code = Number.parseInt(short || long, 16);
+    return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match;
+  });
+}
 function boundedString(value: unknown, maxLength = 200): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();

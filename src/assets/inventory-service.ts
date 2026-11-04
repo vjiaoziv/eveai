@@ -1,4 +1,5 @@
 import type { Db } from '../db/sqlite.js';
+import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
 
 /**
  * P9.2.3 inventory classification, filtering and local tags.
@@ -116,15 +117,11 @@ const SORT_COLUMNS: Record<string, string> = {
   type: 'a.type_id',
 };
 
-function clampLimit(value: unknown, fallback: number, max: number): number {
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
-}
 
 export class RealInventoryService {
   static list(db: Db, query: InventoryQuery): { rows: InventoryRow[]; total: number; limit: number; offset: number } {
-    const limit = clampLimit(query.limit, 100, 500);
-    const offset = Math.max(0, Number(query.offset) || 0);
+    const limit = clampPositiveInteger(query.limit, 100, 500);
+    const offset = clampNonNegativeInteger(query.offset);
     const where: string[] = ['a.character_id = ?'];
     const params: unknown[] = [query.characterId];
 

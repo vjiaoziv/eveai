@@ -65,4 +65,25 @@ describe('web pilot profile', () => {
     const result = await loadWebPilotProfile(db, { userId: 1, chatId: -2_000_000_000, notificationCapability: 'web' });
     expect(result).toEqual({ profile: null, stale: true });
   });
+
+  it('decodes a Python-style unicode ship name for display without changing ordinary names', async () => {
+    callEsiOperationMock.mockImplementation(async (_db: unknown, operation: string) => {
+      if (operation === 'get_characters_character_id_ship') {
+        return { ok: true, data: { ship_type_id: 17715, ship_name: "u'\\u5f25\\u6d31\\u7c73\\u987f\\u7ea7 - JIEAOZVI'" } };
+      }
+      const data: Record<string, unknown> = {
+        get_characters_character_id: { name: 'Test Pilot', corporation_id: 77, alliance_id: 88, birthday: '2020-01-01T00:00:00Z', security_status: 1.2 },
+        get_characters_character_id_online: { online: true },
+        get_characters_character_id_location: { solar_system_id: 30000142 },
+        get_characters_character_id_skills: { total_sp: 12_345_678 },
+        get_characters_character_id_skillqueue: [],
+        get_characters_character_id_wallet: 987_654.32,
+        get_corporations_corporation_id: { name: 'Corp', ticker: 'CRP' },
+        get_alliances_alliance_id: { name: 'Alliance', ticker: 'ALLY' },
+      };
+      return { ok: true, data: data[operation] };
+    });
+    const result = await loadWebPilotProfile(db, { userId: 1, chatId: -2_000_000_000, notificationCapability: 'web' });
+    expect(result.profile?.ship?.name).toBe('弥洱米顿级 - JIEAOZVI');
+  });
 });

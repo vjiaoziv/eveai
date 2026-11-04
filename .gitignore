@@ -34,3 +34,9 @@ output/
 
 # Local audit scratch artifacts
 docs/audit/*/_work/
+# Narrow exception: sanitized visual evidence for this audit only
+!docs/audit/project-audit-20261103/
+!docs/audit/project-audit-20261103/evidence/
+!docs/audit/project-audit-20261103/evidence/*.png
+!docs/audit/project-audit-20261103/evidence/*.jpg
+!docs/audit/project-audit-20261103/evidence/*.jpeg

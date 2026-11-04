@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
+import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
 
 /**
  * P9.2.5 immutable snapshot history and observed-change queries.
@@ -30,11 +31,6 @@ export type SnapshotQuery = {
   offset?: number;
 };
 
-function clampLimit(value: unknown, fallback: number, max: number): number {
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
-}
-
 function isoDate(value: string | undefined, endOfDay = false): string | null {
   if (!value || !value.trim()) return null;
   const trimmed = value.trim();
@@ -61,8 +57,8 @@ function changeLabel(changeType: string): string {
 
 export class RealAssetHistoryService {
   static listSnapshots(db: Db, query: SnapshotQuery): { rows: any[]; total: number; limit: number; offset: number } {
-    const limit = clampLimit(query.limit, 50, 200);
-    const offset = Math.max(0, Number(query.offset) || 0);
+    const limit = clampPositiveInteger(query.limit, 50, 200);
+    const offset = clampNonNegativeInteger(query.offset);
     const where = ['character_id = ?'];
     const params: unknown[] = [query.characterId];
     if (query.status) {
@@ -96,8 +92,8 @@ export class RealAssetHistoryService {
   }
 
   static listChanges(db: Db, query: HistoryChangeQuery): { rows: any[]; total: number; limit: number; offset: number } {
-    const limit = clampLimit(query.limit, 100, 500);
-    const offset = Math.max(0, Number(query.offset) || 0);
+    const limit = clampPositiveInteger(query.limit, 100, 500);
+    const offset = clampNonNegativeInteger(query.offset);
     const where = ['c.character_id = ?'];
     const params: unknown[] = [query.characterId];
     if (query.changeType) {
@@ -194,7 +190,7 @@ export class RealAssetHistoryService {
       WHERE character_id = ? AND status = 'COMPLETED'
       ORDER BY COALESCE(completed_at, started_at) ASC, snapshot_id ASC
       LIMIT ?
-    `).all(characterId, clampLimit(limit, 100, 500)) as any[];
+    `).all(characterId, clampPositiveInteger(limit, 100, 500)) as any[];
     let previous: any = null;
     return rows.map((row) => {
       const enriched = {

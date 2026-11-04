@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
 import type { Db } from '../db/sqlite.js';
 import type { UserContext } from '../auth/user-resolver.js';
 import { callEsiOperation } from '../eve/esi-client.js';
@@ -210,8 +211,8 @@ export class P9RealTradeService {
       where.push('source = ?');
       params.push(filters.source);
     }
-    const limit = Math.max(1, Math.min(500, filters.limit || 100));
-    const offset = Math.max(0, filters.offset || 0);
+    const limit = clampPositiveInteger(filters.limit, 100, 500);
+    const offset = clampNonNegativeInteger(filters.offset);
     const sql = where.join(' AND ');
     const total = Number((db.prepare(`SELECT COUNT(*) AS n FROM p9_real_trades WHERE ${sql}`).get(...params) as any)?.n || 0);
     const rows = db.prepare(`

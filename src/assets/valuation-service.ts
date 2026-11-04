@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
+import { clampPositiveInteger } from '../util/query-bounds.js';
 import { DataCenter } from '../trading/data-center.js';
 import { FeeEngine, ALPHA_DEFAULT_SKILLS, FEE_MODEL_VERSION } from '../trading/fee-engine.js';
 import type { FeeContext, OrderBookLevel } from '../trading/types.js';
@@ -389,7 +390,7 @@ export class RealValuationService {
       SELECT * FROM real_asset_valuations
       WHERE character_id = ?
       ORDER BY created_at DESC LIMIT ?
-    `).all(characterId, Math.max(1, Math.min(200, limit)));
+    `).all(characterId, clampPositiveInteger(limit, 20, 200));
   }
 
   static getRun(db: Db, characterId: number, valuationId: string): { header: any; items: any[] } | null {

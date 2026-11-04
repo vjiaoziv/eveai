@@ -121,6 +121,25 @@ describe('DELETE /api/web/map/route', () => {
 });
 
 describe('POST /api/web/map/route keeps a good line when it cannot plan a new one', () => {
+  it('rejects in-game autopilot writes before any route mutation', async () => {
+    const session = browserSession();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/web/map/route',
+      headers: { origin: ORIGIN, cookie: session.cookie, 'x-csrf-token': session.csrf },
+      payload: {
+        origin: 30000001,
+        destination: 30000002,
+        mode: 'shortest',
+        risk: 0,
+        setAutopilot: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(405);
+    expect(response.json().error).toContain('read-only phase');
+  });
+
   it('does not wipe the drawn route when the destination is unroutable', async () => {
     const session = browserSession();
     const chatId = laneOf();

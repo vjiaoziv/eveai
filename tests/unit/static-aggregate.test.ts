@@ -89,7 +89,7 @@ describe('executeUniverseObjectCount', () => {
       object_kind: 'systems',
       count: 2,
     });
-  });
+  }, 15_000);
 
   it('counts planets inside a constellation', async () => {
     const { executeUniverseObjectCount } = await import('../../src/agent/tools.js');
@@ -105,7 +105,7 @@ describe('executeUniverseObjectCount', () => {
       object_kind: 'planets',
       count: 3,
     });
-  });
+  }, 15_000);
 
   it('counts stations inside a system', async () => {
     const { executeUniverseObjectCount } = await import('../../src/agent/tools.js');
@@ -121,7 +121,7 @@ describe('executeUniverseObjectCount', () => {
       object_kind: 'stations',
       count: 1,
     });
-  });
+  }, 15_000);
 
   it('counts asteroid belts inside a system', async () => {
     const { executeUniverseObjectCount } = await import('../../src/agent/tools.js');

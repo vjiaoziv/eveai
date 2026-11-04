@@ -92,8 +92,11 @@ export class DraftSystem {
     draftId: string,
     newStatus: 'approved' | 'rejected' | 'expired' | 'audit_revoked',
     reason?: string,
+    characterId?: number,
   ): boolean {
-    const existing = db.prepare('SELECT status FROM trade_drafts WHERE draft_id = ?').get(draftId) as { status: string } | undefined;
+    const existing = characterId == null
+      ? db.prepare('SELECT status FROM trade_drafts WHERE draft_id = ?').get(draftId) as { status: string } | undefined
+      : db.prepare('SELECT status FROM trade_drafts WHERE draft_id = ? AND character_id = ?').get(draftId, characterId) as { status: string } | undefined;
     if (!existing) return false;
 
     // Security & Audit Invariant: an audit-revoked draft cannot be re-approved or altered
@@ -101,11 +104,17 @@ export class DraftSystem {
       throw new Error(`【安全阻断】草案 ${draftId} 已被第二轮独立审计永久撤销 (audit_revoked)，禁止重新审批或变更状态！`);
     }
 
-    const res = db.prepare(`
-      UPDATE trade_drafts 
-      SET status = ?, revoked_reason = COALESCE(?, revoked_reason) 
-      WHERE draft_id = ?
-    `).run(newStatus, reason || null, draftId);
+    const res = characterId == null
+      ? db.prepare(`
+          UPDATE trade_drafts
+          SET status = ?, revoked_reason = COALESCE(?, revoked_reason)
+          WHERE draft_id = ?
+        `).run(newStatus, reason || null, draftId)
+      : db.prepare(`
+          UPDATE trade_drafts
+          SET status = ?, revoked_reason = COALESCE(?, revoked_reason)
+          WHERE draft_id = ? AND character_id = ?
+        `).run(newStatus, reason || null, draftId, characterId);
 
     return res.changes > 0;
   }
@@ -117,8 +126,9 @@ export class DraftSystem {
     db: Db,
     draftId: string,
     revocationReason: string,
+    characterId?: number,
   ): boolean {
-    return this.updateStatus(db, draftId, 'audit_revoked', revocationReason);
+    return this.updateStatus(db, draftId, 'audit_revoked', revocationReason, characterId);
   }
 
   /**
@@ -134,11 +144,14 @@ export class DraftSystem {
       actualQuantity: number;
       actualFees: number;
       notes?: string;
+      characterId?: number;
     },
   ): boolean {
-    const { draftId, actualBuyPrice, actualSellPrice, actualQuantity, actualFees, notes } = params;
+    const { draftId, actualBuyPrice, actualSellPrice, actualQuantity, actualFees, notes, characterId } = params;
 
-    const existing = db.prepare('SELECT status, character_id, type_id FROM trade_drafts WHERE draft_id = ?').get(draftId) as any;
+    const existing = characterId == null
+      ? db.prepare('SELECT status, character_id, type_id FROM trade_drafts WHERE draft_id = ?').get(draftId) as any
+      : db.prepare('SELECT status, character_id, type_id FROM trade_drafts WHERE draft_id = ? AND character_id = ?').get(draftId, characterId) as any;
     if (!existing) return false;
 
     if (existing.status === 'audit_revoked') {
@@ -151,15 +164,25 @@ export class DraftSystem {
 
     const actualProfit = (actualSellPrice - actualBuyPrice) * actualQuantity - actualFees;
 
-    const res = db.prepare(`
-      UPDATE trade_drafts SET
-        status = 'executed_manually',
-        executed_at = datetime('now'),
-        actual_buy_price = ?,
-        actual_sell_price = ?,
-        actual_profit = ?
-      WHERE draft_id = ?
-    `).run(actualBuyPrice, actualSellPrice, actualProfit, draftId);
+    const res = characterId == null
+      ? db.prepare(`
+          UPDATE trade_drafts SET
+            status = 'executed_manually',
+            executed_at = datetime('now'),
+            actual_buy_price = ?,
+            actual_sell_price = ?,
+            actual_profit = ?
+          WHERE draft_id = ?
+        `).run(actualBuyPrice, actualSellPrice, actualProfit, draftId)
+      : db.prepare(`
+          UPDATE trade_drafts SET
+            status = 'executed_manually',
+            executed_at = datetime('now'),
+            actual_buy_price = ?,
+            actual_sell_price = ?,
+            actual_profit = ?
+          WHERE draft_id = ? AND character_id = ?
+        `).run(actualBuyPrice, actualSellPrice, actualProfit, draftId, characterId);
 
     if (res.changes === 0) return false;
 

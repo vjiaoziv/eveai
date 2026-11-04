@@ -118,6 +118,24 @@ describe('asset snapshot history (P9.2.5)', () => {
     expect(all.rows.map((row) => row.snapshot_id)).toContain('SNAP-H-FAIL');
   });
 
+  it('clamps pagination inputs before they reach SQLite', () => {
+    const snapshots = RealAssetHistoryService.listSnapshots(db as Db, {
+      characterId: CHARACTER_ID,
+      limit: Number.NaN,
+      offset: Number.POSITIVE_INFINITY,
+    });
+    expect(snapshots.limit).toBe(50);
+    expect(snapshots.offset).toBe(0);
+
+    const changes = RealAssetHistoryService.listChanges(db as Db, {
+      characterId: CHARACTER_ID,
+      limit: 1,
+      offset: 2_000_000,
+    });
+    expect(changes.limit).toBe(1);
+    expect(changes.offset).toBe(1_000_000);
+  });
+
   it('lists persisted observed changes with Chinese labels and strict character scoping', () => {
     const result = RealAssetHistoryService.listChanges(db as Db, {
       characterId: CHARACTER_ID,

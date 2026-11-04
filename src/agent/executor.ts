@@ -2976,6 +2976,13 @@ async function executeToolCallUnadmitted(
   }
 
   if (name === 'plan_route') {
+    if (args.set_autopilot === true) {
+      return {
+        ok: false,
+        blocked: true,
+        error: 'In-game autopilot writes are blocked in this read-only phase. Call plan_route with set_autopilot=false or null for read-only route planning.',
+      };
+    }
     const routeArgs: PlanRouteArgs = {
       origin: String(args.origin ?? ''),
       destination: String(args.destination ?? ''),

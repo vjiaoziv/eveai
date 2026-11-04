@@ -194,6 +194,24 @@ export class PaperTradingSystem {
   /**
    * Get or create a dedicated virtual paper trading account for a character
    */
+  public static getAccount(db: Db, characterId: number): PaperAccount | null {
+    const row = db.prepare('SELECT * FROM paper_trading_accounts WHERE account_id = ?')
+      .get('PT-ACC-' + characterId) as any;
+    if (!row) return null;
+    return {
+      accountId: row.account_id,
+      characterId: row.character_id,
+      initialCash: row.initial_cash,
+      availableCash: row.available_cash,
+      escrowLocked: row.escrow_locked,
+      totalRealizedPnl: row.total_realized_pnl,
+      totalFeesPaid: row.total_fees_paid,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
   public static getOrCreateAccount(
     db: Db,
     characterId: number,
@@ -967,7 +985,8 @@ export class PaperTradingSystem {
     totalRealizedPnl: number;
     strategyBreakdown: PaperStrategyPerformance[];
   } {
-    const account = this.getOrCreateAccount(db, characterId);
+    const account = this.getAccount(db, characterId);
+    if (!account) throw new Error(`Paper Trading account not found for character ${characterId}`);
 
     const rows = db.prepare(`
       SELECT p.*, t.name as en_name, COALESCE(json_extract(t.data_json, '$.name.zh'), t.name) as zh_name
@@ -1047,9 +1066,25 @@ export class PaperTradingSystem {
     ];
 
     const strategyBreakdown: PaperStrategyPerformance[] = strategyTypes.map(st => {
-      const oppCount = db.prepare('SELECT count(*) as cnt FROM trade_opportunities_log WHERE strategy_type = ?').get(st) as any;
-      const vetoCount = db.prepare("SELECT count(*) as cnt FROM trade_opportunities_log WHERE strategy_type = ? AND outcome_status = 'vetoed'").get(st) as any;
-      const execCount = db.prepare("SELECT count(*) as cnt FROM paper_trading_orders WHERE strategy_type = ? AND status = 'filled'").get(st) as any;
+      const oppCount = db.prepare(`
+        SELECT COUNT(DISTINCT p.opportunity_id) AS cnt
+        FROM trade_opportunities_log p
+        WHERE p.strategy_type = ?
+          AND EXISTS (
+            SELECT 1 FROM paper_trading_orders owner
+            WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?
+          )
+      `).get(st, characterId) as any;
+      const vetoCount = db.prepare(`
+        SELECT COUNT(DISTINCT p.opportunity_id) AS cnt
+        FROM trade_opportunities_log p
+        WHERE p.strategy_type = ? AND p.outcome_status = 'vetoed'
+          AND EXISTS (
+            SELECT 1 FROM paper_trading_orders owner
+            WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?
+          )
+      `).get(st, characterId) as any;
+      const execCount = db.prepare("SELECT count(*) as cnt FROM paper_trading_orders WHERE strategy_type = ? AND character_id = ? AND status = 'filled'").get(st, characterId) as any;
 
       return {
         strategy: st,

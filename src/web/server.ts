@@ -88,14 +88,27 @@ export function registerWebErrorHandler(app: FastifyInstance): void {
   });
 }
 
-async function registerWebApp(app: FastifyInstance): Promise<void> {
-  const distRoot = resolve(process.cwd(), 'web/dist');
+export async function registerWebApp(
+  app: FastifyInstance,
+  distRoot = resolve(process.cwd(), 'web/dist'),
+): Promise<void> {
   if (!existsSync(resolve(distRoot, 'index.html'))) return;
+
+  // The SPA shell is mutable and must only be served through sendApp with
+  // no-cache. @fastify/static's `index: false` disables directory-index
+  // resolution but still serves a direct /index.html request, so reject that
+  // exact path before the wildcard asset handler.
+  app.route({
+    method: ['GET', 'HEAD'],
+    url: '/web-assets/index.html',
+    handler: async (_request, reply) => reply.code(404).send(),
+  });
 
   await app.register(fastifyStatic, {
     root: distRoot,
     prefix: '/web-assets/',
-    wildcard: false,
+    wildcard: true,
+    index: false,
     // Vite emits content-hashed filenames under assets/ — safe to cache
     // forever; a new build changes the URL, never the content behind it.
     // Fonts are versioned by path the same way. index.html is NOT served

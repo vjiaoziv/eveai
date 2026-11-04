@@ -172,7 +172,7 @@ describe('agent tools', () => {
     expect(await getToolPolicy('kill_watch')).toBe('write');
     expect(await getToolPolicy('plan_route', { set_autopilot: false })).toBe('read');
     expect(await getToolPolicy('plan_route', { set_autopilot: null })).toBe('read');
-    expect(await getToolPolicy('plan_route', { set_autopilot: true })).toBe('ui');
+    expect(await getToolPolicy('plan_route', { set_autopilot: true })).toBe('read');
     expect(await getToolPolicy('kill_search')).toBe('read');
     expect(await getToolPolicy('doctrine_detect')).toBe('read');
     expect(await getToolPolicy('market_history_summary')).toBe('read');

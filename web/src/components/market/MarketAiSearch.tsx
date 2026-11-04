@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { webApi } from '../../api';
+import { ApiRequestError, webApi } from '../../api';
 import { useI18n } from '../../i18n';
 import type { MarketAiSearchResult } from '../../types';
 import { formatIsk } from './format';
@@ -47,7 +47,9 @@ export function MarketAiSearch({ regionId, csrfToken, onSelect }: Props) {
     } catch (reason) {
       if (current !== generation.current) return;
       setResults(null);
-      setError(reason instanceof Error ? reason.message : t('requestFailed'));
+      setError(reason instanceof ApiRequestError
+        ? reason.status >= 500 ? t('marketAiUnavailable') : reason.status === 429 ? t('requestTooMany') : t('requestFailed')
+        : reason instanceof Error ? reason.message : t('requestFailed'));
     } finally {
       if (current === generation.current) setSearching(false);
     }

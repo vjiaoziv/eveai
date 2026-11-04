@@ -10,6 +10,7 @@ import type { P93RecordInput } from '../../src/trading/p9-3-types.js';
 
 const CHARACTER = 930001;
 let db: Db;
+let sequence = 5000;
 
 function input(overrides: Partial<P93RecordInput> & { ledgerKey: string; direction: 'BUY' | 'SELL' | 'NONE' }): P93RecordInput {
   return {
@@ -26,15 +27,28 @@ function input(overrides: Partial<P93RecordInput> & { ledgerKey: string; directi
 }
 
 function verifyRecord(recordId: string, sourceRef = recordId): void {
+  const record = P93LedgerService.get(db, CHARACTER, recordId);
+  if (!record) throw new Error('test record missing');
+  if (record.recordState === 'DRAFT') P93LedgerService.submitDraft(db, CHARACTER, recordId);
+  const transactionId = sequence++;
   const evidence = P93LedgerService.addEvidence(db, CHARACTER, {
-    evidenceType: 'USER_ATTACHMENT',
-    sourceSystem: 'TEST',
-    sourceRef,
-    capturedAt: '2026-01-01T00:00:00.000Z',
-    payloadHash: `hash-${sourceRef}`,
-    summary: '测试证据',
+    evidenceType: 'ESI_WALLET_LOG',
+    sourceSystem: 'ESI_WALLET_TRANSACTIONS',
+    sourceRef: `esi-wallet:${transactionId}`,
+    capturedAt: record.tradeTime,
+    payloadHash: `hash-${sourceRef}-${transactionId}`,
+    summary: '隔离测试用 ESI 钱包证据',
     initialStatus: 'VERIFIED',
-  });
+    metadata: {
+      transactionId,
+      typeId: record.typeId,
+      quantity: record.quantity,
+      unitPrice: record.unitPrice,
+      isBuy: record.direction === 'BUY',
+      locationId: record.locationId,
+      tradeTime: record.tradeTime,
+    },
+  }, 'ESI_SYNC');
   P93LedgerService.linkEvidence(db, CHARACTER, recordId, evidence.evidenceId, 'PRIMARY', 'HIGH');
   P93LedgerService.verify(db, CHARACTER, recordId);
 }
@@ -56,7 +70,7 @@ describe('P9.3 real accounting ledger', () => {
     expect(replay.recordId).toBe(first.recordId);
     expect(first.verificationStatus).toBe('USER_REPORTED');
 
-    expect(() => P93LedgerService.verify(db, CHARACTER, first.recordId)).toThrow(/缺少已核实证据/);
+    expect(() => P93LedgerService.verify(db, CHARACTER, first.recordId)).toThrow(/ESI 钱包证据/);
     P93FifoService.recalculate(db, CHARACTER);
     expect(db.prepare('SELECT COUNT(*) AS n FROM real_fifo_lots WHERE character_id = ?').get(CHARACTER)).toEqual({ n: 0 });
 

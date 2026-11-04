@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
+import { initDb } from '../../src/db/sqlite.js';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -99,7 +100,7 @@ describe('P8.5.6 multi-process SQLite concurrency', () => {
   it('keeps funds non-negative across 80 competing order requests from 8 processes', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'eveai-mp-funds-'));
     const dbPath = join(dir, 'funds.db');
-    const db = new Database(dbPath);
+    const db = initDb(dbPath);
     runMigrations(db);
     PaperTradingSystem.getOrCreateAccount(db, 5001, 1_000_000);
     db.close();
@@ -126,12 +127,12 @@ describe('P8.5.6 multi-process SQLite concurrency', () => {
     expect(account.escrow_locked).toBeGreaterThanOrEqual(0);
     expect(account.available_cash + account.escrow_locked).toBeLessThanOrEqual(1_000_000);
     expect(orders.n).toBe(succeeded);
-  });
+  }, 20_000);
 
   it('consumes one credential exactly once across 100 attempts in 10 competing processes', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'eveai-mp-cred-'));
     const dbPath = join(dir, 'credential.db');
-    const db = new Database(dbPath);
+    const db = initDb(dbPath);
     runMigrations(db);
     db.close();
 

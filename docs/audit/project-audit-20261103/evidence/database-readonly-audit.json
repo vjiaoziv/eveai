@@ -1,0 +1,69 @@
+{
+  "captured_at_local": "2026-11-04T04:20:30+08:00",
+  "mode": "read_only",
+  "repository": "/home/ubuntu/projects/eveai",
+  "branch": "deploy/eve-ai-agent",
+  "head": "7e65027c65fcfd0b152a73da7ea4db5351f4e7cf",
+  "database": "data/eve-agent.db",
+  "quick_check": "ok",
+  "foreign_key_violations": 0,
+  "counts": {
+    "real_trade_records": 0,
+    "real_trade_events": 0,
+    "real_trade_evidence": 0,
+    "real_trade_evidence_links": 0,
+    "real_fifo_lots": 0,
+    "real_fifo_consumptions": 0,
+    "real_asset_snapshots": 3,
+    "real_asset_snapshot_items": 1501,
+    "real_asset_valuations": 1,
+    "real_reconciliation_runs": 1,
+    "real_reconciliation_items": 406,
+    "real_reconciliation_cases": 0,
+    "paper_trading_accounts": 1,
+    "paper_trading_orders": 0,
+    "paper_fills": 0,
+    "character_wallet": 1,
+    "character_wallet_journal": 0,
+    "character_orders": 0,
+    "real_esi_transaction_sync": 0,
+    "trade_drafts": 1,
+    "market_orders": 1561888
+  },
+  "latest_asset_snapshot": {
+    "snapshot_id": "ASSETSNAP-1793722807909-682d8d55",
+    "status": "COMPLETED",
+    "completed_at": "2026-11-03T16:20:07.909Z",
+    "total_items": 513,
+    "total_unique_types": 378,
+    "total_locations": 18,
+    "total_quantity": 176856
+  },
+  "latest_asset_valuation": {
+    "valuation_id": "ASSETVAL-1793694160630-ddaddae0",
+    "snapshot_id": "ASSETSNAP-1793694005368-cec3e526",
+    "status": "COMPLETED",
+    "items_valued": 336,
+    "items_unknown": 43,
+    "freshness_vs_latest_snapshot": "STALE"
+  },
+  "latest_reconciliation": {
+    "run_id": "RECON-8a50f5be-f4db-4d52-9cec-49836adc3c8d",
+    "snapshot_id": "ASSETSNAP-1793694005368-cec3e526",
+    "status": "RECONCILIATION_REQUIRED",
+    "created_at": "2026-11-03 11:45:37",
+    "item_count": 406,
+    "status_counts": {
+      "UNKNOWN_SOURCE": 406
+    },
+    "duplicate_source_references": 0,
+    "asset_change_review_cases": 0
+  },
+  "schema_observations": {
+    "real_financial_trigger_count": 21,
+    "unique_fifo_consumption_index": "idx_real_fifo_consumptions_unique_consumption",
+    "real_trade_records_are_append_only_by_trigger": true,
+    "verified_records_cannot_downgrade_by_trigger": true,
+    "single_esi_evidence_support_limited_by_trigger": true
+  }
+}

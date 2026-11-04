@@ -322,6 +322,40 @@ describe('runMigrations', () => {
       "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_market_alert_events_pending'",
     ).get()).toBeDefined();
   });
+
+  it('adds strategy_type to a legacy paper positions table without replacing existing rows', () => {
+    db.exec('DROP TABLE IF EXISTS paper_trading_positions');
+    db.exec(`
+      CREATE TABLE paper_trading_positions (
+        paper_id     TEXT PRIMARY KEY,
+        character_id INTEGER NOT NULL,
+        type_id      INTEGER NOT NULL,
+        location_id  INTEGER NOT NULL,
+        quantity     INTEGER NOT NULL,
+        cost_price   REAL NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'holding',
+        created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+        sold_at      TEXT,
+        sold_price   REAL,
+        realized_pnl REAL
+      )
+    `);
+    db.prepare(`
+      INSERT INTO paper_trading_positions
+        (paper_id, character_id, type_id, location_id, quantity, cost_price)
+      VALUES ('legacy-position', 7, 34, 60003760, 10, 5)
+    `).run();
+
+    runMigrations(db);
+    runMigrations(db);
+
+    const columns = (db.prepare('PRAGMA table_info(paper_trading_positions)').all() as Array<{ name: string }>)
+      .map((column) => column.name);
+    expect(columns).toContain('strategy_type');
+    expect(db.prepare(
+      "SELECT strategy_type FROM paper_trading_positions WHERE paper_id = 'legacy-position'",
+    ).get()).toEqual({ strategy_type: 'regional_hauling' });
+  });
 });
 
 describe('sde_types market columns migration', () => {

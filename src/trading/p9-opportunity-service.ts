@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
 import type { Db } from '../db/sqlite.js';
 import { DataCenter } from './data-center.js';
 import { FeeEngine, ALPHA_DEFAULT_SKILLS, FEE_MODEL_VERSION } from './fee-engine.js';
@@ -805,8 +806,8 @@ export class P9OpportunityService {
       updated: 'updated_at DESC',
     };
     const orderBy = sortMap[filters.sort || 'net'] || sortMap.net;
-    const limit = Math.max(1, Math.min(500, filters.limit || 100));
-    const offset = Math.max(0, filters.offset || 0);
+    const limit = clampPositiveInteger(filters.limit, 100, 500);
+    const offset = clampNonNegativeInteger(filters.offset);
     const whereSql = where.join(' AND ');
     const total = Number((db.prepare(`SELECT COUNT(*) AS n FROM p9_real_opportunities WHERE ${whereSql}`).get(...params) as any)?.n || 0);
     const rows = db.prepare(`

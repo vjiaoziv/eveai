@@ -11,6 +11,14 @@ type OverviewCharacter = {
   latestSnapshot: Record<string, unknown> | null;
   lastJob: Record<string, unknown> | null;
   latestValuation: Record<string, unknown> | null;
+  valuationFreshness?: {
+    status: 'CURRENT' | 'STALE' | 'NO_VALUATION' | 'NO_LATEST_SNAPSHOT' | string;
+    latestSnapshotId: string | null;
+    valuationSnapshotId: string | null;
+    valuationItems: number;
+    currentAssetItems: number;
+    message: string;
+  };
   syncEnabled: boolean;
   bucketSummary: Array<{ bucket: string; labelZh: string; items: number; quantity: number }>;
 };
@@ -252,6 +260,10 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
   const liquidationTotal = valuationTotals.reduce((sum, row) => sum + Number(row?.bidLiquidationNet ?? 0), 0);
   const unknownItems = valuationTotals.reduce((sum, row) =>
     sum + Number(row?.items ?? 0) - Number(row?.itemsWithReference ?? 0), 0);
+  const staleValuationCharacters = characters.filter((row) => row.valuationFreshness?.status === 'STALE');
+  const staleValuationSummary = staleValuationCharacters
+    .map((row) => String(row.characterName || row.characterId) + ': ' + String(row.valuationFreshness?.message ?? ''))
+    .join('；');
   const selectedCharacter = characters.find((row) => row.characterId === characterId) ?? null;
   const valuationRows = valuationDetail?.items ?? [];
   const unknownValuation = valuationRows.filter((row: any) =>
@@ -274,7 +286,7 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
 
   return (
     <section className="market-screen">
-      <header className="market-screen__topbar">
+      <header className="market-screen__topbar asset-screen__topbar">
         <button className="icon-button" type="button" onClick={onMenu} aria-label="打开菜单"><MenuIcon size={20} /></button>
         <h1><ChartIcon size={18} /> EVEAI 真实资产工作台</h1>
         <span className="status-pill">ESI GET-only · 真实资产写入禁用</span>
@@ -314,11 +326,16 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
             <div className="metric-card"><span>最近同步</span><strong>{dateTime(latestSync)}</strong></div>
             <div className="metric-card"><span>资产物品行</span><strong>{num(overview.totals.items, 0)}</strong></div>
             <div className="metric-card"><span>完整快照角色</span><strong>{overview.totals.withSnapshot} / {overview.totals.characters}</strong></div>
-            <div className="metric-card"><span>市场参考估值</span><strong>{num(marketReferenceTotal, 2)}</strong></div>
-            <div className="metric-card"><span>买单深度可执行估值</span><strong>{num(liquidationTotal, 2)}</strong></div>
-            <div className="metric-card"><span>未知估值物品</span><strong>{num(unknownItems, 0)}</strong></div>
+            <div className="metric-card"><span>市场参考估值（估值快照）</span><strong>{num(marketReferenceTotal, 2)}</strong></div>
+            <div className="metric-card"><span>买单深度可执行估值（估值快照）</span><strong>{num(liquidationTotal, 2)}</strong></div>
+            <div className="metric-card"><span>估值快照未知物品</span><strong>{num(unknownItems, 0)}</strong></div>
             <div className="metric-card"><span>真实交易执行</span><strong>DISABLED</strong></div>
           </div>
+          {staleValuationCharacters.length > 0 ? (
+            <div className="support-note support-note--warn" role="status">
+              <strong>估值快照已过期：</strong>{staleValuationSummary}市场参考和可执行估值不代表当前库存总值，请对最新资产快照重新执行估值。
+            </div>
+          ) : null}
           <p>不同估值口径分别展示，禁止相加形成虚假总资产。{overview.valuationNote}</p>
           <h2>分类库存（当前集）</h2>
           <div className="data-table-wrap">
@@ -677,13 +694,18 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
               {' '}费用假设：{(valuations?.latestTotals?.feeAssumptions as any)?.note || '默认 Alpha 技能 / NPC 空间站'}
             </span>
           </div>
+          {selectedCharacter?.valuationFreshness?.status === 'STALE' ? (
+            <div className="support-note support-note--warn" role="status">
+              <strong>当前估值不是最新资产快照：</strong>{selectedCharacter.valuationFreshness.message} 请使用“执行最新快照估值”生成新结果。
+            </div>
+          ) : null}
           <div className="metric-grid">
-            <div className="metric-card"><span>市场参考估值</span><strong>{num(valuations?.latestTotals?.marketReferenceValue, 2)}</strong></div>
-            <div className="metric-card"><span>买单深度可执行估值</span><strong>{num(valuations?.latestTotals?.bidLiquidationNet, 2)}</strong></div>
+            <div className="metric-card"><span>市场参考估值（估值快照）</span><strong>{num(valuations?.latestTotals?.marketReferenceValue, 2)}</strong></div>
+            <div className="metric-card"><span>买单深度可执行估值（估值快照）</span><strong>{num(valuations?.latestTotals?.bidLiquidationNet, 2)}</strong></div>
             <div className="metric-card"><span>卖单重置成本</span><strong>{num(valuations?.latestTotals?.askReplacementGross, 2)}</strong></div>
             <div className="metric-card"><span>历史成本</span><strong>UNKNOWN</strong></div>
             <div className="metric-card"><span>估值覆盖率</span><strong>{valuationCoverage === null ? 'N/A' : `${valuationCoverage.toFixed(2)}%`}</strong></div>
-            <div className="metric-card"><span>未知估值物品</span><strong>{num(unknownValuation, 0)}</strong></div>
+            <div className="metric-card"><span>估值快照未知物品</span><strong>{num(unknownValuation, 0)}</strong></div>
             <div className="metric-card"><span>深度不足物品</span><strong>{num(depthShortfall, 0)}</strong></div>
             <div className="metric-card"><span>估值物品总数</span><strong>{num(valuationRows.length, 0)}</strong></div>
           </div>

@@ -3,7 +3,15 @@ import { webApi } from '../api';
 import { ChartIcon, MenuIcon } from '../icons';
 import { P93AccountingPanel } from './P93AccountingPanel';
 
-type P9Tab = 'overview' | 'accounting' | 'opportunities' | 'plans' | 'assets' | 'inventory' | 'trades' | 'performance' | 'risk' | 'settings';
+export type P9Tab = 'overview' | 'accounting' | 'opportunities' | 'plans' | 'assets' | 'inventory' | 'trades' | 'performance' | 'risk' | 'settings';
+
+export const P9_TAB_LABELS: Partial<Record<P9Tab, string>> = {
+  overview: '交易总览',
+  accounting: 'REAL 账本',
+  opportunities: '机会中心',
+  plans: '交易方案',
+  settings: '系统设置',
+};
 
 type P9Overview = {
   portfolio: {
@@ -274,13 +282,6 @@ export function P9TradingScreen({ onMenu, csrfToken }: Props) {
       ? <div className="screen-error" role="alert">{error}</div>
       : <div className="app-loading" aria-label="加载真实交易工作台"><span /><span /><span /></div>;
   }
-  const tabLabels: Partial<Record<P9Tab, string>> = {
-    accounting: 'REAL 账本',
-    opportunities: '机会中心',
-    plans: '交易方案',
-    settings: '系统设置',
-  };
-
   return (
     <section className="market-screen">
       <header className="market-screen__topbar">
@@ -292,9 +293,9 @@ export function P9TradingScreen({ onMenu, csrfToken }: Props) {
       </header>
 
       <nav className="market-tabs" aria-label="真实交易工作台视图">
-        {(Object.keys(tabLabels) as P9Tab[]).map((key) => (
+        {(Object.keys(P9_TAB_LABELS) as P9Tab[]).map((key) => (
           <button key={key} type="button" className={tab === key ? 'market-tab market-tab--active' : 'market-tab'} onClick={() => setTab(key)}>
-            {tabLabels[key]}
+            {P9_TAB_LABELS[key]}
           </button>
         ))}
       </nav>

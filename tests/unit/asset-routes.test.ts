@@ -144,4 +144,22 @@ describe('asset API security (P9.2)', () => {
     expect(payload.characters[0].characterId).toBe(OWN_CHARACTER);
     expect(payload.realTradingExecutionDisabled).toBe(true);
   });
+
+  it('reports a stale valuation when it is bound to an older snapshot', async () => {
+    db.prepare("INSERT INTO real_asset_snapshots (snapshot_id, character_id, job_id, started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash, source, is_latest) VALUES ('SNAP-OLD', ?, NULL, datetime('now', '-2 hours'), datetime('now', '-2 hours'), 'COMPLETED', 1, 1, 1, 1, 'hash-old', 'esi_character_assets', 0)").run(OWN_CHARACTER);
+    db.prepare("INSERT INTO real_asset_snapshots (snapshot_id, character_id, job_id, started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash, source, is_latest) VALUES ('SNAP-NEW', ?, NULL, datetime('now', '-1 hour'), datetime('now', '-1 hour'), 'COMPLETED', 1, 1, 1, 1, 'hash-new', 'esi_character_assets', 1)").run(OWN_CHARACTER);
+    db.prepare("INSERT INTO real_asset_valuations (valuation_id, character_id, snapshot_id, hub_location_id, hub_region_id, market_snapshot_at, fee_model_version, status, created_at, completed_at, items_valued, items_unknown) VALUES ('VAL-OLD', ?, 'SNAP-OLD', 60003760, 10000002, datetime('now'), 'fee-v1', 'COMPLETED', datetime('now', '-30 minutes'), datetime('now', '-30 minutes'), 1, 0)").run(OWN_CHARACTER);
+    db.prepare("INSERT INTO real_asset_valuation_items (valuation_id, item_id, type_id, quantity, market_reference_value) VALUES ('VAL-OLD', 1, 34, 1, 123.45)").run();
+
+    const response = await app.inject({ method: 'GET', url: '/api/web/assets/overview', headers: readHeaders() });
+    expect(response.statusCode).toBe(200);
+    const row = response.json().characters[0];
+    expect(row.valuationFreshness).toMatchObject({
+      status: 'STALE',
+      latestSnapshotId: 'SNAP-NEW',
+      valuationSnapshotId: 'SNAP-OLD',
+      valuationItems: 1,
+    });
+    expect(row.latestValuation.marketReferenceValue).toBe(123.45);
+  });
 });

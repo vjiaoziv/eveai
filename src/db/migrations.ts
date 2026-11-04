@@ -107,6 +107,7 @@ export function runMigrations(db: Db): void {
     addColumnIfMissing(db, 'paper_trading_orders', 'fee_reserved', 'REAL NOT NULL DEFAULT 0');
     addColumnIfMissing(db, 'paper_trading_orders', 'escrow_migration_status', "TEXT NOT NULL DEFAULT 'legacy_pending'");
     addColumnIfMissing(db, 'paper_trading_orders', 'snapshot_id', 'TEXT');
+
     db.exec(`
       CREATE TABLE IF NOT EXISTS paper_fills (
         fill_id           TEXT PRIMARY KEY,
@@ -837,10 +838,45 @@ export function runMigrations(db: Db): void {
         SELECT RAISE(ABORT, '交易记录必须先登记再经证据核实');
       END;
 
+      DROP TRIGGER IF EXISTS real_trade_records_draft_cannot_verify;
+      CREATE TRIGGER real_trade_records_draft_cannot_verify
+      BEFORE UPDATE OF record_state, verification_status ON real_trade_records
+      WHEN OLD.record_state = 'DRAFT'
+        AND (NEW.record_state = 'VERIFIED' OR NEW.verification_status = 'VERIFIED')
+      BEGIN
+        SELECT RAISE(ABORT, '草稿必须先提交为待核实申报，再经证据核实');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_records_verified_no_downgrade;
+      CREATE TRIGGER real_trade_records_verified_no_downgrade
+      BEFORE UPDATE OF record_state, verification_status ON real_trade_records
+      WHEN (OLD.record_state = 'VERIFIED' OR OLD.verification_status = 'VERIFIED')
+        AND NOT (
+          NEW.record_state = OLD.record_state
+          AND NEW.verification_status = OLD.verification_status
+        )
+        AND NOT (
+          NEW.record_state IN ('REVERSED', 'CORRECTED')
+          AND NEW.verification_status = 'VERIFIED'
+        )
+      BEGIN
+        SELECT RAISE(ABORT, '已核实交易不可降级；请使用冲正或更正流程');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_records_fee_adjustment_cannot_verify;
+      CREATE TRIGGER real_trade_records_fee_adjustment_cannot_verify
+      BEFORE UPDATE OF record_state, verification_status ON real_trade_records
+      WHEN NEW.trade_kind = 'FEE_ADJUSTMENT'
+        AND (NEW.record_state = 'VERIFIED' OR NEW.verification_status = 'VERIFIED')
+      BEGIN
+        SELECT RAISE(ABORT, 'FEE_ADJUSTMENT 尚未定义安全的费用归属口径，不能核实');
+      END;
+
       DROP TRIGGER IF EXISTS real_trade_records_verify_matching_evidence;
       CREATE TRIGGER real_trade_records_verify_matching_evidence
       BEFORE UPDATE OF record_state, verification_status ON real_trade_records
-      WHEN NEW.record_state = 'VERIFIED' AND NEW.verification_status = 'VERIFIED'
+      WHEN OLD.record_state = 'ACTIVE'
+        AND NEW.record_state = 'VERIFIED' AND NEW.verification_status = 'VERIFIED'
         AND (OLD.record_state <> 'VERIFIED' OR OLD.verification_status <> 'VERIFIED')
         AND NOT EXISTS (
           SELECT 1
@@ -851,17 +887,43 @@ export function runMigrations(db: Db): void {
             AND e.status = 'VERIFIED'
             AND l.relation IN ('PRIMARY', 'CORROBORATING')
             AND (
-              e.evidence_type IN ('USER_ATTACHMENT', 'USER_CONFIRMATION')
-              OR (
-                e.evidence_type = 'ESI_WALLET_LOG'
+              (
+                NEW.trade_kind IN ('BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL')
+                AND e.evidence_type = 'ESI_WALLET_LOG'
                 AND e.source_system = 'ESI_WALLET_TRANSACTIONS'
-                AND NEW.source_type = 'ESI_WALLET_TRANSACTION'
-                AND e.source_ref = NEW.source_ref
+                AND e.source_ref IS NOT NULL
+                AND (NEW.source_ref IS NULL OR NEW.source_ref NOT LIKE 'esi-wallet:%' OR e.source_ref = NEW.source_ref)
+                AND json_valid(e.metadata_json)
+                AND CAST(json_extract(e.metadata_json, '$.transactionId') AS TEXT) = substr(e.source_ref, 12)
+                AND CAST(json_extract(e.metadata_json, '$.typeId') AS INTEGER) = NEW.type_id
+                AND CAST(json_extract(e.metadata_json, '$.quantity') AS INTEGER) = NEW.quantity
+                AND ABS(CAST(json_extract(e.metadata_json, '$.unitPrice') AS REAL) - NEW.unit_price) <= 0.005
+                AND CAST(json_extract(e.metadata_json, '$.locationId') AS INTEGER) = NEW.location_id
+                AND (
+                  (json_extract(e.metadata_json, '$.isBuy') = 1 AND NEW.direction = 'BUY')
+                  OR (json_extract(e.metadata_json, '$.isBuy') = 0 AND NEW.direction = 'SELL')
+                )
+                AND datetime(json_extract(e.metadata_json, '$.tradeTime')) = datetime(NEW.trade_time)
+              )
+              OR (
+                NEW.trade_kind = 'INVENTORY_TRANSFER'
+                AND e.evidence_type IN ('ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE')
+                AND (NEW.source_ref IS NULL OR NEW.source_ref NOT LIKE 'asset-%' OR e.source_ref = NEW.source_ref)
+                AND json_valid(e.metadata_json)
+                AND CAST(json_extract(e.metadata_json, '$.typeId') AS INTEGER) = NEW.type_id
+                AND CAST(json_extract(e.metadata_json, '$.quantity') AS INTEGER) = NEW.quantity
+                AND CAST(json_extract(e.metadata_json, '$.fromLocationId') AS INTEGER) = NEW.from_location_id
+                AND CAST(json_extract(e.metadata_json, '$.toLocationId') AS INTEGER) = NEW.to_location_id
+                AND datetime(COALESCE(json_extract(e.metadata_json, '$.tradeTime'), json_extract(e.metadata_json, '$.capturedAt'))) = datetime(NEW.trade_time)
+              )
+              OR (
+                NEW.trade_kind IN ('FEE_ADJUSTMENT', 'COST_ADJUSTMENT')
+                AND e.evidence_type IN ('USER_ATTACHMENT', 'USER_CONFIRMATION')
               )
             )
         )
       BEGIN
-        SELECT RAISE(ABORT, '缺少与交易事实匹配的已核实证据');
+        SELECT RAISE(ABORT, '缺少与交易事实完全匹配的已核实 ESI 钱包证据');
       END;
 
       DROP TRIGGER IF EXISTS real_trade_records_verify_conflicts;
@@ -947,6 +1009,38 @@ export function runMigrations(db: Db): void {
         IN ('VERIFIED', 'REVERSED', 'CORRECTED')
       BEGIN
         SELECT RAISE(ABORT, '证据关系必须同角色存在，且已核实或终态记录不可新增证据关系');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_evidence_links_single_esi_support_insert;
+      CREATE TRIGGER real_trade_evidence_links_single_esi_support_insert
+      BEFORE INSERT ON real_trade_evidence_links
+      WHEN NEW.relation IN ('PRIMARY', 'CORROBORATING')
+        AND EXISTS (
+          SELECT 1
+          FROM real_trade_evidence e
+          JOIN real_trade_evidence_links l ON l.evidence_id = e.evidence_id
+          WHERE e.evidence_id = NEW.evidence_id
+            AND l.record_id <> NEW.record_id
+            AND e.evidence_type IN ('ESI_WALLET_LOG', 'ESI_MARKET_ORDER', 'ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE')
+        )
+      BEGIN
+        SELECT RAISE(ABORT, '同一 ESI 证据不能支持多条交易记录');
+      END;
+
+      DROP TRIGGER IF EXISTS real_trade_evidence_links_single_esi_support_update;
+      CREATE TRIGGER real_trade_evidence_links_single_esi_support_update
+      BEFORE UPDATE OF evidence_id, record_id, relation ON real_trade_evidence_links
+      WHEN NEW.relation IN ('PRIMARY', 'CORROBORATING')
+        AND EXISTS (
+          SELECT 1
+          FROM real_trade_evidence e
+          JOIN real_trade_evidence_links l ON l.evidence_id = e.evidence_id
+          WHERE e.evidence_id = NEW.evidence_id
+            AND l.record_id <> NEW.record_id
+            AND e.evidence_type IN ('ESI_WALLET_LOG', 'ESI_MARKET_ORDER', 'ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE')
+        )
+      BEGIN
+        SELECT RAISE(ABORT, '同一 ESI 证据不能支持多条交易记录');
       END;
 
       DROP TRIGGER IF EXISTS real_trade_events_insert_valid_record;
@@ -1731,6 +1825,7 @@ function ensureWebAgentRequests(db: Db): void {
       ON consumed_pipeline_credentials(character_id, consumed_at);
   `);
 
+    addColumnIfMissing(db, 'paper_trading_positions', 'strategy_type', "TEXT NOT NULL DEFAULT 'regional_hauling'");
 }
 
 async function main(): Promise<void> {

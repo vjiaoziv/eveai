@@ -39,7 +39,7 @@
 
 ## 3. ESI 钱包交易接口能力
 
-**已通过代码验证；已通过隔离测试数据验证**
+**已通过隔离测试数据验证**
 
 - 使用 GET-only `get_characters_character_id_wallet_transactions`。
 - ESI 响应字段 `unit_price` 已正确映射。

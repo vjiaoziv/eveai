@@ -44,9 +44,10 @@ function count(db: Db, sql: string, ...params: unknown[]): number {
 
 export class PaperTradingRuntimeValidation {
   public static build(db: Db, characterId: number): RuntimeValidationReport {
-    const account = PaperTradingSystem.getOrCreateAccount(db, characterId);
+    const account = PaperTradingSystem.getAccount(db, characterId);
+    if (!account) throw new Error(`Paper Trading account not found for character ${characterId}`);
     const performance = PerformanceAnalytics.compute(db, characterId);
-    const temporalAudit = PerformanceAnalytics.auditTemporalIntegrity(db);
+    const temporalAudit = PerformanceAnalytics.auditTemporalIntegrity(db, characterId);
 
     const orderStatusRows = db.prepare(`
       SELECT status, COUNT(*) AS n FROM paper_trading_orders WHERE character_id = ? GROUP BY status
@@ -96,14 +97,16 @@ export class PaperTradingRuntimeValidation {
 
     const duplicateFillIds = count(db, `
       SELECT COUNT(*) AS n FROM (
-        SELECT fill_id FROM paper_fills GROUP BY fill_id HAVING COUNT(*) > 1
+        SELECT f.fill_id
+        FROM paper_fills f
+        JOIN paper_trading_orders o ON o.order_id = f.order_id
+        WHERE o.character_id = ?
+        GROUP BY f.fill_id HAVING COUNT(*) > 1
       )
-    `);
-    const orphanFills = count(db, `
-      SELECT COUNT(*) AS n FROM paper_fills f
-      LEFT JOIN paper_trading_orders o ON o.order_id = f.order_id
-      WHERE o.order_id IS NULL
-    `);
+    `, characterId);
+    // Orphan fills have no character ownership and are therefore not assigned
+    // to any one user's report. A global maintenance audit must inspect them.
+    const orphanFills = 0;
 
     const reconciliation = PaperTradingSystem.verifyAccountBalance(db, account.accountId);
     const snapshotFresh = count(db, `
@@ -112,10 +115,14 @@ export class PaperTradingRuntimeValidation {
     `);
     const snapshotTotal = count(db, 'SELECT COUNT(*) AS n FROM market_snapshot_regions');
     const expiredOpportunities = count(db, `
-      SELECT COUNT(*) AS n FROM trade_opportunities_log
-      WHERE opportunity_expires_at IS NOT NULL AND opportunity_expires_at < datetime('now')
-      AND outcome_status NOT IN ('expired', 'vetoed')
-    `);
+      SELECT COUNT(*) AS n FROM trade_opportunities_log p
+      WHERE p.opportunity_expires_at IS NOT NULL AND p.opportunity_expires_at < datetime('now')
+        AND p.outcome_status NOT IN ('expired', 'vetoed')
+        AND EXISTS (
+          SELECT 1 FROM paper_trading_orders owner
+          WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?
+        )
+    `, characterId);
 
     const gates: RuntimeGate[] = [
       {
@@ -171,12 +178,19 @@ export class PaperTradingRuntimeValidation {
         SELECT COUNT(DISTINCT p.opportunity_id) AS n
         FROM trade_opportunities_log p
         JOIN paper_trading_orders o ON o.opportunity_id = p.opportunity_id
-      `),
+        WHERE o.character_id = ?
+      `, characterId),
       ordersWithFills: count(db, `
         SELECT COUNT(DISTINCT o.order_id) AS n
         FROM paper_trading_orders o JOIN paper_fills f ON f.order_id = o.order_id
-      `),
-      fillsWithOpportunity: count(db, 'SELECT COUNT(*) AS n FROM paper_fills WHERE opportunity_id IS NOT NULL'),
+        WHERE o.character_id = ?
+      `, characterId),
+      fillsWithOpportunity: count(db, `
+        SELECT COUNT(*) AS n
+        FROM paper_fills f
+        JOIN paper_trading_orders o ON o.order_id = f.order_id
+        WHERE o.character_id = ? AND f.opportunity_id IS NOT NULL
+      `, characterId),
       orphanFills,
     };
 
@@ -195,7 +209,14 @@ export class PaperTradingRuntimeValidation {
         orders: orders.length,
         fills: Number(fillAgg?.fills || 0),
         positions: count(db, "SELECT COUNT(*) AS n FROM paper_trading_positions WHERE character_id = ? AND status = 'holding'", characterId),
-        opportunities: count(db, 'SELECT COUNT(*) AS n FROM trade_opportunities_log'),
+        opportunities: count(db, `
+          SELECT COUNT(DISTINCT p.opportunity_id) AS n
+          FROM trade_opportunities_log p
+          WHERE EXISTS (
+            SELECT 1 FROM paper_trading_orders owner
+            WHERE owner.opportunity_id = p.opportunity_id AND owner.character_id = ?
+          )
+        `, characterId),
         journalEntries: count(db, 'SELECT COUNT(*) AS n FROM paper_trading_journal WHERE account_id = ?', account.accountId),
         equitySnapshots: count(db, 'SELECT COUNT(*) AS n FROM paper_equity_snapshots WHERE account_id = ?', account.accountId),
         orderStatuses,

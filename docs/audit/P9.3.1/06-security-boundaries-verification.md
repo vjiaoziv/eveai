@@ -11,7 +11,7 @@
 
 ## 2. REAL/PAPER 隔离
 
-**已通过代码验证；已通过隔离测试数据验证**
+**已通过隔离测试数据验证**
 
 - `real_trade_records.is_paper` 强制为 0。
 - FIFO 重算显式过滤 `is_paper = 0`，并只接受 VERIFIED + VERIFIED。
@@ -22,7 +22,7 @@
 
 ## 3. AI 写入阻断
 
-**已通过代码验证；已通过隔离测试数据验证**
+**已通过隔离测试数据验证**
 
 - `assertHumanActor` 改为允许列表：只接受 `user` 或 `user:<id>`。
 - assistant、bot、llm、system、scheduler、esi-wallet-sync 等身份均被拒绝。
@@ -36,7 +36,7 @@
 
 ## 4. ESI GET-only
 
-**已通过代码验证；已通过隔离测试数据验证**
+**已通过隔离测试数据验证**
 
 - ESI 操作策略要求 `method = GET` 且 `toolPolicy = read`。
 - HTTP 派发边界对非 GET 和非 ESI origin 再次拒绝。

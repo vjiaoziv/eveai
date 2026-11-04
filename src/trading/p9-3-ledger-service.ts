@@ -25,6 +25,89 @@ function canonical(value: unknown): string {
   return JSON.stringify(stableValue(value));
 }
 
+
+type EvidenceTrust = 'USER' | 'ESI_SYNC';
+
+function evidenceMetadata(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function metadataValue(metadata: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) {
+    if (metadata[key] !== undefined && metadata[key] !== null) return metadata[key];
+  }
+  return undefined;
+}
+
+function metadataInteger(metadata: Record<string, unknown>, ...keys: string[]): number | null {
+  const value = Number(metadataValue(metadata, ...keys));
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function metadataMoney(metadata: Record<string, unknown>, ...keys: string[]): number | null {
+  const value = Number(metadataValue(metadata, ...keys));
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function metadataTime(metadata: Record<string, unknown>, ...keys: string[]): string | null {
+  const value = metadataValue(metadata, ...keys);
+  if (typeof value !== 'string') return null;
+  try { return normalizeIso(value); } catch { return null; }
+}
+
+
+function esiAssetEvidenceMismatch(record: any, evidence: any): string | null {
+  if (!['ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE'].includes(evidence.evidence_type)) return '证据类型不是资产快照或资产变化。';
+  if (record.trade_kind !== 'INVENTORY_TRANSFER') return '资产快照或资产变化不能作为买卖成交的核实证据。';
+  if (record.source_ref && String(record.source_ref).startsWith('asset-') && record.source_ref !== evidence.source_ref) return '来源引用不一致。';
+  const metadata = evidenceMetadata(evidence.metadata_json || '{}');
+  if (metadataInteger(metadata, 'typeId', 'type_id') !== Number(record.type_id)) return '物品类型不一致。';
+  if (metadataInteger(metadata, 'quantity') !== Number(record.quantity)) return '数量不一致。';
+  if (metadataInteger(metadata, 'fromLocationId', 'from_location_id') !== Number(record.from_location_id)) return '调出地点不一致。';
+  if (metadataInteger(metadata, 'toLocationId', 'to_location_id') !== Number(record.to_location_id)) return '调入地点不一致。';
+  const tradeTime = metadataTime(metadata, 'tradeTime', 'trade_time', 'capturedAt', 'captured_at');
+  if (!tradeTime) return '资产证据缺少有效时间。';
+  try {
+    if (tradeTime !== normalizeIso(String(record.trade_time))) return '交易时间不一致。';
+  } catch {
+    return '交易时间无效。';
+  }
+  return null;
+}
+
+function esiWalletEvidenceMismatch(record: any, evidence: any): string | null {
+  if (evidence.evidence_type !== 'ESI_WALLET_LOG') return '证据类型不是 ESI 钱包日志。';
+  if (evidence.source_system !== 'ESI_WALLET_TRANSACTIONS') return '证据来源系统不是 ESI 钱包成交。';
+  if (!evidence.source_ref) return 'ESI 钱包证据缺少 source_ref。';
+  if (record.source_ref && String(record.source_ref).startsWith('esi-wallet:') && record.source_ref !== evidence.source_ref) return '来源引用不一致。';
+  const metadata = evidenceMetadata(evidence.metadata_json || '{}');
+  const sourceMatch = /^esi-wallet:(\d+)$/.exec(String(evidence.source_ref));
+  if (!sourceMatch) return 'ESI 钱包证据 source_ref 格式无效。';
+  const sourceTransactionId = Number(sourceMatch[1]);
+  const transactionId = metadataInteger(metadata, 'transactionId', 'transaction_id');
+  if (transactionId === null || transactionId !== sourceTransactionId) return '交易编号不一致。';
+  if (metadataInteger(metadata, 'typeId', 'type_id') !== Number(record.type_id)) return '物品类型不一致。';
+  if (metadataInteger(metadata, 'quantity') !== Number(record.quantity)) return '数量不一致。';
+  const unitPrice = metadataMoney(metadata, 'unitPrice', 'unit_price');
+  if (unitPrice === null || Math.round(unitPrice * 100) !== Math.round(Number(record.unit_price) * 100)) return '单价不一致。';
+  if (metadataInteger(metadata, 'locationId', 'location_id') !== Number(record.location_id)) return '地点不一致。';
+  const isBuy = metadataValue(metadata, 'isBuy', 'is_buy');
+  if (typeof isBuy !== 'boolean' || isBuy !== (record.direction === 'BUY')) return '买卖方向不一致。';
+  const tradeTime = metadataTime(metadata, 'tradeTime', 'trade_time', 'date');
+  if (!tradeTime) return 'ESI 钱包证据缺少有效交易时间。';
+  try {
+    if (tradeTime !== normalizeIso(String(record.trade_time))) return '交易时间不一致。';
+  } catch {
+    return '交易时间无效。';
+  }
+  return null;
+}
+
 function recordHash(input: P93RecordInput): string {
   const fees = (input.fees ?? [])
     .map((fee) => ({
@@ -61,6 +144,12 @@ function recordHash(input: P93RecordInput): string {
 
 function validateInput(input: P93RecordInput): void {
   if (!input.ledgerKey || input.ledgerKey.length > 180) throw new Error('ledgerKey 必填且长度受控。');
+  if (input.tradeKind === 'REVERSAL') {
+    throw new Error('REVERSAL 只能通过 P93LedgerService.reverse() 生成，不能作为普通交易登记。');
+  }
+  if (input.tradeKind === 'FEE_ADJUSTMENT') {
+    throw new Error('FEE_ADJUSTMENT 尚未定义安全的费用归属口径，已暂停登记。');
+  }
   if (!input.sourceType || input.sourceType.length > 80) throw new Error('sourceType 必填且长度受控。');
   if (!Number.isSafeInteger(input.typeId) || input.typeId <= 0) throw new Error('typeId 无效。');
   if (!Number.isSafeInteger(input.locationId) || input.locationId <= 0) throw new Error('locationId 无效。');
@@ -87,8 +176,7 @@ function validateInput(input: P93RecordInput): void {
     && input.direction !== 'BUY' && input.direction !== 'SELL') {
     throw new Error('部分成交/多批次成交必须指定买入或卖出方向。');
   }
-  if ((input.tradeKind === 'FEE_ADJUSTMENT' || input.tradeKind === 'COST_ADJUSTMENT'
-    || input.tradeKind === 'INVENTORY_TRANSFER' || input.tradeKind === 'REVERSAL')
+  if ((input.tradeKind === 'COST_ADJUSTMENT' || input.tradeKind === 'INVENTORY_TRANSFER')
     && input.direction !== 'NONE') {
     throw new Error('非买卖交易方向必须为 NONE。');
   }
@@ -192,8 +280,14 @@ export class P93LedgerService {
     if (filters.sourceType) { where.push('source_type = ?'); params.push(filters.sourceType); }
     if (filters.typeId) { where.push('type_id = ?'); params.push(filters.typeId); }
     const sql = where.join(' AND ');
-    const limit = Math.max(1, Math.min(500, filters.limit ?? 100));
-    const offset = Math.max(0, filters.offset ?? 0);
+    const requestedLimit = filters.limit;
+    const requestedOffset = filters.offset;
+    const limit = Number.isSafeInteger(requestedLimit) && (requestedLimit ?? 0) > 0
+      ? Math.min(requestedLimit as number, 500)
+      : 100;
+    const offset = Number.isSafeInteger(requestedOffset) && (requestedOffset ?? -1) >= 0
+      ? Math.min(requestedOffset as number, 1_000_000)
+      : 0;
     const total = Number((db.prepare(`SELECT COUNT(*) AS n FROM real_trade_records WHERE ${sql}`).get(...params) as any)?.n || 0);
     const rows = db.prepare(`
       SELECT * FROM real_trade_records WHERE ${sql}
@@ -209,6 +303,9 @@ export class P93LedgerService {
 
   static recordManual(db: Db, characterId: number, input: P93RecordInput, actor = 'user'): P93Record {
     assertHumanActor(actor);
+    if (input.sourceType.startsWith('ESI_') || input.sourceType === 'ASSET_CHANGE') {
+      throw new Error('公共人工登记不能伪造 ESI 或资产变化证据来源；请使用对应同步或证据流程。');
+    }
     return this.upsert(db, characterId, input, 'USER', actor);
   }
 
@@ -219,7 +316,12 @@ export class P93LedgerService {
     actorType: ActorType,
     actorId: string | null,
   ): P93Record {
-    if (actorType === 'USER') assertHumanActor(actorId ?? '');
+    if (actorType === 'USER') {
+      assertHumanActor(actorId ?? '');
+      if (input.sourceType.startsWith('ESI_') || input.sourceType === 'ASSET_CHANGE') {
+        throw new Error('公共人工登记不能伪造 ESI 或资产变化证据来源；请使用对应同步或证据流程。');
+      }
+    }
     validateInput(input);
     const hash = recordHash(input);
     if (input.sourceHash && input.sourceHash !== hash) {
@@ -325,6 +427,9 @@ export class P93LedgerService {
       fromLocationId: patch.fromLocationId ?? existing.from_location_id ?? undefined,
       toLocationId: patch.toLocationId ?? existing.to_location_id ?? undefined,
     };
+    if (next.sourceType.startsWith('ESI_') || next.sourceType === 'ASSET_CHANGE') {
+      throw new Error('草稿更新不能伪造 ESI 或资产变化证据来源；请使用对应同步或证据流程。');
+    }
     validateInput(next);
     const nextHash = recordHash(next);
     const tx = db.transaction(() => {
@@ -358,14 +463,50 @@ export class P93LedgerService {
     return this.get(db, characterId, recordId)!;
   }
 
-  static addEvidence(db: Db, characterId: number, input: P93EvidenceInput): P93Evidence {
-    if (!['ESI_WALLET_LOG', 'ESI_MARKET_ORDER', 'ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE', 'USER_ATTACHMENT', 'USER_CONFIRMATION'].includes(input.evidenceType)) {
-      throw new Error('证据类型无效。');
+  static submitDraft(db: Db, characterId: number, recordId: string, actor = 'user'): P93Record {
+    assertHumanActor(actor);
+    const existing = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND record_id = ?').get(characterId, recordId) as any;
+    if (!existing) throw new Error('交易记录不存在。');
+    if (existing.record_state === 'ACTIVE' && existing.verification_status === 'USER_REPORTED') {
+      return mapRecord(db, existing);
+    }
+    if (existing.record_state !== 'DRAFT') throw new Error('仅草稿可以提交为待核实申报。');
+    const tx = db.transaction(() => {
+      db.prepare(`
+        UPDATE real_trade_records
+        SET record_state = 'ACTIVE', verification_status = 'USER_REPORTED', updated_at = datetime('now')
+        WHERE record_id = ? AND character_id = ? AND record_state = 'DRAFT'
+      `).run(recordId, characterId);
+      insertEvent(db, characterId, recordId, 'draft_submitted', 'USER', actor, existing, {
+        recordState: 'ACTIVE', verificationStatus: 'USER_REPORTED',
+      });
+    });
+    tx();
+    return this.get(db, characterId, recordId)!;
+  }
+
+  static addEvidence(
+    db: Db,
+    characterId: number,
+    input: P93EvidenceInput,
+    trust: EvidenceTrust = 'USER',
+  ): P93Evidence {
+    const userTypes = ['USER_ATTACHMENT', 'USER_CONFIRMATION'];
+    const syncTypes = ['ESI_WALLET_LOG', 'ESI_MARKET_ORDER', 'ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE'];
+    if (![...userTypes, ...syncTypes].includes(input.evidenceType)) throw new Error('证据类型无效。');
+    if (trust === 'USER' && !userTypes.includes(input.evidenceType)) {
+      throw new Error('公共接口只能登记用户附件或用户确认，不能伪造 ESI 证据。');
+    }
+    if (trust === 'ESI_SYNC' && !syncTypes.includes(input.evidenceType)) {
+      throw new Error('同步接口只能登记 ESI 或资产变化证据。');
     }
     if (!input.sourceSystem || input.sourceSystem.length > 80) throw new Error('证据来源系统必填且长度受控。');
     if (!input.payloadHash || input.payloadHash.length < 8 || input.payloadHash.length > 256) throw new Error('证据内容哈希无效。');
     const status = input.initialStatus ?? 'PENDING';
     if (!['VERIFIED', 'USER_REPORTED', 'PENDING', 'CONFLICT', 'REJECTED'].includes(status)) throw new Error('证据状态无效。');
+    if (trust === 'USER' && status === 'VERIFIED') {
+      throw new Error('用户证据必须经过单独的人工核实动作，不能直接登记为已核实。');
+    }
     const evidenceId = 'EVID-' + randomUUID();
     const sourceRef = input.sourceRef ?? null;
     const existing = sourceRef
@@ -374,19 +515,8 @@ export class P93LedgerService {
       : undefined;
     if (existing) {
       if (existing.payload_hash !== input.payloadHash) throw new Error('相同证据来源已登记不同内容。');
-      return {
-        evidenceId: existing.evidence_id,
-        characterId: existing.character_id,
-        evidenceType: existing.evidence_type,
-        sourceSystem: existing.source_system,
-        sourceRef: existing.source_ref || undefined,
-        capturedAt: existing.captured_at,
-        payloadHash: existing.payload_hash,
-        summary: existing.summary || undefined,
-        metadata: JSON.parse(existing.metadata_json || '{}'),
-        status: existing.status,
-        createdAt: existing.created_at,
-      };
+      if (existing.evidence_type !== input.evidenceType) throw new Error('相同证据来源已登记为不同证据类型。');
+      return this.getEvidence(db, characterId, existing.evidence_id)!;
     }
     db.prepare(`
       INSERT INTO real_trade_evidence
@@ -465,24 +595,34 @@ export class P93LedgerService {
       throw new Error('未知的 ESI 同步身份。');
     }
     const record = db.prepare(`
-      SELECT record_id, record_state, source_type, source_ref
+      SELECT record_id, record_state, trade_kind, direction, type_id, location_id, quantity, unit_price,
+             trade_time, source_type, source_ref, from_location_id, to_location_id
       FROM real_trade_records WHERE character_id = ? AND record_id = ?
     `).get(characterId, recordId) as any;
     const evidence = db.prepare(`
-      SELECT evidence_id, evidence_type, source_system, source_ref, status
+      SELECT evidence_id, evidence_type, source_system, source_ref, status, metadata_json
       FROM real_trade_evidence WHERE character_id = ? AND evidence_id = ?
     `).get(characterId, evidenceId) as any;
     if (!record || !evidence) throw new Error('交易或证据不存在。');
     if (['VERIFIED', 'REVERSED', 'CORRECTED'].includes(record.record_state)) {
       throw new Error('已核实或终态记录的证据关系不可原地变更；请使用更正或冲正。');
     }
-    if (
-      evidence.evidence_type === 'ESI_WALLET_LOG'
-      && ['PRIMARY', 'CORROBORATING'].includes(relation)
-      && record.source_type === 'ESI_WALLET_TRANSACTION'
-      && (!record.source_ref || evidence.source_ref !== record.source_ref)
-    ) {
-      throw new Error('ESI 钱包证据与交易来源引用不匹配，拒绝建立核实关系。');
+    if (evidence.evidence_type === 'ESI_WALLET_LOG' && ['PRIMARY', 'CORROBORATING'].includes(relation)) {
+      const mismatch = esiWalletEvidenceMismatch(record, evidence);
+      if (mismatch) throw new Error(`ESI 钱包证据与交易事实不匹配：${mismatch}`);
+    }
+    if (['ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE'].includes(evidence.evidence_type) && ['PRIMARY', 'CORROBORATING'].includes(relation)) {
+      const mismatch = esiAssetEvidenceMismatch(record, evidence);
+      if (mismatch) throw new Error(`资产证据与交易事实不匹配：${mismatch}`);
+    }
+    const esiSupportingEvidence = ['ESI_WALLET_LOG', 'ESI_MARKET_ORDER', 'ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE'].includes(evidence.evidence_type);
+    if (esiSupportingEvidence && ['PRIMARY', 'CORROBORATING'].includes(relation)) {
+      const reused = db.prepare(`
+        SELECT l.record_id FROM real_trade_evidence_links l
+        WHERE l.evidence_id = ? AND l.record_id <> ? AND l.relation IN ('PRIMARY', 'CORROBORATING')
+        LIMIT 1
+      `).get(evidenceId, recordId);
+      if (reused) throw new Error('同一 ESI 证据不能支持多条交易记录。');
     }
     const tx = db.transaction(() => {
       db.prepare(`
@@ -499,8 +639,15 @@ export class P93LedgerService {
     assertHumanActor(actor);
     const existing = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND record_id = ?').get(characterId, recordId) as any;
     if (!existing) throw new Error('交易记录不存在。');
+    if (existing.trade_kind === 'FEE_ADJUSTMENT') {
+      throw new Error('FEE_ADJUSTMENT 尚未定义安全的费用归属口径，不能核实。');
+    }
     if (existing.record_state === 'VERIFIED') return mapRecord(db, existing);
-    if (existing.record_state !== 'ACTIVE' && existing.record_state !== 'DRAFT') throw new Error('当前状态不可核实。');
+    if (existing.record_state !== 'ACTIVE') {
+      throw new Error(existing.record_state === 'DRAFT'
+        ? '草稿必须先提交为待核实申报，再关联证据并人工核实。'
+        : '当前状态不可核实。');
+    }
     const conflicting = db.prepare(`
       SELECT e.evidence_id FROM real_trade_evidence e
       JOIN real_trade_evidence_links l ON l.evidence_id = e.evidence_id
@@ -509,30 +656,54 @@ export class P93LedgerService {
       LIMIT 1
     `).get(characterId, recordId);
     if (conflicting) throw new Error('存在已核实或冲突证据，不能把交易提升为已核实。');
-    const verifiedEvidence = db.prepare(`
-      SELECT e.evidence_id FROM real_trade_evidence e
+    const linkedEvidence = db.prepare(`
+      SELECT e.evidence_id, e.evidence_type, e.source_system, e.source_ref, e.status, e.metadata_json
+      FROM real_trade_evidence e
       JOIN real_trade_evidence_links l ON l.evidence_id = e.evidence_id
       WHERE e.character_id = ? AND l.record_id = ?
         AND e.status = 'VERIFIED' AND l.relation IN ('PRIMARY', 'CORROBORATING')
-        AND (
-          e.evidence_type IN ('USER_ATTACHMENT', 'USER_CONFIRMATION')
-          OR (
-            e.evidence_type = 'ESI_WALLET_LOG'
-            AND e.source_system = 'ESI_WALLET_TRANSACTIONS'
-            AND ? = 'ESI_WALLET_TRANSACTION'
-            AND e.source_ref = ?
-          )
-        )
+    `).all(characterId, recordId) as any[];
+    const tradingKinds = ['BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL'];
+    let matchingEvidence: any;
+    if (tradingKinds.includes(existing.trade_kind)) {
+      matchingEvidence = linkedEvidence.find((item) => (
+        item.evidence_type === 'ESI_WALLET_LOG'
+        && item.source_system === 'ESI_WALLET_TRANSACTIONS'
+        && esiWalletEvidenceMismatch(existing, item) === null
+      ));
+    } else if (existing.trade_kind === 'INVENTORY_TRANSFER') {
+      matchingEvidence = linkedEvidence.find((item) => (
+        ['ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE'].includes(item.evidence_type)
+        && esiAssetEvidenceMismatch(existing, item) === null
+      ));
+    } else if (existing.trade_kind === 'FEE_ADJUSTMENT' || existing.trade_kind === 'COST_ADJUSTMENT') {
+      matchingEvidence = linkedEvidence.find((item) => ['USER_ATTACHMENT', 'USER_CONFIRMATION'].includes(item.evidence_type));
+    }
+    if (!matchingEvidence) {
+      const required = tradingKinds.includes(existing.trade_kind)
+        ? '完全匹配的已核实 ESI 钱包证据'
+        : existing.trade_kind === 'INVENTORY_TRANSFER'
+          ? '完全匹配的已核实资产快照或资产变化证据'
+          : '已核实的用户附件或确认';
+      throw new Error(`缺少与交易事实${required}，不能把用户申报提升为已核实。`);
+    }
+    const reusedEvidence = db.prepare(`
+      SELECT r.record_id
+      FROM real_trade_evidence_links l
+      JOIN real_trade_records r ON r.record_id = l.record_id AND r.character_id = ?
+      WHERE l.evidence_id = ? AND l.record_id <> ?
+        AND l.relation IN ('PRIMARY', 'CORROBORATING')
+        AND r.record_state = 'VERIFIED'
       LIMIT 1
-    `).get(characterId, recordId, existing.source_type, existing.source_ref ?? null);
-    if (!verifiedEvidence) throw new Error('缺少已核实证据或与交易事实匹配的已核实证据，不能把用户申报提升为已核实。');
+    `).get(characterId, matchingEvidence.evidence_id, recordId);
+    if (reusedEvidence) throw new Error('同一 ESI 证据已支持另一条已核实交易，不能重复核实。');
     const tx = db.transaction(() => {
       db.prepare(`
         UPDATE real_trade_records
         SET record_state = 'VERIFIED', verification_status = 'VERIFIED', verified_at = datetime('now'), updated_at = datetime('now')
         WHERE record_id = ? AND character_id = ?
       `).run(recordId, characterId);
-      insertEvent(db, characterId, recordId, 'record_verified', actorType, actor, existing, { verificationStatus: 'VERIFIED' }, reason);
+      insertEvent(db, characterId, recordId, 'record_verified', actorType, actor, existing, { verificationStatus: 'VERIFIED', evidenceId: matchingEvidence.evidence_id }, reason);
     });
     tx();
     return this.get(db, characterId, recordId)!;
@@ -550,6 +721,9 @@ export class P93LedgerService {
     const existing = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND record_id = ?').get(characterId, recordId) as any;
     if (!existing) throw new Error('交易记录不存在。');
     if (status === 'VERIFIED') return this.verify(db, characterId, recordId, actor, reason);
+    if (existing.record_state === 'VERIFIED' || existing.verification_status === 'VERIFIED') {
+      throw new Error('已核实交易不能降级；如需变更请使用冲正或更正流程。');
+    }
     if (existing.record_state === 'REJECTED' || existing.record_state === 'REVERSED' || existing.record_state === 'CORRECTED') {
       throw new Error('终态记录不能重新进入待核实状态。');
     }
@@ -599,6 +773,9 @@ export class P93LedgerService {
     if (!original) throw new Error('原交易记录不存在。');
     if (original.record_state === 'DRAFT') throw new Error('草稿请直接编辑，不需要更正流程。');
     if (['REJECTED', 'REVERSED', 'CORRECTED'].includes(original.record_state)) throw new Error('终态记录不能再更正。');
+    if (input.ledgerKey === original.ledger_key) {
+      throw new Error('更正必须使用新的 ledgerKey，不能复用原交易的 ledgerKey。');
+    }
     const tx = db.transaction(() => {
       const corrected = this.upsert(db, characterId, { ...input, draft: true }, 'USER', actor);
       db.prepare(`

@@ -93,6 +93,7 @@ describe('buildDeveloperPrompt', () => {
     expect(prompt).toContain('Prefer batches over loops');
     expect(prompt).toContain('For requests that only ask to answer, explain, compare, diagnose, review, or plan');
     expect(prompt).toContain('perform it without asking again');
+    expect(prompt).not.toContain('setting requested autopilot waypoints');
     expect(prompt).toContain('Require confirmation before deletes');
     expect(prompt.match(/<authorization_boundaries>/g)).toHaveLength(1);
 

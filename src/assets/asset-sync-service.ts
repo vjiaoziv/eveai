@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
+import { clampPositiveInteger } from '../util/query-bounds.js';
 import { config } from '../config.js';
 import { callEsiOperation } from '../eve/esi-client.js';
 import { getEveCapabilities } from '../eve/capabilities.js';
@@ -102,7 +103,7 @@ function mapJob(row: any): AssetSyncJob {
 
 export class RealAssetSyncService {
   static listJobs(db: Db, characterId: number, limit = 50): AssetSyncJob[] {
-    const capped = Math.max(1, Math.min(500, limit));
+    const capped = clampPositiveInteger(limit, 50, 500);
     return (db.prepare(`
       SELECT * FROM real_asset_sync_jobs WHERE character_id = ?
       ORDER BY started_at DESC LIMIT ?

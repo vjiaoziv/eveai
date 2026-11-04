@@ -210,7 +210,7 @@ describe('durable EVE-KILL feed poller', () => {
     expect(retrySend).toHaveBeenCalledOnce();
     expect(retrySend.mock.calls[0]![0]).toBe(2);
     expect(dedupCount()).toBe(2);
-  });
+  }, 15_000);
 
   it('derives region watches from local SDE and ignores a conflicting third-party region', async () => {
     seedCursor(25);

@@ -25,7 +25,6 @@ import {
 } from '../eve/map-graph.js';
 import { buildBubble } from '../eve-map/bubble.js';
 import { getUniverseIntel, getUniverseStatic, getUniverseWormholes } from '../eve-map/universe.js';
-import { setAutopilotRoute } from '../eve/route-planner.js';
 import {
   applyCharacterNames,
   getKillIndexStatus,
@@ -86,7 +85,6 @@ import { buildWebClientIpKey } from './web-session.js';
 import type { WebSession } from './web-session.js';
 
 const LOCATION_SCOPE = 'esi-location.read_location.v1';
-const WAYPOINT_SCOPE = 'esi-ui.write_waypoint.v1';
 
 const HEARTBEAT_MS = 15_000;
 /** How long an in-bubble kill waits for company before the radar re-judges. */
@@ -140,17 +138,6 @@ function readAskFocus(
     name: row.name,
     security: typeof row.security === 'number' ? Math.round(row.security * 10) / 10 : null,
   };
-}
-
-/**
- * The identity token a long mutation pins itself to. Bumped by every character
- * switch and every unlink, so comparing it before and during a multi-call write
- * catches a pilot swapping characters mid-flight.
- */
-function readActiveCharacterVersion(db: Db, userId: number): number {
-  const row = db.prepare('SELECT active_character_version FROM users WHERE user_id = ?')
-    .get(userId) as { active_character_version: number } | undefined;
-  return row?.active_character_version ?? 0;
 }
 
 export function registerMapRoutes(
@@ -313,6 +300,9 @@ export function registerMapRoutes(
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
     const body = request.body ?? {};
+    if (body.setAutopilot === true) {
+      return reply.status(405).send({ error: 'In-game autopilot writes are blocked in this read-only phase.' });
+    }
     const origin = Number(body.origin);
     const destination = Number(body.destination);
     if (!Number.isSafeInteger(origin) || !Number.isSafeInteger(destination)) {
@@ -369,38 +359,11 @@ export function registerMapRoutes(
       rememberRoute(session.chatId, { systemIds: route.systemIds, mode, riskWeight: risk });
     }
 
-    // Planning a route on the map and then retyping it into the client is the
-    // gap that makes a planner useless in flight. Same ESI write, same abort
-    // guards, same scope check as the chat planner.
-    let autopilot: { requested: boolean; ok: boolean; mode: string; error: string | null } = {
+    // This read-only phase never dispatches waypoint writes. Keep the response
+    // shape stable for existing clients, but do not retain a dormant write path.
+    const autopilot: { requested: boolean; ok: boolean; mode: string; error: string | null } = {
       requested: false, ok: false, mode: 'none', error: null,
     };
-    if (body.setAutopilot === true && route.ok) {
-      const linked = getLinkedCharacter(db, sessionContext(session));
-      if (!linked) {
-        autopilot = { requested: true, ok: false, mode: 'none', error: 'Персонаж не связан.' };
-      } else if (!linked.scopes.includes(WAYPOINT_SCOPE)) {
-        autopilot = {
-          requested: true, ok: false, mode: 'none', error: `Нет разрешения ${WAYPOINT_SCOPE}.`,
-        };
-      } else {
-        try {
-          // Waypoints are written one ESI call per hop. A character switch
-          // partway through would send the rest of them to the new pilot,
-          // leaving two autopilots half-set. Pin the identity we started with
-          // and let setAutopilotRoute stop the moment it changes — the same
-          // guard the chat planner has always used.
-          const startedWith = readActiveCharacterVersion(db, session.userId);
-          const written = await setAutopilotRoute(
-            db, route.systemIds, destination, sessionContext(session),
-            () => readActiveCharacterVersion(db, session.userId) === startedWith,
-          );
-          autopilot = { requested: true, ok: written.ok, mode: written.mode, error: null };
-        } catch (error) {
-          autopilot = { requested: true, ok: false, mode: 'none', error: (error as Error).message };
-        }
-      }
-    }
 
     return {
       route,

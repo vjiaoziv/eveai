@@ -85,6 +85,15 @@ export class P93FifoService {
     `).run(runId, characterId, P93_CALCULATION_VERSION, startedAt, previousRun?.run_id ?? null, beforeHash);
 
     try {
+      const unsupportedFeeAdjustments = db.prepare(`
+        SELECT COUNT(*) AS count FROM real_trade_records
+        WHERE character_id = ? AND is_paper = 0
+          AND record_state = 'VERIFIED' AND verification_status = 'VERIFIED'
+          AND trade_kind = 'FEE_ADJUSTMENT'
+      `).get(characterId) as { count: number };
+      if (unsupportedFeeAdjustments.count > 0) {
+        throw new Error('FEE_ADJUSTMENT 尚未定义安全的费用归属口径，FIFO 重算已阻断。');
+      }
       const tx = db.transaction(() => {
         db.prepare('DELETE FROM real_fifo_consumptions WHERE character_id = ?').run(characterId);
         db.prepare('DELETE FROM real_fifo_lots WHERE character_id = ?').run(characterId);
@@ -109,21 +118,28 @@ export class P93FifoService {
             const delta = record.adjustment_mode === 'DECREASE'
               ? -Math.abs(Number(record.adjustment_amount))
               : Math.abs(Number(record.adjustment_amount));
-            const nextBase = Number(lot.base_cost) + delta;
-            if (nextBase < -1e-9) throw new Error(`成本调整 ${record.record_id} 会使批次成本变为负数。`);
             const remaining = Number(lot.remaining_quantity);
-            const nextUnit = remaining > 0 ? nextBase / remaining : null;
-            const nextCostStatus = lot.cost_status === 'UNKNOWN'
-              ? 'UNKNOWN'
-              : feeUnknown ? 'PARTIAL' : lot.cost_status;
+            if (remaining <= 0) throw new Error(`成本调整 ${record.record_id} 的目标批次已无剩余数量。`);
+            if (lot.cost_status === 'UNKNOWN' || lot.remaining_cost == null) {
+              throw new Error(`成本调整 ${record.record_id} 不能把 UNKNOWN 成本批次改为已知成本。`);
+            }
+            // base_cost records the original acquisition facts and is intentionally
+            // not divided by the remaining quantity. The adjustable valuation basis
+            // for an open lot is remaining_cost, which is reduced after FIFO sales
+            // and transfers. Adjust that basis directly so a partial consumption
+            // cannot inflate the remaining unit cost from the original full-lot cost.
+            const nextRemainingCost = roundMoney(Number(lot.remaining_cost) + delta);
+            if (nextRemainingCost < -1e-9) throw new Error(`成本调整 ${record.record_id} 会使批次成本变为负数。`);
+            const safeRemainingCost = Math.max(0, nextRemainingCost);
+            const nextUnit = safeRemainingCost / remaining;
+            const nextCostStatus = feeUnknown ? 'PARTIAL' : lot.cost_status;
             db.prepare(`
               UPDATE real_fifo_lots
-              SET base_cost = ?, unit_cost = ?, remaining_cost = ?, cost_status = ?, calculation_version = ?
+              SET unit_cost = ?, remaining_cost = ?, cost_status = ?, calculation_version = ?
               WHERE lot_id = ? AND character_id = ?
             `).run(
-              roundMoney(Math.max(0, nextBase)),
-              nextUnit == null ? null : roundUnitCost(nextUnit),
-              nextUnit == null ? null : roundMoney(nextUnit * remaining),
+              roundUnitCost(nextUnit),
+              safeRemainingCost,
               nextCostStatus,
               P93_CALCULATION_VERSION,
               lot.lot_id,

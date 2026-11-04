@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import type { P93ReconciliationStatus } from './p9-3-types.js';
+import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
 
 type ReconItem = {
   reconcile_key: string;
@@ -24,16 +25,47 @@ export class P93ReconciliationService {
       ORDER BY completed_at DESC, snapshot_id DESC LIMIT 1
     `).get(characterId) as any;
     if (!snapshot) throw new Error('缺少完整 ESI 资产快照，不能执行真实资产对账。');
+    if (!snapshot.completed_at) throw new Error('资产快照缺少完成时间，不能确定库存估值时点。');
     const calculation = db.prepare(`
-      SELECT run_id FROM real_calculation_runs
+      SELECT run_id, completed_at FROM real_calculation_runs
       WHERE character_id = ? AND status = 'COMPLETED'
       ORDER BY completed_at DESC, run_id DESC LIMIT 1
     `).get(characterId) as any;
+    if (!calculation) throw new Error('缺少已完成的 FIFO 计算，不能执行真实资产对账。');
+    const laterVerified = db.prepare(`
+      SELECT record_id, trade_time, trade_kind
+      FROM real_trade_records
+      WHERE character_id = ? AND is_paper = 0
+        AND record_state = 'VERIFIED' AND verification_status = 'VERIFIED'
+        AND trade_kind IN ('BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL',
+                           'COST_ADJUSTMENT', 'INVENTORY_TRANSFER')
+        AND julianday(trade_time) > julianday(?)
+      ORDER BY trade_time, rowid
+      LIMIT 1
+    `).get(characterId, snapshot.completed_at) as any;
     const runId = 'RECON-' + randomUUID();
     db.prepare(`
       INSERT INTO real_reconciliation_runs (run_id, character_id, snapshot_id, calculation_run_id, status, created_at)
       VALUES (?, ?, ?, ?, 'RECONCILIATION_REQUIRED', datetime('now'))
-    `).run(runId, characterId, snapshot.snapshot_id, calculation?.run_id ?? null);
+    `).run(runId, characterId, snapshot.snapshot_id, calculation.run_id);
+    if (laterVerified) {
+      db.prepare(`
+        UPDATE real_reconciliation_runs
+        SET status = 'RECONCILIATION_REQUIRED', completed_at = datetime('now'), summary_json = ?
+        WHERE run_id = ?
+      `).run(JSON.stringify({
+        itemCount: 0,
+        statusCounts: {},
+        timeBasis: 'SNAPSHOT_INVENTORY_TIME_MISMATCH',
+        snapshotCompletedAt: snapshot.completed_at,
+        calculationRunId: calculation.run_id,
+        firstLaterRecordId: laterVerified.record_id,
+        firstLaterTradeTime: laterVerified.trade_time,
+        firstLaterTradeKind: laterVerified.trade_kind,
+        policy: '资产快照早于已核实交易时，当前 FIFO 库存不能代表快照时点；已拒绝数量对账，避免伪造差异。',
+      }), runId);
+      return this.get(db, characterId, runId)!;
+    }
 
     const assetRows = db.prepare(`
       SELECT type_id, location_id, SUM(quantity) AS quantity, COUNT(*) AS item_count
@@ -227,24 +259,48 @@ export class P93ReconciliationService {
     return this.get(db, characterId, runId)!;
   }
 
-  static get(db: Db, characterId: number, runId: string): Record<string, unknown> | null {
+  static get(
+    db: Db,
+    characterId: number,
+    runId: string,
+    query: { limit?: unknown; offset?: unknown } = {},
+  ): Record<string, unknown> | null {
     const run = db.prepare('SELECT * FROM real_reconciliation_runs WHERE character_id = ? AND run_id = ?').get(characterId, runId) as any;
     if (!run) return null;
-    const items = db.prepare('SELECT * FROM real_reconciliation_items WHERE run_id = ? ORDER BY status, reconcile_key').all(runId) as any[];
-    const cases = db.prepare('SELECT * FROM real_reconciliation_cases WHERE run_id = ? ORDER BY created_at DESC').all(runId) as any[];
+    const limit = clampPositiveInteger(query.limit, 200, 500);
+    const offset = clampNonNegativeInteger(query.offset);
+    const itemTotal = Number((db.prepare('SELECT COUNT(*) AS n FROM real_reconciliation_items WHERE run_id = ?').get(runId) as any)?.n || 0);
+    const caseTotal = Number((db.prepare('SELECT COUNT(*) AS n FROM real_reconciliation_cases WHERE run_id = ?').get(runId) as any)?.n || 0);
+    const items = db.prepare(`
+      SELECT * FROM real_reconciliation_items
+      WHERE run_id = ?
+      ORDER BY status, reconcile_key
+      LIMIT ? OFFSET ?
+    `).all(runId, limit, offset) as any[];
+    const cases = db.prepare(`
+      SELECT * FROM real_reconciliation_cases
+      WHERE run_id = ?
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `).all(runId, limit, offset) as any[];
     return {
       run: { ...run, summary: JSON.parse(run.summary_json || '{}') },
       items: items.map((row) => ({ ...row, details: JSON.parse(row.details_json || '{}') })),
       cases: cases.map((row) => ({ ...row, details: JSON.parse(row.details_json || '{}') })),
+      pagination: { limit, offset, itemTotal, caseTotal },
     };
   }
 
-  static latest(db: Db, characterId: number): Record<string, unknown> | null {
+  static latest(
+    db: Db,
+    characterId: number,
+    query: { limit?: unknown; offset?: unknown } = {},
+  ): Record<string, unknown> | null {
     const run = db.prepare(`
       SELECT run_id FROM real_reconciliation_runs
       WHERE character_id = ?
       ORDER BY created_at DESC, run_id DESC LIMIT 1
     `).get(characterId) as any;
-    return run ? this.get(db, characterId, run.run_id) : null;
+    return run ? this.get(db, characterId, run.run_id, query) : null;
   }
 }
