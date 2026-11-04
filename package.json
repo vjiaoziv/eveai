@@ -57,7 +57,7 @@
     "@fastify/cookie": "^11.1.5",
     "@fastify/static": "^10.1.8",
     "better-sqlite3": "^12.11.1",
-    "croner": "^10.0.1",
+    "croner": "^11.0.0",
     "d3-interpolate": "^3.0.1",
     "d3-quadtree": "^3.0.1",
     "d3-scale": "^4.0.2",
