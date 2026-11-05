@@ -121,14 +121,14 @@ describe('market routes', () => {
   it('rejects the snapshot status without a browser session', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/web/market/status' });
     expect(response.statusCode).toBe(401);
-    expect(response.json()).toEqual({ error: 'Сессия истекла. Обновите страницу.' });
+    expect(response.json()).toEqual({ error: 'session_expired' });
     expect(response.headers['cache-control']).toBe('no-store');
   });
 
   it('rejects the trade regions without a browser session', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/web/market/regions' });
     expect(response.statusCode).toBe(401);
-    expect(response.json()).toEqual({ error: 'Сессия истекла. Обновите страницу.' });
+    expect(response.json()).toEqual({ error: 'session_expired' });
     expect(response.headers['cache-control']).toBe('no-store');
   });
 
@@ -224,7 +224,7 @@ describe('market search route', () => {
     for (const url of ['/api/web/market/search', '/api/web/market/search?q=', '/api/web/market/search?q=a']) {
       const response = await app.inject({ method: 'GET', url, headers: { cookie } });
       expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({ error: 'Поисковый запрос должен содержать минимум 2 символа.' });
+      expect(response.json()).toEqual({ error: 'search_query_too_short' });
     }
   });
 
@@ -237,7 +237,7 @@ describe('market search route', () => {
         headers: { cookie },
       });
       expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({ error: 'Лимит должен быть целым числом от 1 до 50.' });
+      expect(response.json()).toEqual({ error: 'invalid_limit' });
     }
   });
 
@@ -285,7 +285,7 @@ describe('market groups routes', () => {
       headers: { cookie: browserSessionCookie() },
     });
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ error: 'Некорректная маркет-группа.' });
+    expect(response.json()).toEqual({ error: 'invalid_market_group' });
   });
 
   it('lists root groups with a has_children flag and drills into a parent', async () => {
@@ -329,7 +329,7 @@ describe('market groups routes', () => {
       headers: { cookie },
     });
     expect(badGroup.statusCode).toBe(400);
-    expect(badGroup.json()).toEqual({ error: 'Некорректная маркет-группа.' });
+    expect(badGroup.json()).toEqual({ error: 'invalid_market_group' });
 
     for (const limit of ['abc', '0', '201']) {
       const response = await app.inject({
@@ -338,7 +338,7 @@ describe('market groups routes', () => {
         headers: { cookie },
       });
       expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({ error: 'Лимит должен быть целым числом от 1 до 200.' });
+      expect(response.json()).toEqual({ error: 'invalid_limit' });
     }
   });
 
@@ -371,7 +371,7 @@ describe('market watchlist routes', () => {
       payload: { type_id: TRITANIUM },
     });
     expect(post.statusCode).toBe(403);
-    expect(post.json()).toEqual({ error: 'Проверка безопасности запроса не пройдена.' });
+    expect(post.json()).toEqual({ error: 'csrf_check_failed' });
 
     const del = await app.inject({
       method: 'DELETE',
@@ -398,7 +398,7 @@ describe('market watchlist routes', () => {
       payload: {},
     });
     expect(missingType.statusCode).toBe(400);
-    expect(missingType.json()).toEqual({ error: 'Некорректный идентификатор товара.' });
+    expect(missingType.json()).toEqual({ error: 'invalid_type_id' });
 
     const badRegion = await app.inject({
       method: 'POST',
@@ -407,7 +407,7 @@ describe('market watchlist routes', () => {
       payload: { type_id: TRITANIUM, region_id: -5 },
     });
     expect(badRegion.statusCode).toBe(400);
-    expect(badRegion.json()).toEqual({ error: 'Некорректный регион.' });
+    expect(badRegion.json()).toEqual({ error: 'invalid_region' });
 
     seedTypes();
     const unknownType = await app.inject({
@@ -417,7 +417,7 @@ describe('market watchlist routes', () => {
       payload: { type_id: 777777 },
     });
     expect(unknownType.statusCode).toBe(404);
-    expect(unknownType.json()).toEqual({ error: 'Товар не найден в локальной базе.' });
+    expect(unknownType.json()).toEqual({ error: 'type_not_found_in_local_db' });
 
     // A syntactically valid but non-existent region must be rejected: the
     // history worker would otherwise retry a failing ESI call for it forever,
@@ -429,7 +429,7 @@ describe('market watchlist routes', () => {
       payload: { type_id: TRITANIUM, region_id: 99999999 },
     });
     expect(unknownRegion.statusCode).toBe(400);
-    expect(unknownRegion.json()).toEqual({ error: 'Неизвестный регион.' });
+    expect(unknownRegion.json()).toEqual({ error: 'unknown_region' });
     expect(db.prepare('SELECT COUNT(*) AS c FROM market_watchlist WHERE region_id = 99999999').get())
       .toEqual({ c: 0 });
   });
@@ -502,7 +502,7 @@ describe('market watchlist routes', () => {
       headers: mutationHeaders(session),
     });
     expect(missing.statusCode).toBe(404);
-    expect(missing.json()).toEqual({ error: 'Позиция не найдена в списке наблюдения.' });
+    expect(missing.json()).toEqual({ error: 'watchlist_item_not_found' });
 
     const removed = await app.inject({
       method: 'DELETE',
@@ -555,7 +555,7 @@ describe('market watchlist routes', () => {
       payload: { type_id: TRITANIUM },
     });
     expect(response.statusCode).toBe(409);
-    expect(response.json()).toEqual({ error: 'Список наблюдения заполнен (максимум 100 позиций).' });
+    expect(response.json()).toEqual({ error: 'watchlist_full' });
 
     // A duplicate of an existing row stays idempotent even at the limit.
     insert.run(session.userId, TRITANIUM, DOMAIN);
@@ -595,7 +595,7 @@ describe('market type info route', () => {
     expect(badId.statusCode).toBe(400);
     const badLang = await app.inject({ method: 'GET', url: '/api/web/market/types/34/info?lang=de', headers: { cookie } });
     expect(badLang.statusCode).toBe(400);
-    expect(badLang.json()).toEqual({ error: "Параметр lang должен быть 'en' или 'ru'." });
+    expect(badLang.json()).toEqual({ error: "invalid_lang_param" });
   });
 
   it('returns 404 for a type missing from the SDE', async () => {
@@ -605,7 +605,7 @@ describe('market type info route', () => {
       headers: { cookie: browserSessionCookie() },
     });
     expect(response.statusCode).toBe(404);
-    expect(response.json()).toEqual({ error: 'Товар не найден в локальной базе.' });
+    expect(response.json()).toEqual({ error: 'type_not_found_in_local_db' });
   });
 
   it('serves the assembled card with static-SDE cache headers', async () => {
@@ -628,6 +628,23 @@ describe('market type info route', () => {
       group_name: 'Frigate',
       meta_group_name: 'Tech I',
     });
+  });
+
+  it('serves lang=zh with a Chinese card instead of a 400', async () => {
+    seedInfoType();
+    db.prepare("UPDATE sde_types SET data_json = json_patch(data_json, ?) WHERE type_id = ?")
+      .run(JSON.stringify({ name: { en: 'Rifter', zh: '裂谷级' } }), TRITANIUM);
+    db.prepare("UPDATE sde_groups SET data_json = ? WHERE group_id = 25")
+      .run(JSON.stringify({ name: { en: 'Frigate', zh: '护卫舰' } }));
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/web/market/types/34/info?lang=zh',
+      headers: { cookie: browserSessionCookie() },
+    });
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as { ok: boolean; info: { name: string; group_name: string | null } };
+    expect(payload.ok).toBe(true);
+    expect(payload.info).toMatchObject({ name: '裂谷级', group_name: '护卫舰' });
   });
 });
 

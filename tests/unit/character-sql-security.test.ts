@@ -4,21 +4,44 @@ import type { Db } from '../../src/db/sqlite.js';
 import { SCHEMA_SQL } from '../../src/db/schema.js';
 import {
   analyzeCharacterSqlTables,
-  executeCharacterSql,
+  executeCharacterSql as executeCharacterSqlRaw,
 } from '../../src/agent/tools/character-execution.js';
+import { testAssetLineage } from '../helpers/asset-lineage.js';
 
 const OWN_CHARACTER = 111;
 const OTHER_CHARACTER = 222;
+const OWN_LINEAGE = testAssetLineage(OWN_CHARACTER);
+const OTHER_LINEAGE = testAssetLineage(OTHER_CHARACTER);
 
 let db: Database.Database;
+
+function executeCharacterSql(db: Db, sql: string, characterId: number) {
+  return executeCharacterSqlRaw(
+    db,
+    sql,
+    characterId,
+    characterId === OTHER_CHARACTER ? OTHER_LINEAGE : OWN_LINEAGE,
+  );
+}
 
 function insertAsset(characterId: number, itemId: number, typeId: number, quantity: number): void {
   db.prepare(`
     INSERT INTO character_assets (
-      character_id, item_id, type_id, location_id, location_type, location_flag,
-      quantity, is_singleton, data_json, synced_at
-    ) VALUES (?, ?, ?, ?, 'station', 'Hangar', ?, 1, ?, datetime('now'))
-  `).run(characterId, itemId, typeId, 60003760, quantity, JSON.stringify({ item_id: itemId, type_id: typeId }));
+      character_id, item_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+      type_id, location_id, location_type, location_flag, quantity, is_singleton, data_json, synced_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'station', 'Hangar', ?, 1, ?, datetime('now'))
+  `).run(
+    characterId,
+    itemId,
+    characterId === OTHER_CHARACTER ? OTHER_LINEAGE.ownerUserId : OWN_LINEAGE.ownerUserId,
+    characterId === OTHER_CHARACTER ? OTHER_LINEAGE.ownerChatId : OWN_LINEAGE.ownerChatId,
+    characterId === OTHER_CHARACTER ? OTHER_LINEAGE.bindingEpoch : OWN_LINEAGE.bindingEpoch,
+    characterId === OTHER_CHARACTER ? OTHER_LINEAGE.bindingDigest : OWN_LINEAGE.bindingDigest,
+    typeId,
+    60003760,
+    quantity,
+    JSON.stringify({ item_id: itemId, type_id: typeId }),
+  );
 }
 
 beforeEach(() => {

@@ -103,7 +103,7 @@ export function attachLiveSession(
       return {
         ok: false,
         statusCode: 503,
-        error: 'This character already has a live session owned by another account.',
+        error: 'live_session_account_conflict',
         retryAfterSeconds: 30,
       };
     }
@@ -126,7 +126,7 @@ export function attachLiveSession(
     return {
       ok: false,
       statusCode: 503,
-      error: 'The live map is at capacity right now. Try again shortly.',
+      error: 'live_session_at_capacity',
       retryAfterSeconds: 60,
     };
   }
@@ -138,7 +138,7 @@ export function attachLiveSession(
     return {
       ok: false,
       statusCode: 429,
-      error: 'Too many live map sessions for this account.',
+      error: 'live_session_account_limit',
       retryAfterSeconds: 30,
     };
   }

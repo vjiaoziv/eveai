@@ -318,6 +318,11 @@ export const config = {
     // A RUNNING job older than this is presumed crashed and is failed so the
     // next tick can take over (prevents a wedged lock on the sync lane).
     staleJobMinutes: boundedPositiveInt('ASSET_SYNC_STALE_JOB_MINUTES', 30, 2, 1440),
+    // The lease is renewed while ESI pagination is active. A job is reclaimable
+    // only after renewed_at exceeds this TTL; heartbeat must be comfortably
+    // shorter so a healthy long walk cannot be mistaken for a crash.
+    leaseTtlSeconds: boundedPositiveInt('ASSET_SYNC_LEASE_TTL_SECONDS', 180, 30, 86_400),
+    heartbeatSeconds: boundedPositiveInt('ASSET_SYNC_HEARTBEAT_SECONDS', 45, 5, 3_600),
   },
   server: {
     port: optionalInt('PORT', 3000),

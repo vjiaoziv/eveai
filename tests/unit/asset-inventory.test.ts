@@ -7,9 +7,12 @@ import {
   ASSET_TAG_VALUES,
 } from '../../src/assets/inventory-service.js';
 import type { Db } from '../../src/db/sqlite.js';
+import { testAssetLineage } from '../helpers/asset-lineage.js';
 
 const CHARACTER_ID = 90000011;
 const OTHER_CHARACTER_ID = 90000012;
+const LINEAGE = testAssetLineage(CHARACTER_ID);
+const OTHER_LINEAGE = testAssetLineage(OTHER_CHARACTER_ID);
 
 let db: Database.Database;
 
@@ -50,20 +53,21 @@ function seedSdeAndAssets(): void {
 
     INSERT INTO character_assets
       (character_id, item_id, type_id, location_id, location_type, location_flag,
-       quantity, is_singleton, is_blueprint_copy, data_json, synced_at)
+       quantity, is_singleton, is_blueprint_copy, data_json, synced_at,
+       owner_user_id, owner_chat_id, binding_epoch, binding_digest)
     VALUES
-      (${CHARACTER_ID}, 1, 34, 60003760, 'station', 'Hangar', 5000, 0, 0, '{}', datetime('now')),
-      (${CHARACTER_ID}, 2, 587, 60003760, 'station', 'Hangar', 2, 1, 0, '{}', datetime('now')),
-      (${CHARACTER_ID}, 3, 588, 60003760, 'station', 'Hangar', 10, 1, 0, '{}', datetime('now')),
-      (${CHARACTER_ID}, 4, 589, 60003760, 'station', 'Hangar', 400, 0, 0, '{}', datetime('now')),
-      (${CHARACTER_ID}, 5, 590, 60003760, 'station', 'Hangar', 1, 1, 0, '{}', datetime('now')),
-      (${CHARACTER_ID}, 6, 590, 60003760, 'station', 'Hangar', 3, 1, 1, '{}', datetime('now')),
-      (${CHARACTER_ID}, 7, 591, 60003760, 'station', 'Hangar', 20, 0, 0, '{}', datetime('now')),
-      (${CHARACTER_ID}, 8, 593, 60003760, 'station', 'Hold', 100, 0, 0, '{}', datetime('now')),
-      (${CHARACTER_ID}, 9, 594, 60003760, 'station', 'Hangar', 5, 1, 0, '{}', datetime('now')),
-      (${CHARACTER_ID}, 10, 595, 60003760, 'station', 'Hangar', 1, 1, 0, '{}', datetime('now')),
-      (${CHARACTER_ID}, 11, 592, 60003760, 'station', 'Hangar', 7, 0, 0, '{}', datetime('now')),
-      (${OTHER_CHARACTER_ID}, 99, 34, 60003760, 'station', 'Hangar', 1, 0, 0, '{}', datetime('now'));
+      (${CHARACTER_ID}, 1, 34, 60003760, 'station', 'Hangar', 5000, 0, 0, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${CHARACTER_ID}, 2, 587, 60003760, 'station', 'Hangar', 2, 1, 0, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${CHARACTER_ID}, 3, 588, 60003760, 'station', 'Hangar', 10, 1, 0, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${CHARACTER_ID}, 4, 589, 60003760, 'station', 'Hangar', 400, 0, 0, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${CHARACTER_ID}, 5, 590, 60003760, 'station', 'Hangar', 1, 1, 0, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${CHARACTER_ID}, 6, 590, 60003760, 'station', 'Hangar', 3, 1, 1, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${CHARACTER_ID}, 7, 591, 60003760, 'station', 'Hangar', 20, 0, 0, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${CHARACTER_ID}, 8, 593, 60003760, 'station', 'Hold', 100, 0, 0, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${CHARACTER_ID}, 9, 594, 60003760, 'station', 'Hangar', 5, 1, 0, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${CHARACTER_ID}, 10, 595, 60003760, 'station', 'Hangar', 1, 1, 0, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${CHARACTER_ID}, 11, 592, 60003760, 'station', 'Hangar', 7, 0, 0, '{}', datetime('now'), ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}'),
+      (${OTHER_CHARACTER_ID}, 99, 34, 60003760, 'station', 'Hangar', 1, 0, 0, '{}', datetime('now'), ${OTHER_LINEAGE.ownerUserId}, ${OTHER_LINEAGE.ownerChatId}, ${OTHER_LINEAGE.bindingEpoch}, '${OTHER_LINEAGE.bindingDigest}');
 
     INSERT INTO market_orders
       (order_id, type_id, region_id, system_id, station_id, location_id, is_buy_order,
@@ -87,7 +91,7 @@ afterEach(() => {
 
 describe('inventory classification and management (P9.2.3)', () => {
   it('classifies from SDE category/group and the blueprint-copy flag', () => {
-    const summary = RealInventoryService.bucketSummary(db as Db, CHARACTER_ID);
+    const summary = RealInventoryService.bucketSummary(db as Db, CHARACTER_ID, LINEAGE);
     const byBucket = new Map(summary.map((row) => [row.bucket, row]));
     expect(byBucket.get('ORES_MINERALS')).toMatchObject({ items: 2 }); // tritanium + veldspar
     expect(byBucket.get('SHIPS')).toMatchObject({ items: 1 });
@@ -104,71 +108,75 @@ describe('inventory classification and management (P9.2.3)', () => {
   });
 
   it('filters, searches, sorts and paginates', () => {
-    const all = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, limit: 100 });
+    const all = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, limit: 100, lineage: LINEAGE });
     expect(all.total).toBe(11);
 
-    const search = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, q: 'trit' });
+    const search = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, q: 'trit', lineage: LINEAGE });
     expect(search.total).toBe(1);
     expect(search.rows[0].typeNameZh).toBe('三钛合金');
 
-    const region = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, regionId: 10000002 });
+    const region = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, regionId: 10000002, lineage: LINEAGE });
     expect(region.total).toBe(11);
-    const wrongRegion = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, regionId: 999 });
+    const wrongRegion = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, regionId: 999, lineage: LINEAGE });
     expect(wrongRegion.total).toBe(0);
 
-    const tradable = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, tradable: true });
+    const tradable = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, tradable: true, lineage: LINEAGE });
     expect(tradable.rows.map((row) => row.typeId).sort()).toEqual([34, 587]);
 
     const sorted = RealInventoryService.list(db as Db, {
-      characterId: CHARACTER_ID, sort: 'quantity', order: 'desc', limit: 3,
+      characterId: CHARACTER_ID, sort: 'quantity', order: 'desc', limit: 3, lineage: LINEAGE,
     });
     expect(sorted.rows.map((row) => row.quantity)).toEqual([5000, 400, 100]);
     expect(sorted.total).toBe(11);
     expect(sorted.limit).toBe(3);
 
     const page2 = RealInventoryService.list(db as Db, {
-      characterId: CHARACTER_ID, sort: 'quantity', order: 'desc', limit: 3, offset: 3,
+      characterId: CHARACTER_ID, sort: 'quantity', order: 'desc', limit: 3, offset: 3, lineage: LINEAGE,
     });
     expect(page2.rows).toHaveLength(3);
     expect(page2.rows[0].quantity).not.toBe(5000);
 
-    const bucketFilter = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, bucket: 'BPC' });
+    const bucketFilter = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, bucket: 'BPC', lineage: LINEAGE });
     expect(bucketFilter.total).toBe(1);
     expect(bucketFilter.rows[0].isBlueprintCopy).toBe(true);
   });
 
   it('keeps characters isolated in listings and detail lookups', () => {
-    const other = RealInventoryService.list(db as Db, { characterId: OTHER_CHARACTER_ID });
+    const other = RealInventoryService.list(db as Db, { characterId: OTHER_CHARACTER_ID, lineage: OTHER_LINEAGE });
     expect(other.total).toBe(1);
     expect(other.rows[0].itemId).toBe(99);
 
     // Detail for another character's item from THIS character's perspective.
-    expect(RealInventoryService.detail(db as Db, CHARACTER_ID, 99)).toBeNull();
-    expect(RealInventoryService.detail(db as Db, CHARACTER_ID, 1)).not.toBeNull();
+    expect(RealInventoryService.detail(db as Db, CHARACTER_ID, 99, LINEAGE)).toBeNull();
+    expect(RealInventoryService.detail(db as Db, CHARACTER_ID, 1, LINEAGE)).not.toBeNull();
   });
 
   it('stores local tags only for owned current-set items', () => {
-    expect(RealInventoryService.setTag(db as Db, CHARACTER_ID, 2, 'FOR_SALE')).toBe('FOR_SALE');
-    expect(RealInventoryService.getTag(db as Db, CHARACTER_ID, 2)).toBe('FOR_SALE');
-    const tagged = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, q: 'rifter' });
+    expect(RealInventoryService.setTag(db as Db, CHARACTER_ID, 2, 'FOR_SALE', LINEAGE)).toBe('FOR_SALE');
+    expect(RealInventoryService.getTag(db as Db, CHARACTER_ID, 2, LINEAGE)).toBe('FOR_SALE');
+    const tagged = RealInventoryService.list(db as Db, { characterId: CHARACTER_ID, q: 'rifter', lineage: LINEAGE });
     expect(tagged.rows.find((row) => row.itemId === 2)?.tag).toBe('FOR_SALE');
 
-    expect(() => RealInventoryService.setTag(db as Db, CHARACTER_ID, 2, 'NOT_A_TAG')).toThrow(/无效标签/);
+    expect(() => RealInventoryService.setTag(db as Db, CHARACTER_ID, 2, 'NOT_A_TAG', LINEAGE)).toThrow(/无效标签/);
     // Item owned by the other character cannot be tagged here.
-    expect(() => RealInventoryService.setTag(db as Db, CHARACTER_ID, 99, 'FOR_SALE')).toThrow(/最新资产快照/);
+    expect(() => RealInventoryService.setTag(db as Db, CHARACTER_ID, 99, 'FOR_SALE', LINEAGE)).toThrow(/最新资产快照/);
     expect(ASSET_TAG_VALUES).toContain('TRADE_STOCK');
 
-    RealInventoryService.clearTag(db as Db, CHARACTER_ID, 2);
-    expect(RealInventoryService.getTag(db as Db, CHARACTER_ID, 2)).toBeNull();
+    RealInventoryService.clearTag(db as Db, CHARACTER_ID, 2, LINEAGE);
+    expect(RealInventoryService.getTag(db as Db, CHARACTER_ID, 2, LINEAGE)).toBeNull();
   });
 
   it('returns detail with change and snapshot history', () => {
     db.prepare(`
       INSERT INTO real_asset_snapshots
         (snapshot_id, character_id, job_id, started_at, completed_at, status,
-         total_items, total_unique_types, total_locations, total_quantity, data_hash, source, is_latest)
-      VALUES ('SNAP-1', ?, NULL, datetime('now'), datetime('now'), 'COMPLETED', 1, 1, 1, 10, 'abc', 'esi_character_assets', 1)
-    `).run(CHARACTER_ID);
+         total_items, total_unique_types, total_locations, total_quantity, data_hash, source, is_latest,
+         owner_user_id, owner_chat_id, binding_epoch, binding_digest)
+      VALUES ('SNAP-1', ?, NULL, datetime('now'), datetime('now'), 'COMPLETED', 1, 1, 1, 10, 'abc', 'esi_character_assets', 1, ?, ?, ?, ?)
+    `).run(
+      CHARACTER_ID, LINEAGE.ownerUserId, LINEAGE.ownerChatId,
+      LINEAGE.bindingEpoch, LINEAGE.bindingDigest,
+    );
     db.prepare(`
       INSERT INTO real_asset_snapshot_items
         (snapshot_id, item_id, type_id, quantity, location_id, raw_json)
@@ -177,15 +185,19 @@ describe('inventory classification and management (P9.2.3)', () => {
     db.prepare(`
       INSERT INTO real_asset_changes
         (change_id, character_id, item_id, type_id, change_type, prev_quantity, new_quantity,
-         from_snapshot_id, to_snapshot_id, detected_at)
-      VALUES ('CHG-1', ?, 1, 34, 'QTY_INCREASED', 5, 10, NULL, 'SNAP-1', datetime('now'))
-    `).run(CHARACTER_ID);
+         from_snapshot_id, to_snapshot_id, detected_at,
+         owner_user_id, owner_chat_id, binding_epoch, binding_digest)
+      VALUES ('CHG-1', ?, 1, 34, 'QTY_INCREASED', 5, 10, NULL, 'SNAP-1', datetime('now'), ?, ?, ?, ?)
+    `).run(
+      CHARACTER_ID, LINEAGE.ownerUserId, LINEAGE.ownerChatId,
+      LINEAGE.bindingEpoch, LINEAGE.bindingDigest,
+    );
 
-    const detail = RealInventoryService.detail(db as Db, CHARACTER_ID, 1)!;
+    const detail = RealInventoryService.detail(db as Db, CHARACTER_ID, 1, LINEAGE)!;
     expect(detail.bucket).toBe('ORES_MINERALS');
     expect(detail.changeHistory).toHaveLength(1);
     expect(detail.snapshotHistory).toHaveLength(1);
     expect(detail.regionName).toBe('The Forge');
-    expect(RealInventoryService.detail(db as Db, CHARACTER_ID, 42424)).toBeNull();
+    expect(RealInventoryService.detail(db as Db, CHARACTER_ID, 42424, LINEAGE)).toBeNull();
   });
 });

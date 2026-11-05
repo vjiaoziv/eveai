@@ -63,6 +63,8 @@ export type EnqueueWebAgentRequestInput = WebAgentRequestOwner & {
   message: string;
   idempotencyKey: string;
   ipKey: string;
+  /** Viewer locale captured at submit time; in-memory, not persisted. */
+  locale?: string;
 };
 
 export type EnqueueResult =
@@ -74,7 +76,7 @@ type AgentRunner = (
   threadId: string,
   ctx: UserContext,
   text: string,
-  options?: { userMessagePersisted?: boolean; backgroundProfileRefresh?: boolean },
+  options?: { userMessagePersisted?: boolean; backgroundProfileRefresh?: boolean; locale?: string },
 ) => Promise<string>;
 
 const MAX_ACTIVITY_ITEMS = 32;
@@ -123,6 +125,10 @@ export function setWebAgentCloseGraceMs(ms: number): void {
 export class WebAgentRequestCoordinator {
   private readonly running = new Map<string, AbortController>();
   private readonly streamBuffers = new Map<string, StreamBuffer>();
+  // Locale per in-flight request. In-memory on purpose: it is a rendering
+  // preference, and losing it on restart only falls back to the configured
+  // default instead of requiring a schema migration.
+  private readonly locales = new Map<string, string>();
   private draining = false;
   private closed = false;
 
@@ -147,7 +153,7 @@ export class WebAgentRequestCoordinator {
     // with only the shrinking remainder of the deadline and abort it moments
     // later; a 503 lets the caller retry against the next process instead.
     if (this.closed) {
-      return rejection(503, 'Сервис перезапускается. Повторите запрос через несколько секунд.', 5);
+      return rejection(503, 'service_restarting', 5);
     }
 
     const messageHash = hashMessage(input.threadId, input.message);
@@ -158,7 +164,7 @@ export class WebAgentRequestCoordinator {
       `).get(input.userId, input.chatId, input.idempotencyKey) as RequestRow | undefined;
       if (existing) {
         if (existing.thread_id !== input.threadId || existing.message_hash !== messageHash) {
-          return rejection(409, 'Ключ повторной отправки уже использован другим запросом.', 0);
+          return rejection(409, 'idempotency_key_reused', 0);
         }
         return { ok: true, request: toDto(existing), existing: true };
       }
@@ -168,7 +174,7 @@ export class WebAgentRequestCoordinator {
         WHERE user_id = ? AND chat_id = ? AND status IN ('queued', 'running')
       `, input.userId, input.chatId);
       if (activeForUser >= config.web.maxQueuedAgentRequestsPerUser) {
-        return rejection(429, 'Предыдущий запрос ещё обрабатывается. Дождитесь результата.', 5);
+        return rejection(429, 'request_in_progress', 5);
       }
 
       const activeGlobal = count(this.db, `
@@ -176,7 +182,7 @@ export class WebAgentRequestCoordinator {
         WHERE status IN ('queued', 'running')
       `);
       if (activeGlobal >= config.web.maxQueuedAgentRequests) {
-        return rejection(503, 'Очередь сервиса заполнена. Попробуйте позже.', 15);
+        return rejection(503, 'request_queue_full', 15);
       }
 
       const requestId = randomUUID();
@@ -219,7 +225,10 @@ export class WebAgentRequestCoordinator {
       };
     });
     const result = transaction();
-    if (result.ok && !result.existing) this.scheduleDrain();
+    if (result.ok && !result.existing) {
+      if (input.locale) this.locales.set(result.request.requestId, input.locale);
+      this.scheduleDrain();
+    }
     return result;
   }
 
@@ -452,6 +461,7 @@ export class WebAgentRequestCoordinator {
       }, () => this.runner(this.db, row.thread_id, ctx, row.message, {
         userMessagePersisted: true,
         backgroundProfileRefresh: false,
+        locale: this.locales.get(row.request_id),
       }));
       if (controller.signal.aborted || this.cancelWasRequested(row.request_id)) {
         this.finish(row.request_id, 'cancelled', null, 'cancelled');
@@ -565,6 +575,7 @@ export class WebAgentRequestCoordinator {
   ): void {
     // Forced final flush before the terminal write, then drop the buffer and
     // its timer so nothing can write into a finished row afterwards.
+    this.locales.delete(requestId);
     const streamState = this.streamBuffers.get(requestId);
     if (streamState) {
       if (streamState.timer) clearTimeout(streamState.timer);
@@ -683,11 +694,7 @@ function safeErrorCode(message: string): string {
 
 function publicError(code: string | null): string | null {
   if (!code) return null;
-  if (code === 'cancelled') return 'Запрос отменён.';
-  if (code === 'deadline_exceeded') return 'Запрос превысил безопасный лимит времени. Попробуйте разбить задачу.';
-  if (code === 'identity_changed') return 'Активный персонаж изменился. Повторите запрос.';
-  if (code === 'service_restarted') return 'Сервис перезапустился во время запроса. Повторите запрос.';
-  if (code === 'overloaded') return 'Сервис перегружен. Попробуйте позже.';
-  if (code === 'provider_unavailable') return 'Модель временно недоступна. Попробуйте позже.';
-  return 'Не удалось завершить запрос. Попробуйте ещё раз.';
+  // The DTO error field carries the machine code itself; the web client
+  // localizes it through API_ERROR_KEYS (translateApiErrorValue in api.ts).
+  return /^[a-z][a-z0-9_]*$/.test(code) ? code : 'agent_failure';
 }

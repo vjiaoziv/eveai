@@ -2,10 +2,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import {
   P93_CALCULATION_VERSION,
-  getLatestCalculationRun,
   roundMoney,
+  type P93CalculationFreshness,
   type P93Performance,
 } from './p9-3-types.js';
+import { assetLineagePredicate, type AssetLineage } from '../assets/asset-lineage.js';
+import {
+  realLedgerLineagePredicate,
+  resolveRealLedgerLineage,
+  type RealLedgerLineage,
+} from './p9-3-lineage.js';
+import { p9LineagePredicate } from './p9-control-plane-lineage.js';
 
 type LotRow = {
   lot_id: string;
@@ -26,7 +33,47 @@ function roundUnitCost(value: number): number {
   return Math.round(value * 100000000) / 100000000;
 }
 
-function snapshotHash(db: Db, characterId: number): string {
+function fifoPredicate(lineage: RealLedgerLineage | null): { sql: string; params: unknown[] } {
+  if (lineage) return realLedgerLineagePredicate(null, lineage);
+  return {
+    sql: 'owner_user_id IS NULL AND owner_chat_id IS NULL AND binding_epoch = 0',
+    params: [],
+  };
+}
+
+function fifoAliasPredicate(
+  alias: string,
+  lineage: RealLedgerLineage | null,
+): { sql: string; params: unknown[] } {
+  if (lineage) return realLedgerLineagePredicate(alias, lineage);
+  return {
+    sql: `${alias}.owner_user_id IS NULL AND ${alias}.owner_chat_id IS NULL AND ${alias}.binding_epoch = 0`,
+    params: [],
+  };
+}
+
+function fifoLineageValues(
+  lineage: RealLedgerLineage | null,
+): [number | null, number | null, number, string] {
+  return lineage
+    ? [lineage.ownerUserId, lineage.ownerChatId, lineage.bindingEpoch, lineage.bindingDigest]
+    : [null, null, 0, ''];
+}
+
+function latestCompletedRun(
+  db: Db,
+  characterId: number,
+  lineage: RealLedgerLineage | null,
+): any | null {
+  const owner = fifoPredicate(lineage);
+  return db.prepare(`
+    SELECT * FROM real_calculation_runs
+    WHERE character_id = ? AND status = 'COMPLETED' AND ${owner.sql}
+    ORDER BY julianday(completed_at) DESC, rowid DESC LIMIT 1
+  `).get(characterId, ...owner.params) ?? null;
+}
+
+function snapshotHash(db: Db, characterId: number, lineage: RealLedgerLineage | null): string {
   // IDs and row-creation timestamps are intentionally excluded: a full
   // recalculation recreates derived rows, and those implementation details
   // must not make an unchanged result look different.
@@ -34,8 +81,8 @@ function snapshotHash(db: Db, characterId: number): string {
     SELECT lot_id, type_id, location_id, source_record_id, original_quantity,
            remaining_quantity, base_cost, capitalized_fees, unit_cost, remaining_cost,
            cost_status, acquired_at, calculation_version
-    FROM real_fifo_lots WHERE character_id = ? ORDER BY lot_id
-  `).all(characterId) as any[]).map((row) => [
+    FROM real_fifo_lots WHERE character_id = ? AND ${fifoPredicate(lineage).sql} ORDER BY lot_id
+  `).all(characterId, ...fifoPredicate(lineage).params) as any[]).map((row) => [
     row.lot_id, row.type_id, row.location_id, row.source_record_id, row.original_quantity,
     row.remaining_quantity, row.base_cost, row.capitalized_fees, row.unit_cost, row.remaining_cost,
     row.cost_status, row.acquired_at, row.calculation_version,
@@ -43,13 +90,111 @@ function snapshotHash(db: Db, characterId: number): string {
   const consumptions = (db.prepare(`
     SELECT sell_record_id, lot_id, type_id, location_id, quantity, unit_cost,
            allocated_sell_fees, realized_pnl, pnl_status, calculation_version
-    FROM real_fifo_consumptions WHERE character_id = ? ORDER BY sell_record_id, lot_id
-  `).all(characterId) as any[]).map((row) => [
+    FROM real_fifo_consumptions WHERE character_id = ? AND ${fifoPredicate(lineage).sql} ORDER BY sell_record_id, lot_id
+  `).all(characterId, ...fifoPredicate(lineage).params) as any[]).map((row) => [
     row.sell_record_id, row.lot_id, row.type_id, row.location_id, row.quantity,
     row.unit_cost, row.allocated_sell_fees, row.realized_pnl, row.pnl_status,
     row.calculation_version,
   ]);
   return createHash('sha256').update(JSON.stringify({ lots, consumptions })).digest('hex');
+}
+
+function parseStoredUtc(value: unknown): number | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const normalized = value.includes('T') ? value : value.replace(' ', 'T') + 'Z';
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function calculationFreshness(
+  db: Db,
+  characterId: number,
+  lineage: RealLedgerLineage | null,
+): P93CalculationFreshness {
+  const owner = fifoPredicate(lineage);
+  const latestCalculation = db.prepare(`
+    SELECT run_id, completed_at FROM real_calculation_runs
+    WHERE character_id = ? AND status = 'COMPLETED' AND ${owner.sql}
+    ORDER BY julianday(completed_at) DESC, rowid DESC LIMIT 1
+  `).get(characterId, ...owner.params) as { run_id: string; completed_at: string | null } | undefined;
+  const latestAttempt = db.prepare(`
+    SELECT run_id, status, started_at, completed_at
+    FROM real_calculation_runs
+    WHERE character_id = ? AND ${owner.sql}
+    ORDER BY julianday(started_at) DESC, rowid DESC
+    LIMIT 1
+  `).get(characterId, ...owner.params) as {
+    run_id: string;
+    status: 'RUNNING' | 'COMPLETED' | 'FAILED';
+    started_at: string;
+    completed_at: string | null;
+  } | undefined;
+  const latestFact = db.prepare(`
+    SELECT changed_at
+    FROM (
+      SELECT e.created_at AS changed_at
+      FROM real_trade_events e
+      JOIN real_trade_records r ON r.record_id = e.record_id AND r.character_id = e.character_id
+      WHERE e.character_id = ? AND ${owner.sql.replace(/(^| AND )/g, '$1e.')} AND r.is_paper = 0
+        AND r.record_state IN ('VERIFIED', 'REVERSED', 'CORRECTED')
+        AND r.trade_kind IN ('BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL', 'COST_ADJUSTMENT', 'INVENTORY_TRANSFER')
+      UNION ALL
+      SELECT r.updated_at AS changed_at
+      FROM real_trade_records r
+      WHERE r.character_id = ? AND ${owner.sql.replace(/(^| AND )/g, '$1r.')} AND r.is_paper = 0
+        AND r.record_state IN ('VERIFIED', 'REVERSED', 'CORRECTED')
+        AND r.trade_kind IN ('BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL', 'COST_ADJUSTMENT', 'INVENTORY_TRANSFER')
+    )
+    ORDER BY julianday(changed_at) DESC
+    LIMIT 1
+  `).get(
+    characterId, ...owner.params,
+    characterId, ...owner.params,
+  ) as { changed_at: string | null } | undefined;
+
+  const latestCalculationAt = latestCalculation?.completed_at ?? null;
+  const latestLedgerFactAt = latestFact?.changed_at ?? null;
+  const latestFailedAt = latestAttempt?.status === 'FAILED'
+    ? latestAttempt.completed_at ?? latestAttempt.started_at
+    : null;
+  const calculationMs = parseStoredUtc(latestCalculationAt);
+  const factMs = parseStoredUtc(latestLedgerFactAt);
+  const failedMs = parseStoredUtc(latestFailedAt);
+
+  if (!latestCalculation) {
+    return {
+      status: 'NEVER_CALCULATED',
+      latestCalculationAt: null,
+      latestLedgerFactAt,
+      latestFailedCalculationAt: latestFailedAt,
+      message: '尚无成功的 FIFO 计算；不得把空结果视为当前完整核算。',
+    };
+  }
+  if (factMs !== null && calculationMs !== null && factMs > calculationMs) {
+    return {
+      status: 'STALE',
+      latestCalculationAt,
+      latestLedgerFactAt,
+      latestFailedCalculationAt: latestFailedAt,
+      message: '账本事实或证据状态晚于最近一次成功计算；当前 FIFO 结果已过期，请人工触发重算。',
+    };
+  }
+  if (failedMs !== null && calculationMs !== null && failedMs > calculationMs) {
+    return {
+      status: 'STALE',
+      latestCalculationAt,
+      latestLedgerFactAt,
+      latestFailedCalculationAt: latestFailedAt,
+      message: '最近一次 FIFO 重算失败；当前展示的是上一次有效结果，已标记过期。',
+    };
+  }
+  return {
+    status: 'CURRENT',
+    latestCalculationAt,
+    latestLedgerFactAt,
+    latestFailedCalculationAt: latestFailedAt,
+    message: 'FIFO 结果基于当前已核实 REAL 账本事实。',
+  };
 }
 
 function feeTotals(db: Db, recordId: string): {
@@ -73,38 +218,64 @@ function feeTotals(db: Db, recordId: string): {
 }
 
 export class P93FifoService {
-  static recalculate(db: Db, characterId: number): Record<string, unknown> {
-    const previousRun = getLatestCalculationRun(db, characterId);
-    const beforeHash = snapshotHash(db, characterId);
+  static freshness(
+    db: Db,
+    characterId: number,
+    lineage?: RealLedgerLineage | null,
+  ): P93CalculationFreshness {
+    return calculationFreshness(db, characterId, resolveRealLedgerLineage(db, characterId, lineage));
+  }
+
+  static recalculate(
+    db: Db,
+    characterId: number,
+    lineage?: RealLedgerLineage | null,
+  ): Record<string, unknown> {
+    const owner = resolveRealLedgerLineage(db, characterId, lineage);
+    const ownerPredicate = fifoPredicate(owner);
+    const lineageValues = fifoLineageValues(owner);
+    const previousRun = latestCompletedRun(db, characterId, owner);
+    const beforeHash = snapshotHash(db, characterId, owner);
     const runId = 'CALC-' + randomUUID();
     const startedAt = new Date().toISOString();
     db.prepare(`
       INSERT INTO real_calculation_runs
-        (run_id, character_id, calculation_version, status, started_at, previous_run_id, before_hash)
-      VALUES (?, ?, ?, 'RUNNING', ?, ?, ?)
-    `).run(runId, characterId, P93_CALCULATION_VERSION, startedAt, previousRun?.run_id ?? null, beforeHash);
+        (run_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         calculation_version, status, started_at, previous_run_id, before_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?, ?)
+    `).run(
+      runId,
+      characterId,
+      ...lineageValues,
+      P93_CALCULATION_VERSION,
+      startedAt,
+      previousRun?.run_id ?? null,
+      beforeHash,
+    );
 
     try {
       const unsupportedFeeAdjustments = db.prepare(`
         SELECT COUNT(*) AS count FROM real_trade_records
-        WHERE character_id = ? AND is_paper = 0
+        WHERE character_id = ? AND ${ownerPredicate.sql} AND is_paper = 0
           AND record_state = 'VERIFIED' AND verification_status = 'VERIFIED'
           AND trade_kind = 'FEE_ADJUSTMENT'
-      `).get(characterId) as { count: number };
+      `).get(characterId, ...ownerPredicate.params) as { count: number };
       if (unsupportedFeeAdjustments.count > 0) {
         throw new Error('FEE_ADJUSTMENT 尚未定义安全的费用归属口径，FIFO 重算已阻断。');
       }
       const tx = db.transaction(() => {
-        db.prepare('DELETE FROM real_fifo_consumptions WHERE character_id = ?').run(characterId);
-        db.prepare('DELETE FROM real_fifo_lots WHERE character_id = ?').run(characterId);
+        db.prepare(`DELETE FROM real_fifo_consumptions WHERE character_id = ? AND ${ownerPredicate.sql}`)
+          .run(characterId, ...ownerPredicate.params);
+        db.prepare(`DELETE FROM real_fifo_lots WHERE character_id = ? AND ${ownerPredicate.sql}`)
+          .run(characterId, ...ownerPredicate.params);
 
         const records = db.prepare(`
           SELECT * FROM real_trade_records
-          WHERE character_id = ? AND is_paper = 0
+          WHERE character_id = ? AND ${ownerPredicate.sql} AND is_paper = 0
             AND record_state = 'VERIFIED' AND verification_status = 'VERIFIED'
             AND trade_kind IN ('BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL', 'COST_ADJUSTMENT', 'INVENTORY_TRANSFER')
           ORDER BY trade_time, rowid
-        `).all(characterId) as any[];
+        `).all(characterId, ...ownerPredicate.params) as any[];
 
         for (const record of records) {
           const fees = feeTotals(db, record.record_id);
@@ -112,8 +283,9 @@ export class P93FifoService {
           const direction = record.direction;
 
           if (record.trade_kind === 'COST_ADJUSTMENT') {
-            const lot = db.prepare('SELECT * FROM real_fifo_lots WHERE lot_id = ? AND character_id = ?')
-              .get(record.target_lot_id, characterId) as LotRow | undefined;
+            const lot = db.prepare(`SELECT * FROM real_fifo_lots
+              WHERE lot_id = ? AND character_id = ? AND ${ownerPredicate.sql}`)
+              .get(record.target_lot_id, characterId, ...ownerPredicate.params) as LotRow | undefined;
             if (!lot) throw new Error(`成本调整目标批次不存在：${record.target_lot_id}`);
             const delta = record.adjustment_mode === 'DECREASE'
               ? -Math.abs(Number(record.adjustment_amount))
@@ -136,7 +308,7 @@ export class P93FifoService {
             db.prepare(`
               UPDATE real_fifo_lots
               SET unit_cost = ?, remaining_cost = ?, cost_status = ?, calculation_version = ?
-              WHERE lot_id = ? AND character_id = ?
+              WHERE lot_id = ? AND character_id = ? AND ${ownerPredicate.sql}
             `).run(
               roundUnitCost(nextUnit),
               safeRemainingCost,
@@ -144,6 +316,7 @@ export class P93FifoService {
               P93_CALCULATION_VERSION,
               lot.lot_id,
               characterId,
+              ...ownerPredicate.params,
             );
             continue;
           }
@@ -155,9 +328,10 @@ export class P93FifoService {
             let splitIndex = 0;
             const lots = db.prepare(`
               SELECT * FROM real_fifo_lots
-              WHERE character_id = ? AND type_id = ? AND location_id = ? AND remaining_quantity > 0
+              WHERE character_id = ? AND ${ownerPredicate.sql}
+                AND type_id = ? AND location_id = ? AND remaining_quantity > 0
               ORDER BY acquired_at, lot_id
-            `).all(characterId, record.type_id, fromLocationId) as LotRow[];
+            `).all(characterId, ...ownerPredicate.params, record.type_id, fromLocationId) as LotRow[];
             for (const lot of lots) {
               if (remaining <= 0) break;
               const lotQuantity = Number(lot.remaining_quantity);
@@ -165,8 +339,8 @@ export class P93FifoService {
               if (take === lotQuantity) {
                 db.prepare(`
                   UPDATE real_fifo_lots SET location_id = ?, calculation_version = ?
-                  WHERE lot_id = ? AND character_id = ?
-                `).run(toLocationId, P93_CALCULATION_VERSION, lot.lot_id, characterId);
+                  WHERE lot_id = ? AND character_id = ? AND ${ownerPredicate.sql}
+                `).run(toLocationId, P93_CALCULATION_VERSION, lot.lot_id, characterId, ...ownerPredicate.params);
               } else {
                 const ratio = take / lotQuantity;
                 const movedCost = lot.remaining_cost == null ? null : roundMoney(Number(lot.remaining_cost) * ratio);
@@ -177,23 +351,26 @@ export class P93FifoService {
                 db.prepare(`
                   UPDATE real_fifo_lots
                   SET remaining_quantity = ?, remaining_cost = ?, calculation_version = ?
-                  WHERE lot_id = ? AND character_id = ?
+                  WHERE lot_id = ? AND character_id = ? AND ${ownerPredicate.sql}
                 `).run(
                   lotQuantity - take,
                   keptCost,
                   P93_CALCULATION_VERSION,
                   lot.lot_id,
                   characterId,
+                  ...ownerPredicate.params,
                 );
                 db.prepare(`
                   INSERT INTO real_fifo_lots
-                    (lot_id, character_id, type_id, location_id, source_record_id, original_quantity,
-                     remaining_quantity, base_cost, capitalized_fees, unit_cost, remaining_cost,
-                     cost_status, acquired_at, calculation_version)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (lot_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+                     type_id, location_id, source_record_id, original_quantity, remaining_quantity,
+                     base_cost, capitalized_fees, unit_cost, remaining_cost, cost_status,
+                     acquired_at, calculation_version)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `).run(
                   splitLotId,
                   characterId,
+                  ...lineageValues,
                   lot.type_id,
                   toLocationId,
                   lot.source_record_id,
@@ -224,13 +401,15 @@ export class P93FifoService {
             const costStatus = feeUnknown ? 'PARTIAL' : 'KNOWN';
             db.prepare(`
               INSERT INTO real_fifo_lots
-                (lot_id, character_id, type_id, location_id, source_record_id, original_quantity,
-                 remaining_quantity, base_cost, capitalized_fees, unit_cost, remaining_cost,
-                 cost_status, acquired_at, calculation_version)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (lot_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+                 type_id, location_id, source_record_id, original_quantity, remaining_quantity,
+                 base_cost, capitalized_fees, unit_cost, remaining_cost, cost_status,
+                 acquired_at, calculation_version)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
               'LOT-' + record.record_id,
               characterId,
+              ...lineageValues,
               record.type_id,
               record.location_id,
               record.record_id,
@@ -253,9 +432,10 @@ export class P93FifoService {
             const totalSellFees = fees.sellExpense;
             const lots = db.prepare(`
               SELECT * FROM real_fifo_lots
-              WHERE character_id = ? AND type_id = ? AND location_id = ? AND remaining_quantity > 0
+              WHERE character_id = ? AND ${ownerPredicate.sql}
+                AND type_id = ? AND location_id = ? AND remaining_quantity > 0
               ORDER BY acquired_at, lot_id
-            `).all(characterId, record.type_id, record.location_id) as LotRow[];
+            `).all(characterId, ...ownerPredicate.params, record.type_id, record.location_id) as LotRow[];
 
             for (const lot of lots) {
               if (remaining <= 0) break;
@@ -278,12 +458,14 @@ export class P93FifoService {
                 : null;
               db.prepare(`
                 INSERT INTO real_fifo_consumptions
-                  (consumption_id, character_id, sell_record_id, lot_id, type_id, location_id,
-                   quantity, unit_cost, allocated_sell_fees, realized_pnl, pnl_status, calculation_version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  (consumption_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+                   sell_record_id, lot_id, type_id, location_id, quantity, unit_cost,
+                   allocated_sell_fees, realized_pnl, pnl_status, calculation_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `).run(
                 'CONS-' + randomUUID(),
                 characterId,
+                ...lineageValues,
                 record.record_id,
                 lot.lot_id,
                 record.type_id,
@@ -303,13 +485,14 @@ export class P93FifoService {
               db.prepare(`
                 UPDATE real_fifo_lots
                 SET remaining_quantity = ?, remaining_cost = ?, calculation_version = ?
-                WHERE lot_id = ? AND character_id = ?
+                WHERE lot_id = ? AND character_id = ? AND ${ownerPredicate.sql}
               `).run(
                 nextRemaining,
                 nextRemainingCost,
                 P93_CALCULATION_VERSION,
                 lot.lot_id,
                 characterId,
+                ...ownerPredicate.params,
               );
             }
 
@@ -317,12 +500,14 @@ export class P93FifoService {
               const allocatedSellFees = roundMoney(totalSellFees - allocatedSellFeesTotal);
               db.prepare(`
                 INSERT INTO real_fifo_consumptions
-                  (consumption_id, character_id, sell_record_id, lot_id, type_id, location_id,
-                   quantity, unit_cost, allocated_sell_fees, realized_pnl, pnl_status, calculation_version)
-                VALUES (?, ?, ?, 'UNKNOWN_SOURCE', ?, ?, ?, NULL, ?, NULL, 'UNKNOWN_COST', ?)
+                  (consumption_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+                   sell_record_id, lot_id, type_id, location_id, quantity, unit_cost,
+                   allocated_sell_fees, realized_pnl, pnl_status, calculation_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'UNKNOWN_SOURCE', ?, ?, ?, NULL, ?, NULL, 'UNKNOWN_COST', ?)
               `).run(
                 'CONS-' + randomUUID(),
                 characterId,
+                ...lineageValues,
                 record.record_id,
                 record.type_id,
                 record.location_id,
@@ -338,9 +523,9 @@ export class P93FifoService {
           SELECT
             COALESCE(SUM(CASE WHEN pnl_status = 'CALCULATED' THEN realized_pnl ELSE 0 END), 0) AS realized,
             SUM(CASE WHEN pnl_status = 'UNKNOWN_COST' THEN 1 ELSE 0 END) AS unknown_count
-          FROM real_fifo_consumptions WHERE character_id = ?
-        `).get(characterId) as any;
-        const afterHash = snapshotHash(db, characterId);
+          FROM real_fifo_consumptions WHERE character_id = ? AND ${ownerPredicate.sql}
+        `).get(characterId, ...ownerPredicate.params) as any;
+        const afterHash = snapshotHash(db, characterId, owner);
         const before = previousRun ? {
           realizedPnl: previousRun.realized_pnl,
           unknownCostCount: previousRun.unknown_cost_count,
@@ -353,89 +538,119 @@ export class P93FifoService {
         };
         db.prepare(`
           UPDATE real_calculation_runs
-          SET status = 'COMPLETED', completed_at = datetime('now'), record_count = ?,
+          SET status = 'COMPLETED', completed_at = ?, record_count = ?,
               realized_pnl = ?, unknown_cost_count = ?, after_hash = ?, differences_json = ?
-          WHERE run_id = ?
+          WHERE run_id = ? AND character_id = ? AND ${ownerPredicate.sql}
         `).run(
+          new Date().toISOString(),
           records.length,
           after.realizedPnl,
           after.unknownCostCount,
           afterHash,
           JSON.stringify({ before, after }),
           runId,
+          characterId,
+          ...ownerPredicate.params,
         );
       });
       tx();
     } catch (error) {
       db.prepare(`
         UPDATE real_calculation_runs
-        SET status = 'FAILED', completed_at = datetime('now'), error = ?
-        WHERE run_id = ?
-      `).run(error instanceof Error ? error.message : String(error), runId);
+        SET status = 'FAILED', completed_at = ?, error = ?
+        WHERE run_id = ? AND character_id = ? AND ${ownerPredicate.sql}
+      `).run(
+        new Date().toISOString(),
+        error instanceof Error ? error.message : String(error),
+        runId,
+        characterId,
+        ...ownerPredicate.params,
+      );
       throw error;
     }
 
-    return db.prepare('SELECT * FROM real_calculation_runs WHERE run_id = ?').get(runId) as Record<string, unknown>;
+    return db.prepare(`SELECT * FROM real_calculation_runs
+      WHERE run_id = ? AND character_id = ? AND ${ownerPredicate.sql}`)
+      .get(runId, characterId, ...ownerPredicate.params) as Record<string, unknown>;
   }
 
-  static performance(db: Db, characterId: number): P93Performance {
+  static performance(
+    db: Db,
+    characterId: number,
+    lineage?: AssetLineage | null,
+  ): P93Performance {
+    const owner = resolveRealLedgerLineage(db, characterId, lineage);
+    const ownerPredicate = fifoPredicate(owner);
+    const consumptionPredicate = fifoAliasPredicate('c', owner);
     const consumption = db.prepare(`
       SELECT
         COALESCE(SUM(CASE WHEN pnl_status = 'CALCULATED' THEN realized_pnl ELSE 0 END), 0) AS known_pnl,
         SUM(CASE WHEN pnl_status = 'UNKNOWN_COST' THEN 1 ELSE 0 END) AS unknown_count,
         COUNT(*) AS consumption_count
-      FROM real_fifo_consumptions WHERE character_id = ?
-    `).get(characterId) as any;
+      FROM real_fifo_consumptions WHERE character_id = ? AND ${ownerPredicate.sql}
+    `).get(characterId, ...ownerPredicate.params) as any;
     const trades = db.prepare(`
       SELECT
         COUNT(*) AS trade_count,
         COALESCE(SUM(CASE WHEN direction = 'BUY' THEN gross_amount ELSE 0 END), 0) AS buy_amount,
         COALESCE(SUM(CASE WHEN direction = 'SELL' THEN gross_amount ELSE 0 END), 0) AS sell_amount
       FROM real_trade_records
-      WHERE character_id = ? AND record_state = 'VERIFIED' AND verification_status = 'VERIFIED' AND is_paper = 0
+      WHERE character_id = ? AND ${ownerPredicate.sql}
+        AND record_state = 'VERIFIED' AND verification_status = 'VERIFIED' AND is_paper = 0
         AND trade_kind IN ('BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL')
-    `).get(characterId) as any;
+    `).get(characterId, ...ownerPredicate.params) as any;
     const fees = db.prepare(`
       SELECT COALESCE(SUM(f.amount), 0) AS total,
              SUM(CASE WHEN f.treatment = 'UNKNOWN' THEN 1 ELSE 0 END) AS unknown_rows
       FROM real_trade_fees f
       JOIN real_trade_records r ON r.record_id = f.record_id
-      WHERE r.character_id = ? AND r.record_state = 'VERIFIED' AND r.verification_status = 'VERIFIED'
+      WHERE r.character_id = ? AND ${fifoAliasPredicate('r', owner).sql}
+        AND r.record_state = 'VERIFIED' AND r.verification_status = 'VERIFIED'
         AND r.is_paper = 0 AND r.fee_status = 'COMPLETE' AND f.treatment <> 'UNRELATED'
-    `).get(characterId) as any;
+    `).get(characterId, ...fifoAliasPredicate('r', owner).params) as any;
     const unknownFeeTrades = Number((db.prepare(`
       SELECT COUNT(*) AS n FROM real_trade_records
-      WHERE character_id = ? AND record_state = 'VERIFIED' AND verification_status = 'VERIFIED'
+      WHERE character_id = ? AND ${ownerPredicate.sql}
+        AND record_state = 'VERIFIED' AND verification_status = 'VERIFIED'
         AND is_paper = 0 AND fee_status = 'UNKNOWN'
-    `).get(characterId) as any)?.n || 0);
+    `).get(characterId, ...ownerPredicate.params) as any)?.n || 0);
     const lots = db.prepare(`
       SELECT
         COUNT(*) AS lot_count,
         COALESCE(SUM(CASE WHEN cost_status = 'KNOWN' THEN remaining_cost ELSE 0 END), 0) AS known_cost,
         SUM(CASE WHEN cost_status <> 'KNOWN' AND remaining_quantity > 0 THEN 1 ELSE 0 END) AS unknown_count,
         COALESCE(SUM(CASE WHEN cost_status = 'KNOWN' THEN remaining_cost ELSE 0 END), 0) AS capital
-      FROM real_fifo_lots WHERE character_id = ? AND remaining_quantity > 0
-    `).get(characterId) as any;
-    const unknownCostCount = Number(consumption?.unknown_count || 0) + Number(lots?.unknown_count || 0);
-    const realizedPnl = unknownCostCount > 0 ? null : roundMoney(Number(consumption?.known_pnl || 0));
+      FROM real_fifo_lots WHERE character_id = ? AND ${ownerPredicate.sql} AND remaining_quantity > 0
+    `).get(characterId, ...ownerPredicate.params) as any;
+    // Unknown sold cost invalidates realized P&L; unknown OPEN lots only
+    // invalidate inventory valuation and capital occupation.
+    const unknownConsumptionCount = Number(consumption?.unknown_count || 0);
+    const unknownOpenLotCount = Number(lots?.unknown_count || 0);
+    const unknownCostCount = unknownConsumptionCount + unknownOpenLotCount;
+    const realizedPnl = unknownConsumptionCount > 0 ? null : roundMoney(Number(consumption?.known_pnl || 0));
 
     const sellStats = db.prepare(`
-      SELECT COUNT(*) AS sell_count,
-             SUM(CASE WHEN pnl IS NOT NULL AND pnl > 0 THEN 1 ELSE 0 END) AS profitable_sells
-      FROM (
+      WITH sell_pnl AS (
         SELECT c.sell_record_id,
                CASE WHEN SUM(CASE WHEN c.pnl_status = 'UNKNOWN_COST' THEN 1 ELSE 0 END) > 0 THEN NULL
                     ELSE SUM(c.realized_pnl) END AS pnl
         FROM real_fifo_consumptions c
         JOIN real_trade_records r ON r.record_id = c.sell_record_id
-        WHERE c.character_id = ? AND r.record_state = 'VERIFIED'
+        WHERE c.character_id = ? AND ${consumptionPredicate.sql}
+          AND r.record_state = 'VERIFIED'
           AND r.verification_status = 'VERIFIED' AND r.is_paper = 0 AND r.direction = 'SELL'
         GROUP BY c.sell_record_id
       )
-    `).get(characterId) as any;
-    const profitableTradeRatio = unknownCostCount > 0 || Number(sellStats?.sell_count || 0) === 0
+      SELECT SUM(CASE WHEN pnl IS NOT NULL THEN 1 ELSE 0 END) AS deterministic_sell_count,
+             SUM(CASE WHEN pnl IS NULL THEN 1 ELSE 0 END) AS unknown_cost_sell_count,
+             SUM(CASE WHEN pnl IS NOT NULL AND pnl > 0 THEN 1 ELSE 0 END) AS profitable_sells
+      FROM sell_pnl
+    `).get(characterId, ...consumptionPredicate.params) as any;
+    const deterministicSellCount = Number(sellStats?.deterministic_sell_count || 0);
+    const unknownCostSellCount = Number(sellStats?.unknown_cost_sell_count || 0);
+    const profitableTradeRatio = deterministicSellCount === 0
       ? null
-      : Number(sellStats.profitable_sells || 0) / Number(sellStats.sell_count);
+      : Number(sellStats?.profitable_sells || 0) / deterministicSellCount;
 
     const holding = db.prepare(`
       SELECT AVG(julianday(s.trade_time) - julianday(b.trade_time)) AS days
@@ -443,8 +658,9 @@ export class P93FifoService {
       JOIN real_trade_records s ON s.record_id = c.sell_record_id
       JOIN real_fifo_lots l ON l.lot_id = c.lot_id
       JOIN real_trade_records b ON b.record_id = l.source_record_id
-      WHERE c.character_id = ? AND c.pnl_status = 'CALCULATED'
-    `).get(characterId) as any;
+      WHERE c.character_id = ? AND ${consumptionPredicate.sql}
+        AND c.pnl_status = 'CALCULATED'
+    `).get(characterId, ...consumptionPredicate.params) as any;
 
     const group = (column: 'type_id' | 'location_id') => db.prepare(`
       SELECT ${column} AS key,
@@ -452,11 +668,13 @@ export class P93FifoService {
              SUM(CASE WHEN c.pnl_status = 'UNKNOWN_COST' THEN 1 ELSE 0 END) AS unknown_count,
              COUNT(DISTINCT c.sell_record_id) AS trade_count
       FROM real_fifo_consumptions c
-      WHERE c.character_id = ?
+      WHERE c.character_id = ? AND ${consumptionPredicate.sql}
       GROUP BY ${column}
       ORDER BY key
-    `).all(characterId) as any[];
+    `).all(characterId, ...consumptionPredicate.params) as any[];
 
+    const planOwnership = p9LineagePredicate('p', lineage);
+    const opportunityOwnership = p9LineagePredicate('o', lineage);
     const byStrategy = db.prepare(`
       SELECT COALESCE(p.strategy, o.strategy) AS strategy,
              COALESCE(SUM(CASE WHEN c.pnl_status = 'CALCULATED' THEN c.realized_pnl ELSE 0 END), 0) AS known_pnl,
@@ -464,12 +682,20 @@ export class P93FifoService {
              COUNT(DISTINCT c.sell_record_id) AS trade_count
       FROM real_fifo_consumptions c
       JOIN real_trade_records r ON r.record_id = c.sell_record_id
-      LEFT JOIN p9_trade_plans p ON p.plan_id = r.plan_id
-      LEFT JOIN p9_real_opportunities o ON o.opportunity_id = r.opportunity_id
-      WHERE c.character_id = ? AND r.is_paper = 0
+      LEFT JOIN p9_trade_plans p
+        ON p.plan_id = r.plan_id AND ${planOwnership.sql}
+      LEFT JOIN p9_real_opportunities o
+        ON o.opportunity_id = r.opportunity_id AND ${opportunityOwnership.sql}
+      WHERE c.character_id = ? AND ${consumptionPredicate.sql}
+        AND r.is_paper = 0
       GROUP BY COALESCE(p.strategy, o.strategy)
       ORDER BY strategy
-    `).all(characterId) as any[];
+    `).all(
+      ...planOwnership.params,
+      ...opportunityOwnership.params,
+      characterId,
+      ...consumptionPredicate.params,
+    ) as any[];
 
     const singleTradePnl = db.prepare(`
       SELECT c.sell_record_id AS recordId,
@@ -477,20 +703,21 @@ export class P93FifoService {
                   ELSE ROUND(SUM(c.realized_pnl), 2) END AS pnl
       FROM real_fifo_consumptions c
       JOIN real_trade_records r ON r.record_id = c.sell_record_id AND r.is_paper = 0
-      WHERE c.character_id = ?
+      WHERE c.character_id = ? AND ${consumptionPredicate.sql}
       GROUP BY c.sell_record_id
       ORDER BY recordId
-    `).all(characterId) as any[];
+    `).all(characterId, ...consumptionPredicate.params) as any[];
 
     return {
+      freshness: calculationFreshness(db, characterId, owner),
       realizedPnl,
       knownRealizedPnl: roundMoney(Number(consumption?.known_pnl || 0)),
-      unrealizedPnl: this.unrealized(db, characterId).unrealizedPnl as number | null,
+      unrealizedPnl: this.unrealized(db, characterId, lineage).unrealizedPnl as number | null,
       totalFees: unknownFeeTrades > 0 || Number(fees?.unknown_rows || 0) > 0 ? null : roundMoney(Number(fees?.total || 0)),
       cumulativeBuyAmount: roundMoney(Number(trades?.buy_amount || 0)),
       cumulativeSellAmount: roundMoney(Number(trades?.sell_amount || 0)),
-      inventoryCost: unknownCostCount > 0 ? null : roundMoney(Number(lots?.known_cost || 0)),
-      capitalOccupied: unknownCostCount > 0 ? null : roundMoney(Number(lots?.capital || 0)),
+      inventoryCost: unknownOpenLotCount > 0 ? null : roundMoney(Number(lots?.known_cost || 0)),
+      capitalOccupied: unknownOpenLotCount > 0 ? null : roundMoney(Number(lots?.capital || 0)),
       tradeCount: Number(trades?.trade_count || 0),
       profitableTradeRatio,
       averageHoldingDays: holding?.days == null ? null : Number(holding.days),
@@ -498,33 +725,48 @@ export class P93FifoService {
       byType: group('type_id').map((row) => ({ typeId: row.key, realizedPnl: row.unknown_count ? null : roundMoney(row.known_pnl), tradeCount: row.trade_count })),
       byLocation: group('location_id').map((row) => ({ locationId: row.key, realizedPnl: row.unknown_count ? null : roundMoney(row.known_pnl), tradeCount: row.trade_count })),
       byStrategy: byStrategy.map((row) => ({ strategy: row.strategy ?? null, realizedPnl: row.unknown_count ? null : roundMoney(row.known_pnl), tradeCount: row.trade_count })),
+      unknownConsumptionCount,
+      unknownOpenLotCount,
+      unknownCostSellCount,
+      deterministicSellCount,
       unknownCostCount,
     };
   }
 
-  static unrealized(db: Db, characterId: number): Record<string, unknown> {
+  static unrealized(
+    db: Db,
+    characterId: number,
+    lineage?: AssetLineage | null,
+  ): Record<string, unknown> {
+    const owner = resolveRealLedgerLineage(db, characterId, lineage);
+    const lotOwnership = fifoPredicate(owner);
     const lotRows = db.prepare(`
       SELECT type_id, location_id, SUM(remaining_quantity) AS quantity,
              SUM(COALESCE(remaining_cost, 0)) AS known_cost,
              SUM(CASE WHEN cost_status <> 'KNOWN' THEN 1 ELSE 0 END) AS unknown_lots
       FROM real_fifo_lots
-      WHERE character_id = ? AND remaining_quantity > 0
+      WHERE character_id = ? AND ${lotOwnership.sql} AND remaining_quantity > 0
       GROUP BY type_id, location_id
-    `).all(characterId) as any[];
+    `).all(characterId, ...lotOwnership.params) as any[];
     const costKnown = lotRows.every((row) => Number(row.unknown_lots || 0) === 0);
     const inventoryCost = costKnown ? roundMoney(lotRows.reduce((sum, row) => sum + Number(row.known_cost || 0), 0)) : null;
 
+    const snapshotOwnership = owner
+      ? assetLineagePredicate(null, owner)
+      : { sql: 'owner_user_id IS NULL AND owner_chat_id IS NULL AND binding_epoch = 0', params: [] };
     const latestSnapshot = db.prepare(`
       SELECT snapshot_id FROM real_asset_snapshots
-      WHERE character_id = ? AND status = 'COMPLETED'
+      WHERE character_id = ? AND status = 'COMPLETED' AND ${snapshotOwnership.sql}
       ORDER BY completed_at DESC, snapshot_id DESC LIMIT 1
-    `).get(characterId) as any;
+    `).get(characterId, ...snapshotOwnership.params) as any;
+    const valuationOwnership = snapshotOwnership;
     const latest = latestSnapshot ? db.prepare(`
       SELECT valuation_id, snapshot_id, market_snapshot_at, fee_model_version
       FROM real_asset_valuations
       WHERE character_id = ? AND snapshot_id = ? AND status = 'COMPLETED'
+        AND ${valuationOwnership.sql}
       ORDER BY created_at DESC, valuation_id DESC LIMIT 1
-    `).get(characterId, latestSnapshot.snapshot_id) as any : null;
+    `).get(characterId, latestSnapshot.snapshot_id, ...valuationOwnership.params) as any : null;
     const valuationRows = latest ? db.prepare(`
       SELECT si.type_id, si.location_id, SUM(vi.quantity) AS quantity,
              SUM(vi.market_reference_value) AS market_reference_value,

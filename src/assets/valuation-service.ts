@@ -5,6 +5,7 @@ import { DataCenter } from '../trading/data-center.js';
 import { FeeEngine, ALPHA_DEFAULT_SKILLS, FEE_MODEL_VERSION } from '../trading/fee-engine.js';
 import type { FeeContext, OrderBookLevel } from '../trading/types.js';
 import { BUCKET_SQL_CASE, type InventoryBucket } from './inventory-service.js';
+import { assetLineagePredicate, type AssetLineage } from './asset-lineage.js';
 
 /**
  * P9.2.4 multi-perspective asset valuation.
@@ -118,13 +119,19 @@ export class RealValuationService {
   static run(
     db: Db,
     characterId: number,
+    lineage: AssetLineage,
     options: { snapshotId?: string; hubLocationId?: number; hubRegionId?: number } = {},
   ): ValuationRunResult {
+    const snapshotOwnership = assetLineagePredicate(null, lineage);
     const snapshot = options.snapshotId
-      ? db.prepare("SELECT * FROM real_asset_snapshots WHERE snapshot_id = ? AND character_id = ? AND status = 'COMPLETED'")
-        .get(options.snapshotId, characterId) as any
-      : db.prepare("SELECT * FROM real_asset_snapshots WHERE character_id = ? AND status = 'COMPLETED' AND is_latest = 1 LIMIT 1")
-        .get(characterId) as any;
+      ? db.prepare(`SELECT * FROM real_asset_snapshots
+          WHERE snapshot_id = ? AND character_id = ? AND status = 'COMPLETED'
+            AND ${snapshotOwnership.sql}`)
+        .get(options.snapshotId, characterId, ...snapshotOwnership.params) as any
+      : db.prepare(`SELECT * FROM real_asset_snapshots
+          WHERE character_id = ? AND status = 'COMPLETED' AND is_latest = 1
+            AND ${snapshotOwnership.sql} LIMIT 1`)
+        .get(characterId, ...snapshotOwnership.params) as any;
     if (!snapshot) throw new Error('没有可用的完整资产快照，无法估值。');
 
     const hubLocationId = options.hubLocationId ?? 60003760;   // Jita trade hub (SDE-verified in P9.1)
@@ -134,11 +141,23 @@ export class RealValuationService {
 
     db.prepare(`
       INSERT INTO real_asset_valuations
-        (valuation_id, character_id, snapshot_id, hub_location_id, hub_region_id,
+        (valuation_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         snapshot_id, hub_location_id, hub_region_id,
          market_snapshot_at, fee_model_version, status, created_at)
-      VALUES (?, ?, ?, ?, ?, NULL, ?, 'RUNNING', ?)
-    `).run(valuationId, characterId, snapshot.snapshot_id, hubLocationId, hubRegionId,
-      FEE_MODEL_VERSION, createdAt);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'RUNNING', ?)
+    `).run(
+      valuationId,
+      characterId,
+      lineage.ownerUserId,
+      lineage.ownerChatId,
+      lineage.bindingEpoch,
+      lineage.bindingDigest,
+      snapshot.snapshot_id,
+      hubLocationId,
+      hubRegionId,
+      FEE_MODEL_VERSION,
+      createdAt,
+    );
 
     try {
       const assetRows = db.prepare(`
@@ -385,18 +404,21 @@ export class RealValuationService {
     }
   }
 
-  static listRuns(db: Db, characterId: number, limit = 20): any[] {
+  static listRuns(db: Db, characterId: number, lineage: AssetLineage, limit = 20): any[] {
+    const ownership = assetLineagePredicate(null, lineage);
     return db.prepare(`
       SELECT * FROM real_asset_valuations
-      WHERE character_id = ?
+      WHERE character_id = ? AND ${ownership.sql}
       ORDER BY created_at DESC LIMIT ?
-    `).all(characterId, clampPositiveInteger(limit, 20, 200));
+    `).all(characterId, ...ownership.params, clampPositiveInteger(limit, 20, 200));
   }
 
-  static getRun(db: Db, characterId: number, valuationId: string): { header: any; items: any[] } | null {
+  static getRun(db: Db, characterId: number, valuationId: string, lineage: AssetLineage): { header: any; items: any[] } | null {
+    const ownership = assetLineagePredicate(null, lineage);
     const header = db.prepare(
-      'SELECT * FROM real_asset_valuations WHERE valuation_id = ? AND character_id = ?',
-    ).get(valuationId, characterId) as any;
+      `SELECT * FROM real_asset_valuations
+       WHERE valuation_id = ? AND character_id = ? AND ${ownership.sql}`,
+    ).get(valuationId, characterId, ...ownership.params) as any;
     if (!header) return null;
     const items = db.prepare(`
       SELECT * FROM real_asset_valuation_items WHERE valuation_id = ?
@@ -410,12 +432,13 @@ export class RealValuationService {
   }
 
   /** Overview aggregates from the latest COMPLETED run (null stays null). */
-  static latestTotals(db: Db, characterId: number): Record<string, unknown> | null {
+  static latestTotals(db: Db, characterId: number, lineage: AssetLineage): Record<string, unknown> | null {
+    const ownership = assetLineagePredicate(null, lineage);
     const header = db.prepare(`
       SELECT * FROM real_asset_valuations
-      WHERE character_id = ? AND status = 'COMPLETED'
+      WHERE character_id = ? AND status = 'COMPLETED' AND ${ownership.sql}
       ORDER BY created_at DESC LIMIT 1
-    `).get(characterId) as any;
+    `).get(characterId, ...ownership.params) as any;
     if (!header) return null;
     const sums = db.prepare(`
       SELECT
@@ -454,15 +477,16 @@ export class RealValuationService {
     };
   }
   /** Category and hub summaries for the valuation analysis page. */
-  static summaries(db: Db, characterId: number): {
+  static summaries(db: Db, characterId: number, lineage: AssetLineage): {
     latest: Record<string, unknown> | null;
     buckets: any[];
     hubs: any[];
   } {
-    const latest = this.latestTotals(db, characterId);
+    const latest = this.latestTotals(db, characterId, lineage);
     const latestHeader = latest
-      ? db.prepare('SELECT valuation_id FROM real_asset_valuations WHERE valuation_id = ?')
-        .get(latest.valuationId) as { valuation_id: string } | undefined
+      ? db.prepare(`SELECT valuation_id FROM real_asset_valuations
+          WHERE valuation_id = ? AND ${assetLineagePredicate(null, lineage).sql}`)
+        .get(latest.valuationId, ...assetLineagePredicate(null, lineage).params) as { valuation_id: string } | undefined
       : undefined;
     const buckets = latestHeader
       ? db.prepare(`
@@ -500,10 +524,11 @@ export class RealValuationService {
       FROM real_asset_valuations v
       LEFT JOIN real_asset_valuation_items vi ON vi.valuation_id = v.valuation_id
       WHERE v.character_id = ? AND v.status = 'COMPLETED'
+        AND ${assetLineagePredicate('v', lineage).sql}
       GROUP BY v.valuation_id
       ORDER BY v.created_at DESC
       LIMIT 50
-    `).all(characterId) as any[];
+    `).all(characterId, ...assetLineagePredicate('v', lineage).params) as any[];
     return {
       latest,
       buckets: buckets.map((row) => ({

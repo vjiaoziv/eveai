@@ -5,6 +5,7 @@ import { callEsiOperation, type EsiExecutionGuard } from './esi-client.js';
 import { getEveCapabilities } from './capabilities.js';
 import { getLinkedCharacter } from './sso.js';
 import type { UserContext } from '../auth/user-resolver.js';
+import { RealAssetSyncService } from '../assets/asset-sync-service.js';
 
 /**
  * Character datastore sync: mirrors the private ESI profile of the ACTIVE
@@ -92,8 +93,7 @@ export function datasetsForTables(tables: readonly string[]): CharacterDatasetId
   return [...datasets];
 }
 
-// --- payload coercion helpers (ESI is an external boundary: validate loosely,
-// skip unkeyable rows, never throw on a missing optional field) ---
+// --- payload coercion helpers (ESI is an external boundary) ---
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -155,51 +155,83 @@ async function callCharacterOp<T>(
 // --- dataset sync implementations ---
 
 async function syncAssets(db: Db, characterId: number, ctx: UserContext, guard: EsiExecutionGuard): Promise<SyncWriteResult> {
-  const result = await callCharacterOp<unknown[]>('get_characters_character_id_assets', ctx, guard, db);
-  if (!result.ok) throw new Error(result.error);
-  const rows = asArray(result.data);
-  const insert = db.prepare(`
-    INSERT INTO character_assets (
-      character_id, item_id, type_id, location_id, location_type, location_flag,
-      quantity, is_singleton, is_blueprint_copy, data_json, synced_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-  `);
-  db.transaction(() => {
-    db.prepare('DELETE FROM character_assets WHERE character_id = ?').run(characterId);
-    for (const raw of rows) {
-      const item = asRecord(raw);
-      const itemId = intOrNull(item?.item_id);
-      const typeId = intOrNull(item?.type_id);
-      const locationId = numOrNull(item?.location_id);
-      if (!item || itemId === null || typeId === null || locationId === null) continue;
-      insert.run(
-        characterId, itemId, typeId, locationId,
-        strOrNull(item.location_type), strOrNull(item.location_flag),
-        intOrNull(item.quantity), bool01(item.is_singleton),
-        item.is_blueprint_copy === undefined ? null : bool01(item.is_blueprint_copy),
-        JSON.stringify(item),
-      );
-    }
-  })();
-  return { rows: rows.length, expiresAt: result.expiresAt };
+  // Compatibility adapter only: every runtime mirror/snapshot write goes
+  // through the coordinator so lease, generation and lineage fencing apply.
+  const result = await RealAssetSyncService.syncCharacter(
+    db,
+    characterId,
+    { ...ctx, characterId },
+    'auto',
+    guard,
+  );
+  return {
+    rows: result.itemsFetched,
+    expiresAt: sqlNowPlus(config.characterSync.fallbackTtlSeconds),
+  };
 }
 
 async function syncWallet(db: Db, characterId: number, ctx: UserContext, guard: EsiExecutionGuard): Promise<SyncWriteResult> {
-  const result = await callCharacterOp<number>('get_characters_character_id_wallet', ctx, guard, db);
+  const result = await callCharacterOp<unknown>('get_characters_character_id_wallet', ctx, guard, db);
   if (!result.ok) throw new Error(result.error);
-  const balance = typeof result.data === 'number' && Number.isFinite(result.data) ? result.data : 0;
+  if (typeof result.data !== 'number' || !Number.isFinite(result.data) || result.data < 0) {
+    throw new Error('ESI 钱包余额响应不是有限数值或为负数，保留上一份有效余额并标记本次同步失败。');
+  }
   db.prepare(`
     INSERT INTO character_wallet (character_id, balance, synced_at)
     VALUES (?, ?, datetime('now'))
     ON CONFLICT(character_id) DO UPDATE SET balance = excluded.balance, synced_at = excluded.synced_at
-  `).run(characterId, balance);
+  `).run(characterId, result.data);
   return { rows: 1, expiresAt: result.expiresAt };
 }
 
 async function syncWalletJournal(db: Db, characterId: number, ctx: UserContext, guard: EsiExecutionGuard): Promise<SyncWriteResult> {
   const result = await callCharacterOp<unknown[]>('get_characters_character_id_wallet_journal', ctx, guard, db);
   if (!result.ok) throw new Error(result.error);
-  const rows = asArray(result.data);
+  if (!Array.isArray(result.data)) {
+    throw new Error('ESI 钱包日志响应不是数组，保留上一份有效日志并标记本次同步失败。');
+  }
+  const rows = result.data.map((raw, index) => {
+    const entry = asRecord(raw);
+    const prefix = `ESI 钱包日志第 ${index + 1} 行`;
+    if (!entry) throw new Error(`${prefix}不是对象，拒绝整批写入。`);
+    const journalId = intOrNull(entry.id);
+    if (journalId === null || journalId <= 0) {
+      throw new Error(`${prefix}的 id 必须是正安全整数，拒绝整批写入。`);
+    }
+    const date = strOrNull(entry.date);
+    if (!date || Number.isNaN(Date.parse(date))) {
+      throw new Error(`${prefix}的 date 必须可解析，拒绝整批写入。`);
+    }
+    const refType = strOrNull(entry.ref_type);
+    if (!refType) throw new Error(`${prefix}缺少 ref_type，拒绝整批写入。`);
+    if (typeof entry.amount !== 'number' || !Number.isFinite(entry.amount)) {
+      throw new Error(`${prefix}的 amount 必须是有限数值，拒绝整批写入。`);
+    }
+    if (typeof entry.balance !== 'number' || !Number.isFinite(entry.balance)) {
+      throw new Error(`${prefix}的 balance 必须是有限数值，拒绝整批写入。`);
+    }
+    if (typeof entry.description !== 'string') {
+      throw new Error(`${prefix}的 description 必须是字符串，拒绝整批写入。`);
+    }
+    const optionalId = (value: unknown, field: string): number | null => {
+      if (value === undefined || value === null) return null;
+      const parsed = intOrNull(value);
+      if (parsed === null || parsed <= 0) {
+        throw new Error(`${prefix}的 ${field} 必须是正安全整数或省略，拒绝整批写入。`);
+      }
+      return parsed;
+    };
+    const firstPartyId = optionalId(entry.first_party_id, 'first_party_id');
+    const secondPartyId = optionalId(entry.second_party_id, 'second_party_id');
+    const contextId = optionalId(entry.context_id, 'context_id');
+    const contextIdType = entry.context_id_type === undefined || entry.context_id_type === null
+      ? null
+      : strOrNull(entry.context_id_type);
+    if (entry.context_id_type !== undefined && entry.context_id_type !== null && contextIdType === null) {
+      throw new Error(`${prefix}的 context_id_type 必须是非空字符串或省略，拒绝整批写入。`);
+    }
+    return { entry, journalId, date, refType, firstPartyId, secondPartyId, contextId, contextIdType };
+  });
   // Journal entries are immutable and id-keyed: upsert, never delete, so
   // history older than the page cap survives every refresh.
   const upsert = db.prepare(`
@@ -222,17 +254,14 @@ async function syncWalletJournal(db: Db, characterId: number, ctx: UserContext, 
       synced_at = excluded.synced_at
   `);
   db.transaction(() => {
-    for (const raw of rows) {
-      const entry = asRecord(raw);
-      const journalId = numOrNull(entry?.id);
-      if (!entry || journalId === null) continue;
+    for (const row of rows) {
       upsert.run(
-        characterId, journalId,
-        strOrNull(entry.date), strOrNull(entry.ref_type),
-        numOrNull(entry.amount), numOrNull(entry.balance),
-        numOrNull(entry.first_party_id), numOrNull(entry.second_party_id),
-        strOrNull(entry.description), numOrNull(entry.context_id),
-        strOrNull(entry.context_id_type), JSON.stringify(entry),
+        characterId, row.journalId,
+        row.date, row.refType,
+        row.entry.amount, row.entry.balance,
+        row.firstPartyId, row.secondPartyId,
+        row.entry.description, row.contextId,
+        row.contextIdType, JSON.stringify(row.entry),
       );
     }
   })();

@@ -500,6 +500,8 @@ export async function handleAgentMessage(
   threadId: string,
   ctx: UserContext,
   userText: string,
+  /** Viewer locale for this turn; falls back to the configured default. */
+  locale?: string,
 ): Promise<AgentResult> {
   ensureThreadOwnership(db, threadId, ctx);
   if (isTurnAborted()) throw new Error(TURN_ABORTED_MESSAGE);
@@ -626,7 +628,7 @@ export async function handleAgentMessage(
       userProfile,
       runtimeLiveSummary,
       promptMode,
-      config.openai.responseLanguage,
+      locale ?? config.openai.responseLanguage,
       config.openai.programmaticToolCalling,
     );
 
@@ -643,6 +645,7 @@ export async function handleAgentMessage(
     turnIdentity,
     Math.max(1, rootDeadlineAt - Date.now()),
     promptMode,
+    locale,
   );
 
   // Advance the pre-turn compaction counter. Stateless prompts are rebuilt from
@@ -903,6 +906,7 @@ async function runNativeAgentLoop(
   deadlineMs: number = config.openai.turnDeadlineMs,
   /** Set when the thread already decided which assistant is answering. */
   toolMode?: 'full' | 'static_aggregate' | 'perimeter',
+  locale?: string,
 ): Promise<AgentResult> {
   const requestId = createRequestId();
   const terminalFailure = (
@@ -928,7 +932,7 @@ async function runNativeAgentLoop(
   const turnContext = buildAgentTurnContext(turnIdentity, {
     requestId,
     threadId,
-    locale: config.openai.responseLanguage,
+    locale: locale ?? config.openai.responseLanguage,
     deadlineMs: Math.max(1, deadlineMs),
   });
   const turnDeadlineExceeded = (): boolean => Date.now() >= turnContext.deadlineAt;

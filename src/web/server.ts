@@ -65,17 +65,49 @@ export async function createServer(db: Db) {
 
 const log = createLogger('web');
 
+const STATUS_ERROR_CODES: Record<number, string> = {
+  400: 'bad_request',
+  401: 'unauthorized',
+  403: 'forbidden',
+  404: 'not_found',
+  405: 'method_not_allowed',
+  409: 'conflict',
+  413: 'payload_too_large',
+  415: 'unsupported_media_type',
+  429: 'too_many_requests',
+};
+
+const FASTIFY_ERROR_CODES: Record<string, string> = {
+  FST_ERR_VALIDATION: 'invalid_request_body',
+  FST_ERR_CTP_INVALID_JSON_BODY: 'invalid_request_body',
+  FST_ERR_CTP_EMPTY_JSON_BODY: 'invalid_request_body',
+  FST_ERR_CTP_INVALID_MEDIA_TYPE: 'unsupported_media_type',
+  FST_ERR_CTP_BODY_TOO_LARGE: 'payload_too_large',
+  FST_ERR_NOT_FOUND: 'not_found',
+  FST_ERR_BAD_URL: 'bad_request',
+};
+
+/** Framework 4xx answers with a machine code; details stay in the server log. */
+function fastifyErrorCode(error: FastifyError, statusCode: number): string {
+  const mapped = typeof error.code === 'string' ? FASTIFY_ERROR_CODES[error.code] : undefined;
+  if (mapped) return mapped;
+  const raw = typeof error.code === 'string' ? error.code.toLowerCase() : '';
+  if (/^[a-z][a-z0-9_]*$/.test(raw)) return raw;
+  return STATUS_ERROR_CODES[statusCode] ?? 'request_failed';
+}
+
 /**
  * Last-resort 500: Fastify's default handler serializes err.message, which
  * leaks SQLite codes/text and internal details to the browser. Framework 4xx
- * (bad JSON, unknown body shape) keeps its own safe message; anything else is
- * logged in full on the server and answered with a generic body.
+ * (bad JSON, unknown body shape) answers with a snake_case code and keeps its
+ * details in the server log; anything else is logged in full and answered
+ * with a generic body.
  */
 export function registerWebErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((error: FastifyError, request, reply) => {
     const statusCode = error.statusCode ?? 500;
     if (statusCode < 500) {
-      void reply.status(statusCode).send({ error: error.message });
+      void reply.status(statusCode).send({ error: fastifyErrorCode(error, statusCode) });
       return;
     }
     log.error(
@@ -84,7 +116,7 @@ export function registerWebErrorHandler(app: FastifyInstance): void {
       request.url,
       error.stack ?? error.message,
     );
-    void reply.status(500).send({ error: 'Внутренняя ошибка сервера.' });
+    void reply.status(500).send({ error: 'internal_server_error' });
   });
 }
 

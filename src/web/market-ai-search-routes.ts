@@ -33,7 +33,7 @@ const QUERY_MAX_LENGTH = 500;
 const USAGE_THREAD_ID = 'web-market-ai-search';
 /** Дешевле корневого хода чата (4): один лёгкий раннер без субагентов. */
 const AI_SEARCH_COST_UNITS = 2;
-const UNAVAILABLE_ERROR = 'Модель сейчас недоступна. Попробуйте повторить через минуту.';
+const UNAVAILABLE_CODE = 'model_unavailable';
 const RETRY_AFTER_UNAVAILABLE_SECONDS = 60;
 
 type AiSearchBody = { query?: unknown; region_id?: unknown };
@@ -49,23 +49,23 @@ export function registerMarketAiSearchRoutes(
 
     if (!config.web.aiSearchEnabled) {
       reply.header('Retry-After', String(RETRY_AFTER_UNAVAILABLE_SECONDS));
-      return reply.status(503).send({ error: 'АИ-поиск временно отключён.' });
+      return reply.status(503).send({ error: 'ai_search_disabled' });
     }
 
     const body = request.body;
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
-      return reply.status(400).send({ error: 'Некорректное тело запроса.' });
+      return reply.status(400).send({ error: 'invalid_request_body' });
     }
     const query = typeof body.query === 'string' ? body.query.trim() : '';
     if (query.length < QUERY_MIN_LENGTH || query.length > QUERY_MAX_LENGTH) {
-      return reply.status(400).send({ error: `Запрос должен содержать от ${QUERY_MIN_LENGTH} до ${QUERY_MAX_LENGTH} символов.` });
+      return reply.status(400).send({ error: 'query_length_out_of_range' });
     }
     let regionId = config.market.defaultRegionId;
     if (body.region_id !== undefined && body.region_id !== null) {
       const raw = body.region_id;
       const parsed = typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : null;
       if (parsed === null) {
-        return reply.status(400).send({ error: 'Некорректный регион.' });
+        return reply.status(400).send({ error: 'invalid_region' });
       }
       regionId = parsed;
     }
@@ -73,7 +73,7 @@ export function registerMarketAiSearchRoutes(
     // загружен: не валидируем, поиск и так деградирует честно.
     const tradeRegions = loadTradeRegions(db);
     if (tradeRegions.length > 0 && !tradeRegions.some((region) => region.region_id === regionId)) {
-      return reply.status(400).send({ error: 'Некорректный регион.' });
+      return reply.status(400).send({ error: 'invalid_region' });
     }
 
     const admission = admitWebEvent(db, {
@@ -100,7 +100,7 @@ export function registerMarketAiSearchRoutes(
         error instanceof Error ? error.message : String(error),
       );
       reply.header('Retry-After', String(RETRY_AFTER_UNAVAILABLE_SECONDS));
-      return reply.status(503).send({ error: UNAVAILABLE_ERROR });
+      return reply.status(503).send({ error: UNAVAILABLE_CODE });
     }
     if (outcome.usage) {
       // The AI-search runner never overrides the model, so the config model is
@@ -110,7 +110,7 @@ export function registerMarketAiSearchRoutes(
     }
     if (!outcome.ok) {
       reply.header('Retry-After', String(RETRY_AFTER_UNAVAILABLE_SECONDS));
-      return reply.status(503).send({ error: UNAVAILABLE_ERROR });
+      return reply.status(503).send({ error: UNAVAILABLE_CODE });
     }
 
     return { ok: true, results: hydratePicks(db, outcome.picks, regionId) };

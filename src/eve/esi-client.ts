@@ -32,6 +32,8 @@ type EsiCacheRow = {
 export type EsiExecutionGuard = {
   signal?: AbortSignal;
   identityCurrent?: () => boolean;
+  /** Trusted snapshot syncs must observe upstream state rather than a TTL cache. */
+  bypassCache?: boolean;
   /**
    * Page ceiling override for x-pages operations. Internal trusted callers
    * only (character datastore sync, local aggregators); model-driven calls
@@ -39,6 +41,29 @@ export type EsiExecutionGuard = {
    */
   maxPages?: number;
 };
+
+function strictPositiveInteger(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} 必须是正安全整数。`);
+  }
+  return value;
+}
+
+function requiredXPages(headers: Headers): number {
+  const raw = headers.get('x-pages');
+  if (raw === null) {
+    throw new Error('ESI paginated response is missing X-Pages; refusing to treat it as a complete single page.');
+  }
+  const value = raw.trim();
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new Error(`ESI X-Pages must be a positive integer, received ${JSON.stringify(raw)}.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error('ESI X-Pages exceeds the safe integer range.');
+  }
+  return strictPositiveInteger(parsed, 'ESI X-Pages');
+}
 
 /**
  * Delete expired esi_cache rows. The cache key embeds the full request URL, so
@@ -92,8 +117,8 @@ export async function callEsiOperation<T = unknown>(
   const cacheKey = buildCacheKey(
     operation, prepared.url.toString(), access.authenticated ? access.characterId : null,
   );
-  const cacheRow = operation.method === 'GET' ? readCacheRow(db, cacheKey) : null;
-  if (operation.method === 'GET') {
+  const cacheRow = operation.method === 'GET' && !guard.bypassCache ? readCacheRow(db, cacheKey) : null;
+  if (operation.method === 'GET' && !guard.bypassCache) {
     const cached = readFreshCachedResponse<T>(cacheRow);
     if (cached) return cached;
   }
@@ -274,6 +299,11 @@ async function fetchEsi<T>(
   let page = 1;
   let lastHeaders: Record<string, string> = {};
   let firstPageSnapshot: { etag: string | null; lastModified: string | null } | null = null;
+  let expectedTotalPages: number | null = null;
+  const configuredMaxPages = strictPositiveInteger(
+    guard.maxPages ?? config.esi.maxPages,
+    'ESI maximum page budget',
+  );
 
   while (true) {
     const pageUrl = new URL(url.toString());
@@ -311,7 +341,7 @@ async function fetchEsi<T>(
     const payload = value.status === 204
       ? null
       : parseResponseBody(await value.text());
-    if (operation.paginationType !== 'x-pages' || !operation.hiddenPageParam || !Array.isArray(payload)) {
+    if (operation.paginationType !== 'x-pages' || !operation.hiddenPageParam) {
       if (operation.method === 'GET') {
         writeCachedResponse(db, cacheKey, JSON.stringify(payload), responseHeaders);
       }
@@ -320,6 +350,46 @@ async function fetchEsi<T>(
         status: value.status,
         data: payload as T,
         cached: false,
+        headers: responseHeaders,
+      };
+    }
+
+    if (!Array.isArray(payload)) {
+      return {
+        ok: false,
+        status: 502,
+        error: 'ESI paginated response body is not an array; refusing to create an incomplete result.',
+        headers: responseHeaders,
+      };
+    }
+
+    let totalPages: number;
+    try {
+      totalPages = requiredXPages(value.headers);
+    } catch (error) {
+      return {
+        ok: false,
+        status: 502,
+        error: error instanceof Error ? error.message : String(error),
+        headers: responseHeaders,
+      };
+    }
+    if (totalPages > configuredMaxPages) {
+      const budgetSource = guard.maxPages !== undefined ? 'per-call page budget' : 'ESI_MAX_PAGES';
+      return {
+        ok: false,
+        status: 422,
+        error: `ESI pagination requires ${totalPages} pages, exceeds configured ${budgetSource}=${configuredMaxPages}.`,
+        headers: responseHeaders,
+      };
+    }
+    if (expectedTotalPages === null) {
+      expectedTotalPages = totalPages;
+    } else if (expectedTotalPages !== totalPages) {
+      return {
+        ok: false,
+        status: 409,
+        error: `ESI X-Pages changed during collection (${expectedTotalPages} -> ${totalPages}); retry later.`,
         headers: responseHeaders,
       };
     }
@@ -340,18 +410,7 @@ async function fetchEsi<T>(
     }
 
     pageData.push(...payload);
-    const maxPages = Math.max(1, Math.floor(guard.maxPages ?? config.esi.maxPages));
-    const totalPages = Number(value.headers.get('x-pages') ?? '1');
-    if (Number.isFinite(totalPages) && totalPages > maxPages) {
-      const budgetSource = guard.maxPages !== undefined ? 'per-call page budget' : 'ESI_MAX_PAGES';
-      return {
-        ok: false,
-        status: 422,
-        error: `ESI pagination requires ${totalPages} pages, exceeds configured ${budgetSource}=${maxPages}.`,
-        headers: responseHeaders,
-      };
-    }
-    if (!Number.isFinite(totalPages) || page >= totalPages) {
+    if (page >= totalPages) {
       writeCachedResponse(db, cacheKey, JSON.stringify(pageData), lastHeaders);
       return {
         ok: true,

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { SCHEMA_SQL } from '../../src/db/schema.js';
+import { runMigrations } from '../../src/db/migrations.js';
 
 vi.mock('../../src/config.js', () => ({
   config: {
@@ -27,6 +28,13 @@ vi.mock('../../src/config.js', () => ({
       maxPages: 50,
       fallbackTtlSeconds: 3600,
       errorRetrySeconds: 120,
+    },
+    assetSync: {
+      enabled: false,
+      intervalMinutes: 60,
+      staleJobMinutes: 30,
+      leaseTtlSeconds: 180,
+      heartbeatSeconds: 45,
     },
     server: { port: 3000, host: '127.0.0.1' },
     db: { path: ':memory:' },
@@ -95,6 +103,7 @@ beforeEach(() => {
   db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA_SQL);
+  runMigrations(db);
   fetchMock = vi.fn();
   vi.stubGlobal('fetch', fetchMock);
 });
@@ -221,8 +230,8 @@ describe('character datastore sync', () => {
       VALUES (?, 999, '2020-01-01T00:00:00Z', 'player_donation', 5, '{}', datetime('now'))
     `).run(CHARACTER_ID);
     fetchMock.mockResolvedValue(jsonResponse([
-      { id: 1, date: '2026-03-25T00:00:00Z', ref_type: 'market_escrow', amount: -10, balance: 90 },
-      { id: 2, date: '2026-03-25T01:00:00Z', ref_type: 'bounty_prizes', amount: 50, balance: 140 },
+      { id: 1, date: '2026-03-25T00:00:00Z', ref_type: 'market_escrow', amount: -10, balance: 90, description: '' },
+      { id: 2, date: '2026-03-25T01:00:00Z', ref_type: 'bounty_prizes', amount: 50, balance: 140, description: '' },
     ], { 'X-Pages': '1' }));
 
     await ensureCharacterDatasetsFresh(db as Db, { userId: USER_ID }, ['wallet_journal']);

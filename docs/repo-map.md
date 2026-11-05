@@ -196,6 +196,8 @@ Defensive clients and tool schemas for community APIs (EVE Ref industry cost, zK
 - `deploy/systemd/eveai.service`: generic self-host systemd unit
 - `scripts/export-public.sh`: clean public export helper that excludes local/private state
 - `docs/deployment.md`: generic self-host deployment guide
+- `.env.example`: canonical environment-variable inventory
+- `docs/threat-model.md`: trust boundaries, assets, entry points, and threat paths
 - `docs/open-source-release.md`: public release/history-safety checklist
 - `data/`: local DBs, SDE inputs, cached swagger, generated user snapshots
 
@@ -207,6 +209,9 @@ Defensive clients and tool schemas for community APIs (EVE Ref industry cost, zK
 - `docs/exec-plans/`: active plans, completed plans, tech debt
 - `docs/generated/`: generated inventories
 - `docs/references/`: source links and reference notes for external systems
+- `docs/trading/`: durable trading architecture, accounting, risk, strategy, backtest, and operator references
+- `docs/history/`: chronological branch and remediation history
+- `docs/audit/`: phase-scoped audit history; start with `audit/README.md`
 
 ## Local Agent Extensions
 

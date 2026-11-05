@@ -5,10 +5,11 @@ import type { Db } from '../db/sqlite.js';
  * (sde_types/sde_type_dogma/sde_dogma_attributes/sde_dogma_units/
  * sde_meta_groups), сетевых вызовов нет. Локализация (en/ru) резолвится на
  * сервере параметром lang: SDE хранит name/displayName/description как
- * локализованные объекты {en, ru, …}.
+ * локализованные объекты {en, ru, zh, …}. Плоская колонка name остаётся fallback-ом:
+ * в неполных выгрузках и тестовых данных в data_json локализации может не быть.
  */
 
-export type MarketInfoLang = 'en' | 'ru';
+export type MarketInfoLang = 'en' | 'ru' | 'zh';
 
 export type MarketTypeInfoAttribute = {
   attribute_id: number;
@@ -77,7 +78,8 @@ const VARIATIONS_LIMIT = 30;
 export function getMarketTypeInfo(db: Db, typeId: number, lang: MarketInfoLang = 'en'): MarketTypeInfo | null {
   const typeRow = db.prepare(`
     SELECT t.type_id AS type_id, t.name AS name, t.group_id AS group_id, t.data_json AS data_json,
-      g.name AS group_name, c.name AS category_name
+      g.name AS group_name, g.data_json AS group_json,
+      c.name AS category_name, c.data_json AS category_json
     FROM sde_types t
     LEFT JOIN sde_groups g ON g.group_id = t.group_id
     LEFT JOIN sde_categories c ON c.category_id = g.category_id
@@ -88,14 +90,16 @@ export function getMarketTypeInfo(db: Db, typeId: number, lang: MarketInfoLang =
     group_id: number | null;
     data_json: string;
     group_name: string | null;
+    group_json: string | null;
     category_name: string | null;
+    category_json: string | null;
   } | undefined;
   if (!typeRow) return null;
 
   const data = safeParse(typeRow.data_json);
   const marketGroupId = readNumber(data, 'market_group_id');
   const metaGroupId = readNumber(data, 'meta_group_id');
-  const metaGroupNames = loadMetaGroupNames(db);
+  const metaGroupNames = loadMetaGroupNames(db, lang);
 
   const dogmaRows = db.prepare(`
     SELECT
@@ -153,22 +157,24 @@ export function getMarketTypeInfo(db: Db, typeId: number, lang: MarketInfoLang =
 
   return {
     type_id: typeRow.type_id,
-    name: typeRow.name,
+    name: localize(readField(data, 'name'), lang) ?? typeRow.name,
     description: localize(readField(data, 'description'), lang),
     group_id: typeRow.group_id,
-    group_name: typeRow.group_name,
-    category_name: typeRow.category_name,
+    group_name: localizeStoredName(typeRow.group_json, lang) ?? typeRow.group_name,
+    category_name: localizeStoredName(typeRow.category_json, lang) ?? typeRow.category_name,
     market_group_id: marketGroupId,
-    market_group_name: marketGroupId !== null ? lookupName(db, 'sde_market_groups', 'market_group_id', marketGroupId) : null,
+    market_group_name: marketGroupId !== null
+      ? lookupName(db, 'sde_market_groups', 'market_group_id', marketGroupId, lang)
+      : null,
     meta_group_id: metaGroupId,
     meta_group_name: metaGroupId !== null ? metaGroupNames.get(metaGroupId) ?? null : null,
     mass: readNumber(data, 'mass'),
     volume: readNumber(data, 'volume'),
     capacity: readNumber(data, 'capacity'),
     base_price: readNumber(data, 'base_price'),
-    required_skills: resolveRequiredSkills(db, skillSlots),
+    required_skills: resolveRequiredSkills(db, skillSlots, lang),
     attribute_groups: groupAttributes(attributes),
-    variations: loadVariations(db, typeRow, marketGroupId, metaGroupNames),
+    variations: loadVariations(db, typeRow, marketGroupId, metaGroupNames, lang),
   };
 }
 
@@ -178,7 +184,7 @@ export function getMarketTypeInfo(db: Db, typeId: number, lang: MarketInfoLang =
  * sde_types (~51k строк на каждое открытие карточки).
  */
 export const MARKET_TYPE_INFO_VARIATIONS_SQL = `
-  SELECT type_id, name, json_extract(data_json, '$.metaGroupID') AS meta_group_id
+  SELECT type_id, name, data_json, json_extract(data_json, '$.metaGroupID') AS meta_group_id
   FROM sde_types
   WHERE group_id = ?
     AND json_extract(data_json, '$.marketGroupID') = ?
@@ -193,17 +199,19 @@ function loadVariations(
   typeRow: { type_id: number; group_id: number | null },
   marketGroupId: number | null,
   metaGroupNames: Map<number, string>,
+  lang: MarketInfoLang,
 ): MarketTypeInfoVariation[] {
   if (typeRow.group_id === null || marketGroupId === null) return [];
   const rows = db.prepare(MARKET_TYPE_INFO_VARIATIONS_SQL)
     .all(typeRow.group_id, marketGroupId, VARIATIONS_LIMIT) as Array<{
     type_id: number;
     name: string;
+    data_json: string;
     meta_group_id: number | null;
   }>;
   return rows.map((row) => ({
     type_id: row.type_id,
-    name: row.name,
+    name: localizeStoredName(row.data_json, lang) ?? row.name,
     meta_group_id: row.meta_group_id,
     meta_group_name: row.meta_group_id !== null ? metaGroupNames.get(row.meta_group_id) ?? null : null,
   }));
@@ -212,6 +220,7 @@ function loadVariations(
 function resolveRequiredSkills(
   db: Db,
   skillSlots: Map<number, { skillTypeId: number | null; level: number | null }>,
+  lang: MarketInfoLang,
 ): MarketTypeInfoSkill[] {
   const ordered = [...skillSlots.entries()]
     .sort((left, right) => left[0] - right[0])
@@ -220,9 +229,9 @@ function resolveRequiredSkills(
   if (ordered.length === 0) return [];
   const placeholders = ordered.map(() => '?').join(', ');
   const rows = db.prepare(
-    `SELECT type_id, name FROM sde_types WHERE type_id IN (${placeholders})`,
-  ).all(...ordered.map((slot) => slot.skillTypeId)) as Array<{ type_id: number; name: string }>;
-  const names = new Map(rows.map((row) => [row.type_id, row.name]));
+    `SELECT type_id, name, data_json FROM sde_types WHERE type_id IN (${placeholders})`,
+  ).all(...ordered.map((slot) => slot.skillTypeId)) as Array<{ type_id: number; name: string; data_json: string }>;
+  const names = new Map(rows.map((row) => [row.type_id, localizeStoredName(row.data_json, lang) ?? row.name]));
   return ordered
     .filter((slot) => names.has(slot.skillTypeId!))
     .map((slot) => ({
@@ -269,12 +278,13 @@ function classifyAttribute(name: string | null): AttributeGroupKey {
   return 'misc';
 }
 
-function loadMetaGroupNames(db: Db): Map<number, string> {
-  const rows = db.prepare('SELECT meta_group_id, name FROM sde_meta_groups').all() as Array<{
+function loadMetaGroupNames(db: Db, lang: MarketInfoLang): Map<number, string> {
+  const rows = db.prepare('SELECT meta_group_id, name, data_json FROM sde_meta_groups').all() as Array<{
     meta_group_id: number;
     name: string;
+    data_json: string;
   }>;
-  return new Map(rows.map((row) => [row.meta_group_id, row.name]));
+  return new Map(rows.map((row) => [row.meta_group_id, localizeStoredName(row.data_json, lang) ?? row.name]));
 }
 
 function loadUnitNames(db: Db): Map<number, string> {
@@ -290,10 +300,23 @@ function loadUnitNames(db: Db): Map<number, string> {
   }));
 }
 
-function lookupName(db: Db, table: string, idColumn: string, id: number): string | null {
+function lookupName(db: Db, table: string, idColumn: string, id: number, lang: MarketInfoLang): string | null {
   // Идентификаторы таблиц/колонок — из констант этого модуля, не из ввода.
-  const row = db.prepare(`SELECT name FROM ${table} WHERE ${idColumn} = ?`).get(id) as { name: string } | undefined;
-  return row?.name ?? null;
+  const row = db.prepare(`SELECT name, data_json FROM ${table} WHERE ${idColumn} = ?`).get(id) as {
+    name: string;
+    data_json: string | null;
+  } | undefined;
+  if (!row) return null;
+  return localizeStoredName(row.data_json, lang) ?? row.name;
+}
+
+/**
+ * Имя из data_json-колонки: SDE хранит {en, ru, zh, …}, плоская колонка name
+ * остаётся fallback-ом для неполных выгрузок и тестовых данных.
+ */
+function localizeStoredName(rawJson: string | null | undefined, lang: MarketInfoLang): string | null {
+  if (!rawJson) return null;
+  return localize(readField(safeParse(rawJson), 'name'), lang);
 }
 
 /** SDE хранит тексты как string или локализованный объект {en, ru, …}. */

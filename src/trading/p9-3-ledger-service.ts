@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import {
+  realLedgerLineageFromContext,
+  realLedgerLineagePredicate,
+  resolveRealLedgerLineage,
+  type RealLedgerLineage,
+} from './p9-3-lineage.js';
+import {
   assertHumanActor,
   normalizeIso,
   type P93Evidence,
@@ -11,6 +17,53 @@ import {
 } from './p9-3-types.js';
 
 type ActorType = 'USER' | 'SYSTEM' | 'ESI_SYNC';
+
+type LedgerScope = RealLedgerLineage | null;
+
+function ledgerScope(db: Db, characterId: number, lineage?: RealLedgerLineage | null): LedgerScope {
+  return resolveRealLedgerLineage(db, characterId, lineage);
+}
+
+function ledgerPredicate(scope: LedgerScope): { sql: string; params: unknown[] } {
+  if (scope) return realLedgerLineagePredicate(null, scope);
+  // Isolated service tests predating the owner lineage use ownerless fixtures.
+  // Normal web routes always pass an explicit lineage, so this fallback cannot
+  // expose real owner rows or ownerless legacy rows through authenticated APIs.
+  return {
+    sql: 'owner_user_id IS NULL AND owner_chat_id IS NULL AND binding_epoch = 0',
+    params: [],
+  };
+}
+
+function lineageInsertValues(scope: LedgerScope): [number | null, number | null, number, string] {
+  return scope
+    ? [scope.ownerUserId, scope.ownerChatId, scope.bindingEpoch, scope.bindingDigest]
+    : [null, null, 0, ''];
+}
+
+/**
+ * Re-read the live binding after BEGIN IMMEDIATE. Scope refresh may change the
+ * digest, but it may not change the owner/chat/epoch authorization namespace.
+ */
+function revalidateLedgerLineage(
+  db: Db,
+  characterId: number,
+  lineage: RealLedgerLineage,
+): RealLedgerLineage {
+  const current = realLedgerLineageFromContext(db, characterId, {
+    userId: lineage.ownerUserId,
+    chatId: lineage.ownerChatId ?? undefined,
+    characterId,
+  });
+  if (
+    current.ownerUserId !== lineage.ownerUserId
+    || current.ownerChatId !== lineage.ownerChatId
+    || current.bindingEpoch !== lineage.bindingEpoch
+  ) {
+    throw new Error('REAL 账本所有权或绑定上下文已变化，拒绝提交。');
+  }
+  return current;
+}
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -259,11 +312,29 @@ function insertEvent(
   before: unknown,
   after: unknown,
   reason?: string,
+  scope: LedgerScope = null,
 ): void {
+  const [ownerUserId, ownerChatId, bindingEpoch, bindingDigest] = lineageInsertValues(scope);
   db.prepare(`
-    INSERT INTO real_trade_events (character_id, record_id, event_type, actor_type, actor_id, before_json, after_json, reason)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(characterId, recordId, eventType, actorType, actorId, before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after), reason ?? null);
+    INSERT INTO real_trade_events
+      (character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+       record_id, event_type, actor_type, actor_id, before_json, after_json, reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    characterId,
+    ownerUserId,
+    ownerChatId,
+    bindingEpoch,
+    bindingDigest,
+    recordId,
+    eventType,
+    actorType,
+    actorId,
+    before == null ? null : JSON.stringify(before),
+    after == null ? null : JSON.stringify(after),
+    reason ?? null,
+    new Date().toISOString(),
+  );
 }
 
 export class P93LedgerService {
@@ -271,9 +342,12 @@ export class P93LedgerService {
     db: Db,
     characterId: number,
     filters: { state?: string; verification?: string; direction?: string; sourceType?: string; typeId?: number; limit?: number; offset?: number } = {},
+    lineage?: RealLedgerLineage | null,
   ): { records: P93Record[]; total: number } {
-    const where = ['character_id = ?'];
-    const params: unknown[] = [characterId];
+    const scope = ledgerScope(db, characterId, lineage);
+    const owner = ledgerPredicate(scope);
+    const where = ['character_id = ?', owner.sql];
+    const params: unknown[] = [characterId, ...owner.params];
     if (filters.state) { where.push('record_state = ?'); params.push(filters.state); }
     if (filters.verification) { where.push('verification_status = ?'); params.push(filters.verification); }
     if (filters.direction) { where.push('direction = ?'); params.push(filters.direction); }
@@ -296,17 +370,32 @@ export class P93LedgerService {
     return { records: rows.map((row) => mapRecord(db, row)), total };
   }
 
-  static get(db: Db, characterId: number, recordId: string): P93Record | null {
-    const row = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND record_id = ?').get(characterId, recordId) as any;
+  static get(
+    db: Db,
+    characterId: number,
+    recordId: string,
+    lineage?: RealLedgerLineage | null,
+  ): P93Record | null {
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
+    const row = db.prepare(`
+      SELECT * FROM real_trade_records
+      WHERE character_id = ? AND record_id = ? AND ${owner.sql}
+    `).get(characterId, recordId, ...owner.params) as any;
     return row ? mapRecord(db, row) : null;
   }
 
-  static recordManual(db: Db, characterId: number, input: P93RecordInput, actor = 'user'): P93Record {
+  static recordManual(
+    db: Db,
+    characterId: number,
+    input: P93RecordInput,
+    actor = 'user',
+    lineage?: RealLedgerLineage | null,
+  ): P93Record {
     assertHumanActor(actor);
     if (input.sourceType.startsWith('ESI_') || input.sourceType === 'ASSET_CHANGE') {
       throw new Error('公共人工登记不能伪造 ESI 或资产变化证据来源；请使用对应同步或证据流程。');
     }
-    return this.upsert(db, characterId, input, 'USER', actor);
+    return this.upsert(db, characterId, input, 'USER', actor, lineage);
   }
 
   static upsert(
@@ -315,6 +404,7 @@ export class P93LedgerService {
     input: P93RecordInput,
     actorType: ActorType,
     actorId: string | null,
+    lineage?: RealLedgerLineage | null,
   ): P93Record {
     if (actorType === 'USER') {
       assertHumanActor(actorId ?? '');
@@ -327,24 +417,48 @@ export class P93LedgerService {
     if (input.sourceHash && input.sourceHash !== hash) {
       throw new Error('sourceHash 与交易事实不一致，拒绝登记。');
     }
-    const existing = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND ledger_key = ?')
-      .get(characterId, input.ledgerKey) as any;
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
+    const existing = db.prepare(`
+      SELECT * FROM real_trade_records
+      WHERE character_id = ? AND ledger_key = ? AND ${owner.sql}
+    `).get(characterId, input.ledgerKey, ...owner.params) as any;
     if (existing) {
       if (existing.source_hash !== hash) throw new Error('相同 ledgerKey 已用于不同交易事实，拒绝重复登记。');
       return mapRecord(db, existing);
     }
     const recordId = 'REALTRADE-' + randomUUID();
     const tx = db.transaction(() => {
+      const scope = ledgerScope(db, characterId, lineage);
+      if (scope) {
+        // A read before BEGIN is only a fast idempotency check. Revalidate and
+        // repeat deduplication after the write lock is held.
+        const current = revalidateLedgerLineage(db, characterId, scope);
+        const duplicate = db.prepare(`
+          SELECT * FROM real_trade_records
+          WHERE character_id = ? AND ledger_key = ?
+            AND owner_user_id = ? AND owner_chat_id IS ? AND binding_epoch = ?
+        `).get(characterId, input.ledgerKey, current.ownerUserId, current.ownerChatId, current.bindingEpoch) as any;
+        if (duplicate) {
+          if (duplicate.source_hash !== hash) throw new Error('相同 ledgerKey 已用于不同交易事实，拒绝重复登记。');
+          return mapRecord(db, duplicate);
+        }
+      }
+      const [ownerUserId, ownerChatId, bindingEpoch, bindingDigest] = lineageInsertValues(scope);
       db.prepare(`
         INSERT INTO real_trade_records (
-          record_id, character_id, ledger_key, record_state, verification_status, trade_kind, direction,
+          record_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+          ledger_key, record_state, verification_status, trade_kind, direction,
           type_id, location_id, quantity, unit_price, fee_status, trade_time, source_type, source_ref,
           source_hash, order_id, fill_id, execution_status, opportunity_id, plan_id, notes,
           adjustment_mode, adjustment_amount, target_lot_id, from_location_id, to_location_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         recordId,
         characterId,
+        ownerUserId,
+        ownerChatId,
+        bindingEpoch,
+        bindingDigest,
         input.ledgerKey,
         'DRAFT',
         'PENDING',
@@ -373,21 +487,34 @@ export class P93LedgerService {
       );
       for (const fee of input.fees ?? []) {
         db.prepare(`
-          INSERT INTO real_trade_fees (fee_id, record_id, fee_kind, amount, treatment, evidence_id, notes)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run('FEE-' + randomUUID(), recordId, fee.feeKind, fee.amount, fee.treatment, fee.evidenceId ?? null, fee.notes ?? null);
+          INSERT INTO real_trade_fees
+            (fee_id, record_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+             fee_kind, amount, treatment, evidence_id, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          'FEE-' + randomUUID(), recordId, ownerUserId, ownerChatId, bindingEpoch, bindingDigest,
+          fee.feeKind, fee.amount, fee.treatment, fee.evidenceId ?? null, fee.notes ?? null,
+        );
       }
       if (!input.draft) {
         db.prepare(`
           UPDATE real_trade_records
-          SET record_state = 'ACTIVE', verification_status = 'USER_REPORTED', updated_at = datetime('now')
+          SET record_state = 'ACTIVE', verification_status = 'USER_REPORTED', updated_at = ?
           WHERE record_id = ? AND character_id = ?
-        `).run(recordId, characterId);
+            AND owner_user_id IS ? AND owner_chat_id IS ? AND binding_epoch = ?
+        `).run(
+          new Date().toISOString(), recordId, characterId,
+          ownerUserId, ownerChatId, bindingEpoch,
+        );
       }
-      insertEvent(db, characterId, recordId, input.draft ? 'draft_created' : 'record_created', actorType, actorId, null, input);
+      insertEvent(
+        db, characterId, recordId, input.draft ? 'draft_created' : 'record_created',
+        actorType, actorId, null, input, undefined, scope,
+      );
+      return null;
     });
-    tx();
-    return this.get(db, characterId, recordId)!;
+    const duplicate = tx.immediate();
+    return duplicate ?? this.get(db, characterId, recordId, lineage)!;
   }
 
   static updateDraft(
@@ -396,9 +523,14 @@ export class P93LedgerService {
     recordId: string,
     patch: Partial<P93RecordInput>,
     actor = 'user',
+    lineage?: RealLedgerLineage | null,
   ): P93Record {
     assertHumanActor(actor);
-    const existing = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND record_id = ?').get(characterId, recordId) as any;
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
+    const existing = db.prepare(`
+      SELECT * FROM real_trade_records
+      WHERE character_id = ? AND record_id = ? AND ${owner.sql}
+    `).get(characterId, recordId, ...owner.params) as any;
     if (!existing) throw new Error('交易记录不存在。');
     if (existing.record_state !== 'DRAFT') throw new Error('仅草稿记录可以编辑；已核实记录请使用更正或冲正。');
     const existingRecord = mapRecord(db, existing);
@@ -433,56 +565,84 @@ export class P93LedgerService {
     validateInput(next);
     const nextHash = recordHash(next);
     const tx = db.transaction(() => {
+      const scope = ledgerScope(db, characterId, lineage);
+      if (scope) revalidateLedgerLineage(db, characterId, scope);
+      const [ownerUserId, ownerChatId, bindingEpoch, bindingDigest] = lineageInsertValues(scope);
+      const ownerWhere = 'owner_user_id IS ? AND owner_chat_id IS ? AND binding_epoch = ?';
       db.prepare(`
         UPDATE real_trade_records
         SET trade_kind = ?, direction = ?, type_id = ?, location_id = ?, quantity = ?, unit_price = ?,
             trade_time = ?, source_type = ?, source_ref = ?, source_hash = ?, order_id = ?, fill_id = ?, execution_status = ?,
             opportunity_id = ?, plan_id = ?, notes = ?, fee_status = ?, adjustment_mode = ?, adjustment_amount = ?,
-            target_lot_id = ?, from_location_id = ?, to_location_id = ?, updated_at = datetime('now')
-        WHERE record_id = ? AND character_id = ? AND record_state = 'DRAFT'
+            target_lot_id = ?, from_location_id = ?, to_location_id = ?, updated_at = ?
+        WHERE record_id = ? AND character_id = ? AND ${ownerWhere} AND record_state = 'DRAFT'
       `).run(
         next.tradeKind, next.direction, next.typeId, next.locationId, next.quantity, next.unitPrice,
         normalizeIso(next.tradeTime), next.sourceType, next.sourceRef ?? null, nextHash, next.orderId ?? null,
         next.fillId ?? null, next.executionStatus ?? 'MANUAL_ENTRY', next.opportunityId ?? null,
         next.planId ?? null, next.notes ?? null, next.feeStatus ?? 'UNKNOWN', next.adjustmentMode ?? null,
         next.adjustmentAmount ?? null, next.targetLotId ?? null, next.fromLocationId ?? null,
-        next.toLocationId ?? null, recordId, characterId,
+        next.toLocationId ?? null, new Date().toISOString(), recordId, characterId,
+        ownerUserId, ownerChatId, bindingEpoch,
       );
       if (patch.fees) {
-        db.prepare('DELETE FROM real_trade_fees WHERE record_id = ?').run(recordId);
+        db.prepare(`
+          DELETE FROM real_trade_fees
+          WHERE record_id = ? AND ${ownerWhere}
+        `).run(recordId, ownerUserId, ownerChatId, bindingEpoch);
         for (const fee of patch.fees) {
           db.prepare(`
-            INSERT INTO real_trade_fees (fee_id, record_id, fee_kind, amount, treatment, evidence_id, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run('FEE-' + randomUUID(), recordId, fee.feeKind, fee.amount, fee.treatment, fee.evidenceId ?? null, fee.notes ?? null);
+            INSERT INTO real_trade_fees
+              (fee_id, record_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+               fee_kind, amount, treatment, evidence_id, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            'FEE-' + randomUUID(), recordId, ownerUserId, ownerChatId, bindingEpoch, bindingDigest,
+            fee.feeKind, fee.amount, fee.treatment, fee.evidenceId ?? null, fee.notes ?? null,
+          );
         }
       }
-      insertEvent(db, characterId, recordId, 'draft_updated', 'USER', actor, existing, next);
+      insertEvent(db, characterId, recordId, 'draft_updated', 'USER', actor, existing, next, undefined, scope);
     });
-    tx();
-    return this.get(db, characterId, recordId)!;
+    tx.immediate();
+    return this.get(db, characterId, recordId, lineage)!;
   }
 
-  static submitDraft(db: Db, characterId: number, recordId: string, actor = 'user'): P93Record {
+  static submitDraft(
+    db: Db,
+    characterId: number,
+    recordId: string,
+    actor = 'user',
+    lineage?: RealLedgerLineage | null,
+  ): P93Record {
     assertHumanActor(actor);
-    const existing = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND record_id = ?').get(characterId, recordId) as any;
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
+    const existing = db.prepare(`
+      SELECT * FROM real_trade_records
+      WHERE character_id = ? AND record_id = ? AND ${owner.sql}
+    `).get(characterId, recordId, ...owner.params) as any;
     if (!existing) throw new Error('交易记录不存在。');
     if (existing.record_state === 'ACTIVE' && existing.verification_status === 'USER_REPORTED') {
       return mapRecord(db, existing);
     }
     if (existing.record_state !== 'DRAFT') throw new Error('仅草稿可以提交为待核实申报。');
     const tx = db.transaction(() => {
+      const scope = ledgerScope(db, characterId, lineage);
+      if (scope) revalidateLedgerLineage(db, characterId, scope);
+      const [ownerUserId, ownerChatId, bindingEpoch] = lineageInsertValues(scope);
       db.prepare(`
         UPDATE real_trade_records
-        SET record_state = 'ACTIVE', verification_status = 'USER_REPORTED', updated_at = datetime('now')
-        WHERE record_id = ? AND character_id = ? AND record_state = 'DRAFT'
-      `).run(recordId, characterId);
+        SET record_state = 'ACTIVE', verification_status = 'USER_REPORTED', updated_at = ?
+        WHERE record_id = ? AND character_id = ?
+          AND owner_user_id IS ? AND owner_chat_id IS ? AND binding_epoch = ?
+          AND record_state = 'DRAFT'
+      `).run(new Date().toISOString(), recordId, characterId, ownerUserId, ownerChatId, bindingEpoch);
       insertEvent(db, characterId, recordId, 'draft_submitted', 'USER', actor, existing, {
         recordState: 'ACTIVE', verificationStatus: 'USER_REPORTED',
-      });
+      }, undefined, scope);
     });
-    tx();
-    return this.get(db, characterId, recordId)!;
+    tx.immediate();
+    return this.get(db, characterId, recordId, lineage)!;
   }
 
   static addEvidence(
@@ -490,6 +650,7 @@ export class P93LedgerService {
     characterId: number,
     input: P93EvidenceInput,
     trust: EvidenceTrust = 'USER',
+    lineage?: RealLedgerLineage | null,
   ): P93Evidence {
     const userTypes = ['USER_ATTACHMENT', 'USER_CONFIRMATION'];
     const syncTypes = ['ESI_WALLET_LOG', 'ESI_MARKET_ORDER', 'ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE'];
@@ -509,22 +670,34 @@ export class P93LedgerService {
     }
     const evidenceId = 'EVID-' + randomUUID();
     const sourceRef = input.sourceRef ?? null;
+    const tx = db.transaction(() => {
+      const scope = ledgerScope(db, characterId, lineage);
+      if (scope) revalidateLedgerLineage(db, characterId, scope);
+      const owner = ledgerPredicate(scope);
+      const [ownerUserId, ownerChatId, bindingEpoch, bindingDigest] = lineageInsertValues(scope);
     const existing = sourceRef
-      ? db.prepare('SELECT * FROM real_trade_evidence WHERE character_id = ? AND source_system = ? AND source_ref = ?')
-        .get(characterId, input.sourceSystem, sourceRef) as any
+      ? db.prepare(`
+          SELECT * FROM real_trade_evidence
+          WHERE character_id = ? AND source_system = ? AND source_ref = ? AND ${owner.sql}
+        `).get(characterId, input.sourceSystem, sourceRef, ...owner.params) as any
       : undefined;
     if (existing) {
       if (existing.payload_hash !== input.payloadHash) throw new Error('相同证据来源已登记不同内容。');
       if (existing.evidence_type !== input.evidenceType) throw new Error('相同证据来源已登记为不同证据类型。');
-      return this.getEvidence(db, characterId, existing.evidence_id)!;
+      return this.getEvidence(db, characterId, existing.evidence_id, lineage)!;
     }
     db.prepare(`
       INSERT INTO real_trade_evidence
-        (evidence_id, character_id, evidence_type, source_system, source_ref, captured_at, payload_hash, summary, metadata_json, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (evidence_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         evidence_type, source_system, source_ref, captured_at, payload_hash, summary, metadata_json, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       evidenceId,
       characterId,
+      ownerUserId,
+      ownerChatId,
+      bindingEpoch,
+      bindingDigest,
       input.evidenceType,
       input.sourceSystem,
       sourceRef,
@@ -534,11 +707,22 @@ export class P93LedgerService {
       JSON.stringify(input.metadata ?? {}),
       status,
     );
-    return this.getEvidence(db, characterId, evidenceId)!;
+      return this.getEvidence(db, characterId, evidenceId, lineage)!;
+    });
+    return tx.immediate();
   }
 
-  static getEvidence(db: Db, characterId: number, evidenceId: string): P93Evidence | null {
-    const row = db.prepare('SELECT * FROM real_trade_evidence WHERE character_id = ? AND evidence_id = ?').get(characterId, evidenceId) as any;
+  static getEvidence(
+    db: Db,
+    characterId: number,
+    evidenceId: string,
+    lineage?: RealLedgerLineage | null,
+  ): P93Evidence | null {
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
+    const row = db.prepare(`
+      SELECT * FROM real_trade_evidence
+      WHERE character_id = ? AND evidence_id = ? AND ${owner.sql}
+    `).get(characterId, evidenceId, ...owner.params) as any;
     if (!row) return null;
     return {
       evidenceId: row.evidence_id,
@@ -562,21 +746,27 @@ export class P93LedgerService {
     status: P93VerificationStatus,
     actor = 'user',
     reason?: string,
+    lineage?: RealLedgerLineage | null,
   ): P93Evidence {
     assertHumanActor(actor);
     if (!['VERIFIED', 'USER_REPORTED', 'PENDING', 'CONFLICT', 'REJECTED'].includes(status)) throw new Error('证据状态无效。');
-    const existing = this.getEvidence(db, characterId, evidenceId);
+    const existing = this.getEvidence(db, characterId, evidenceId, lineage);
     if (!existing) throw new Error('证据不存在。');
     if (existing.status === 'VERIFIED' && status !== 'VERIFIED') throw new Error('已核实证据不可降级或删除。');
     const tx = db.transaction(() => {
-      db.prepare('UPDATE real_trade_evidence SET status = ? WHERE character_id = ? AND evidence_id = ?')
-        .run(status, characterId, evidenceId);
+      const scope = ledgerScope(db, characterId, lineage);
+      if (scope) revalidateLedgerLineage(db, characterId, scope);
+      const owner = ledgerPredicate(scope);
+      db.prepare(`
+        UPDATE real_trade_evidence SET status = ?
+        WHERE character_id = ? AND evidence_id = ? AND ${owner.sql}
+      `).run(status, characterId, evidenceId, ...owner.params);
       for (const link of db.prepare('SELECT record_id FROM real_trade_evidence_links WHERE evidence_id = ?').all(evidenceId) as any[]) {
-        insertEvent(db, characterId, link.record_id, 'evidence_status_changed', 'USER', actor, existing, { status }, reason);
+        insertEvent(db, characterId, link.record_id, 'evidence_status_changed', 'USER', actor, existing, { status }, reason, scope);
       }
     });
-    tx();
-    return this.getEvidence(db, characterId, evidenceId)!;
+    tx.immediate();
+    return this.getEvidence(db, characterId, evidenceId, lineage)!;
   }
 
   static linkEvidence(
@@ -589,20 +779,24 @@ export class P93LedgerService {
     notes?: string,
     actorType: ActorType = 'USER',
     actorId = 'user',
+    lineage?: RealLedgerLineage | null,
   ): void {
     if (actorType === 'USER') assertHumanActor(actorId ?? '');
     if (actorType === 'ESI_SYNC' && actorId !== 'esi-wallet-sync') {
       throw new Error('未知的 ESI 同步身份。');
     }
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
     const record = db.prepare(`
       SELECT record_id, record_state, trade_kind, direction, type_id, location_id, quantity, unit_price,
              trade_time, source_type, source_ref, from_location_id, to_location_id
-      FROM real_trade_records WHERE character_id = ? AND record_id = ?
-    `).get(characterId, recordId) as any;
+      FROM real_trade_records
+      WHERE character_id = ? AND record_id = ? AND ${owner.sql}
+    `).get(characterId, recordId, ...owner.params) as any;
     const evidence = db.prepare(`
       SELECT evidence_id, evidence_type, source_system, source_ref, status, metadata_json
-      FROM real_trade_evidence WHERE character_id = ? AND evidence_id = ?
-    `).get(characterId, evidenceId) as any;
+      FROM real_trade_evidence
+      WHERE character_id = ? AND evidence_id = ? AND ${owner.sql}
+    `).get(characterId, evidenceId, ...owner.params) as any;
     if (!record || !evidence) throw new Error('交易或证据不存在。');
     if (['VERIFIED', 'REVERSED', 'CORRECTED'].includes(record.record_state)) {
       throw new Error('已核实或终态记录的证据关系不可原地变更；请使用更正或冲正。');
@@ -624,20 +818,64 @@ export class P93LedgerService {
       `).get(evidenceId, recordId);
       if (reused) throw new Error('同一 ESI 证据不能支持多条交易记录。');
     }
+    const normalizedNotes = notes ?? null;
     const tx = db.transaction(() => {
+      const scope = ledgerScope(db, characterId, lineage);
+      if (scope) revalidateLedgerLineage(db, characterId, scope);
+      const existingLink = db.prepare(`
+        SELECT relation, confidence, notes
+        FROM real_trade_evidence_links
+        WHERE evidence_id = ? AND record_id = ?
+      `).get(evidenceId, recordId) as { relation: string; confidence: string; notes: string | null } | undefined;
+
+      if (!existingLink) {
+        db.prepare(`
+          INSERT INTO real_trade_evidence_links (evidence_id, record_id, relation, confidence, notes)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(evidenceId, recordId, relation, confidence, normalizedNotes);
+        insertEvent(
+          db, characterId, recordId, 'evidence_linked', actorType, actorId, null,
+          { evidenceId, relation, confidence }, notes, scope,
+        );
+        return;
+      }
+
+      if (
+        existingLink.relation === relation
+        && existingLink.confidence === confidence
+        && existingLink.notes === normalizedNotes
+      ) {
+        return;
+      }
+
       db.prepare(`
-        INSERT INTO real_trade_evidence_links (evidence_id, record_id, relation, confidence, notes)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(evidence_id, record_id) DO UPDATE SET relation = excluded.relation, confidence = excluded.confidence, notes = excluded.notes
-      `).run(evidenceId, recordId, relation, confidence, notes ?? null);
-      insertEvent(db, characterId, recordId, 'evidence_linked', actorType, actorId, null, { evidenceId, relation, confidence }, notes);
+        UPDATE real_trade_evidence_links
+        SET relation = ?, confidence = ?, notes = ?
+        WHERE evidence_id = ? AND record_id = ?
+      `).run(relation, confidence, normalizedNotes, evidenceId, recordId);
+      insertEvent(
+        db, characterId, recordId, 'evidence_link_updated', actorType, actorId,
+        existingLink, { evidenceId, relation, confidence }, notes, scope,
+      );
     });
-    tx();
+    tx.immediate();
   }
 
-  static verify(db: Db, characterId: number, recordId: string, actor = 'user', reason?: string, actorType: ActorType = 'USER'): P93Record {
+  static verify(
+    db: Db,
+    characterId: number,
+    recordId: string,
+    actor = 'user',
+    reason?: string,
+    actorType: ActorType = 'USER',
+    lineage?: RealLedgerLineage | null,
+  ): P93Record {
     assertHumanActor(actor);
-    const existing = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND record_id = ?').get(characterId, recordId) as any;
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
+    const existing = db.prepare(`
+      SELECT * FROM real_trade_records
+      WHERE character_id = ? AND record_id = ? AND ${owner.sql}
+    `).get(characterId, recordId, ...owner.params) as any;
     if (!existing) throw new Error('交易记录不存在。');
     if (existing.trade_kind === 'FEE_ADJUSTMENT') {
       throw new Error('FEE_ADJUSTMENT 尚未定义安全的费用归属口径，不能核实。');
@@ -651,18 +889,18 @@ export class P93LedgerService {
     const conflicting = db.prepare(`
       SELECT e.evidence_id FROM real_trade_evidence e
       JOIN real_trade_evidence_links l ON l.evidence_id = e.evidence_id
-      WHERE e.character_id = ? AND l.record_id = ?
+      WHERE e.character_id = ? AND l.record_id = ? AND ${owner.sql.replace(/(^| AND )/g, '$1e.')}
         AND e.status IN ('VERIFIED', 'CONFLICT') AND l.relation = 'CONFLICTING'
       LIMIT 1
-    `).get(characterId, recordId);
+    `).get(characterId, recordId, ...owner.params);
     if (conflicting) throw new Error('存在已核实或冲突证据，不能把交易提升为已核实。');
     const linkedEvidence = db.prepare(`
       SELECT e.evidence_id, e.evidence_type, e.source_system, e.source_ref, e.status, e.metadata_json
       FROM real_trade_evidence e
       JOIN real_trade_evidence_links l ON l.evidence_id = e.evidence_id
-      WHERE e.character_id = ? AND l.record_id = ?
+      WHERE e.character_id = ? AND l.record_id = ? AND ${owner.sql.replace(/(^| AND )/g, '$1e.')}
         AND e.status = 'VERIFIED' AND l.relation IN ('PRIMARY', 'CORROBORATING')
-    `).all(characterId, recordId) as any[];
+    `).all(characterId, recordId, ...owner.params) as any[];
     const tradingKinds = ['BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL'];
     let matchingEvidence: any;
     if (tradingKinds.includes(existing.trade_kind)) {
@@ -692,21 +930,31 @@ export class P93LedgerService {
       FROM real_trade_evidence_links l
       JOIN real_trade_records r ON r.record_id = l.record_id AND r.character_id = ?
       WHERE l.evidence_id = ? AND l.record_id <> ?
+        AND ${owner.sql.replace(/(^| AND )/g, '$1r.')}
         AND l.relation IN ('PRIMARY', 'CORROBORATING')
         AND r.record_state = 'VERIFIED'
       LIMIT 1
-    `).get(characterId, matchingEvidence.evidence_id, recordId);
+    `).get(characterId, matchingEvidence.evidence_id, recordId, ...owner.params);
     if (reusedEvidence) throw new Error('同一 ESI 证据已支持另一条已核实交易，不能重复核实。');
     const tx = db.transaction(() => {
+      const scope = ledgerScope(db, characterId, lineage);
+      if (scope) revalidateLedgerLineage(db, characterId, scope);
+      const [ownerUserId, ownerChatId, bindingEpoch] = lineageInsertValues(scope);
+      const changedAt = new Date().toISOString();
       db.prepare(`
         UPDATE real_trade_records
-        SET record_state = 'VERIFIED', verification_status = 'VERIFIED', verified_at = datetime('now'), updated_at = datetime('now')
+        SET record_state = 'VERIFIED', verification_status = 'VERIFIED', verified_at = ?, updated_at = ?
         WHERE record_id = ? AND character_id = ?
-      `).run(recordId, characterId);
-      insertEvent(db, characterId, recordId, 'record_verified', actorType, actor, existing, { verificationStatus: 'VERIFIED', evidenceId: matchingEvidence.evidence_id }, reason);
+          AND owner_user_id IS ? AND owner_chat_id IS ? AND binding_epoch = ?
+      `).run(changedAt, changedAt, recordId, characterId, ownerUserId, ownerChatId, bindingEpoch);
+      insertEvent(
+        db, characterId, recordId, 'record_verified', actorType, actor, existing,
+        { verificationStatus: 'VERIFIED', evidenceId: matchingEvidence.evidence_id },
+        reason, scope,
+      );
     });
-    tx();
-    return this.get(db, characterId, recordId)!;
+    tx.immediate();
+    return this.get(db, characterId, recordId, lineage)!;
   }
 
   static setVerification(
@@ -716,11 +964,16 @@ export class P93LedgerService {
     status: P93VerificationStatus,
     actor = 'user',
     reason?: string,
+    lineage?: RealLedgerLineage | null,
   ): P93Record {
     assertHumanActor(actor);
-    const existing = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND record_id = ?').get(characterId, recordId) as any;
+    if (status === 'VERIFIED') return this.verify(db, characterId, recordId, actor, reason, 'USER', lineage);
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
+    const existing = db.prepare(`
+      SELECT * FROM real_trade_records
+      WHERE character_id = ? AND record_id = ? AND ${owner.sql}
+    `).get(characterId, recordId, ...owner.params) as any;
     if (!existing) throw new Error('交易记录不存在。');
-    if (status === 'VERIFIED') return this.verify(db, characterId, recordId, actor, reason);
     if (existing.record_state === 'VERIFIED' || existing.verification_status === 'VERIFIED') {
       throw new Error('已核实交易不能降级；如需变更请使用冲正或更正流程。');
     }
@@ -729,34 +982,58 @@ export class P93LedgerService {
     }
     const nextState = status === 'REJECTED' ? 'REJECTED' : existing.record_state === 'DRAFT' ? 'DRAFT' : 'ACTIVE';
     const tx = db.transaction(() => {
+      const scope = ledgerScope(db, characterId, lineage);
+      if (scope) revalidateLedgerLineage(db, characterId, scope);
+      const [ownerUserId, ownerChatId, bindingEpoch] = lineageInsertValues(scope);
+      const changedAt = new Date().toISOString();
       db.prepare(`
         UPDATE real_trade_records
-        SET verification_status = ?, record_state = ?, rejected_reason = ?, updated_at = datetime('now')
+        SET verification_status = ?, record_state = ?, rejected_reason = ?, updated_at = ?
         WHERE record_id = ? AND character_id = ?
-      `).run(status, nextState, status === 'REJECTED' ? reason ?? '人工驳回' : null, recordId, characterId);
-      insertEvent(db, characterId, recordId, 'verification_changed', 'USER', actor, existing, { verificationStatus: status }, reason);
+          AND owner_user_id IS ? AND owner_chat_id IS ? AND binding_epoch = ?
+      `).run(
+        status, nextState, status === 'REJECTED' ? reason ?? '人工驳回' : null,
+        changedAt, recordId, characterId, ownerUserId, ownerChatId, bindingEpoch,
+      );
+      insertEvent(db, characterId, recordId, 'verification_changed', 'USER', actor, existing, { verificationStatus: status }, reason, scope);
     });
-    tx();
-    return this.get(db, characterId, recordId)!;
+    tx.immediate();
+    return this.get(db, characterId, recordId, lineage)!;
   }
 
-  static reverse(db: Db, characterId: number, recordId: string, actor = 'user', reason: string): P93Record {
+  static reverse(
+    db: Db,
+    characterId: number,
+    recordId: string,
+    actor = 'user',
+    reason: string,
+    lineage?: RealLedgerLineage | null,
+  ): P93Record {
     assertHumanActor(actor);
     if (!reason.trim()) throw new Error('冲正必须填写原因。');
-    const existing = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND record_id = ?').get(characterId, recordId) as any;
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
+    const existing = db.prepare(`
+      SELECT * FROM real_trade_records
+      WHERE character_id = ? AND record_id = ? AND ${owner.sql}
+    `).get(characterId, recordId, ...owner.params) as any;
     if (!existing) throw new Error('交易记录不存在。');
     if (existing.record_state === 'REVERSED') return mapRecord(db, existing);
     if (existing.record_state !== 'VERIFIED' && existing.record_state !== 'ACTIVE') throw new Error('仅活动或已核实记录可以冲正。');
     const tx = db.transaction(() => {
+      const scope = ledgerScope(db, characterId, lineage);
+      if (scope) revalidateLedgerLineage(db, characterId, scope);
+      const [ownerUserId, ownerChatId, bindingEpoch] = lineageInsertValues(scope);
+      const changedAt = new Date().toISOString();
       db.prepare(`
         UPDATE real_trade_records
-        SET record_state = 'REVERSED', reverses_record_id = ?, updated_at = datetime('now')
+        SET record_state = 'REVERSED', reverses_record_id = ?, updated_at = ?
         WHERE record_id = ? AND character_id = ?
-      `).run(recordId, recordId, characterId);
-      insertEvent(db, characterId, recordId, 'record_reversed', 'USER', actor, existing, { recordState: 'REVERSED' }, reason);
+          AND owner_user_id IS ? AND owner_chat_id IS ? AND binding_epoch = ?
+      `).run(recordId, changedAt, recordId, characterId, ownerUserId, ownerChatId, bindingEpoch);
+      insertEvent(db, characterId, recordId, 'record_reversed', 'USER', actor, existing, { recordState: 'REVERSED' }, reason, scope);
     });
-    tx();
-    return this.get(db, characterId, recordId)!;
+    tx.immediate();
+    return this.get(db, characterId, recordId, lineage)!;
   }
 
   static correction(
@@ -766,10 +1043,15 @@ export class P93LedgerService {
     input: P93RecordInput,
     actor = 'user',
     reason: string,
+    lineage?: RealLedgerLineage | null,
   ): P93Record {
     assertHumanActor(actor);
     if (!reason.trim()) throw new Error('更正必须填写原因。');
-    const original = db.prepare('SELECT * FROM real_trade_records WHERE character_id = ? AND record_id = ?').get(characterId, originalRecordId) as any;
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
+    const original = db.prepare(`
+      SELECT * FROM real_trade_records
+      WHERE character_id = ? AND record_id = ? AND ${owner.sql}
+    `).get(characterId, originalRecordId, ...owner.params) as any;
     if (!original) throw new Error('原交易记录不存在。');
     if (original.record_state === 'DRAFT') throw new Error('草稿请直接编辑，不需要更正流程。');
     if (['REJECTED', 'REVERSED', 'CORRECTED'].includes(original.record_state)) throw new Error('终态记录不能再更正。');
@@ -777,30 +1059,47 @@ export class P93LedgerService {
       throw new Error('更正必须使用新的 ledgerKey，不能复用原交易的 ledgerKey。');
     }
     const tx = db.transaction(() => {
-      const corrected = this.upsert(db, characterId, { ...input, draft: true }, 'USER', actor);
+      const scope = ledgerScope(db, characterId, lineage);
+      if (scope) revalidateLedgerLineage(db, characterId, scope);
+      const [ownerUserId, ownerChatId, bindingEpoch] = lineageInsertValues(scope);
+      const corrected = this.upsert(db, characterId, { ...input, draft: true }, 'USER', actor, lineage);
+      const changedAt = new Date().toISOString();
       db.prepare(`
         UPDATE real_trade_records
-        SET record_state = 'CORRECTED', supersedes_record_id = ?, updated_at = datetime('now')
+        SET record_state = 'CORRECTED', supersedes_record_id = ?, updated_at = ?
         WHERE record_id = ? AND character_id = ?
-      `).run(corrected.recordId, originalRecordId, characterId);
+          AND owner_user_id IS ? AND owner_chat_id IS ? AND binding_epoch = ?
+      `).run(
+        corrected.recordId, changedAt, originalRecordId, characterId,
+        ownerUserId, ownerChatId, bindingEpoch,
+      );
       db.prepare(`
         UPDATE real_trade_records
-        SET supersedes_record_id = ?, updated_at = datetime('now')
+        SET supersedes_record_id = ?, updated_at = ?
         WHERE record_id = ? AND character_id = ?
-      `).run(originalRecordId, corrected.recordId, characterId);
-      insertEvent(db, characterId, originalRecordId, 'record_corrected', 'USER', actor, original, { correctedRecordId: corrected.recordId }, reason);
+          AND owner_user_id IS ? AND owner_chat_id IS ? AND binding_epoch = ?
+      `).run(
+        originalRecordId, changedAt, corrected.recordId, characterId,
+        ownerUserId, ownerChatId, bindingEpoch,
+      );
+      insertEvent(db, characterId, originalRecordId, 'record_corrected', 'USER', actor, original, { correctedRecordId: corrected.recordId }, reason, scope);
       return corrected;
     });
-    const corrected = tx();
-    return this.get(db, characterId, corrected.recordId)!;
+    const corrected = tx.immediate();
+    return this.get(db, characterId, corrected.recordId, lineage)!;
   }
 
-  static summary(db: Db, characterId: number): Record<string, unknown> {
+  static summary(
+    db: Db,
+    characterId: number,
+    lineage?: RealLedgerLineage | null,
+  ): Record<string, unknown> {
+    const owner = ledgerPredicate(ledgerScope(db, characterId, lineage));
     const rows = db.prepare(`
       SELECT record_state, verification_status, direction, COUNT(*) AS count
-      FROM real_trade_records WHERE character_id = ?
+      FROM real_trade_records WHERE character_id = ? AND ${owner.sql}
       GROUP BY record_state, verification_status, direction
-    `).all(characterId) as any[];
+    `).all(characterId, ...owner.params) as any[];
     return { rows, rawRecordCount: rows.reduce((sum, row) => sum + Number(row.count || 0), 0) };
   }
 }

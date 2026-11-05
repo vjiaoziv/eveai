@@ -108,7 +108,7 @@ describe('market type overview route', () => {
       headers: { cookie },
     });
     expect(badType.statusCode).toBe(400);
-    expect(badType.json()).toEqual({ error: 'Некорректный идентификатор товара.' });
+    expect(badType.json()).toEqual({ error: 'invalid_type_id' });
 
     const noRegion = await app.inject({
       method: 'GET',
@@ -116,7 +116,7 @@ describe('market type overview route', () => {
       headers: { cookie },
     });
     expect(noRegion.statusCode).toBe(400);
-    expect(noRegion.json()).toEqual({ error: 'Параметр region_id обязателен.' });
+    expect(noRegion.json()).toEqual({ error: 'region_id_required' });
 
     const badRegion = await app.inject({
       method: 'GET',
@@ -124,7 +124,7 @@ describe('market type overview route', () => {
       headers: { cookie },
     });
     expect(badRegion.statusCode).toBe(400);
-    expect(badRegion.json()).toEqual({ error: 'Некорректный регион.' });
+    expect(badRegion.json()).toEqual({ error: 'invalid_region' });
   });
 
   it('returns 404 for a type missing from the local SDE', async () => {
@@ -134,7 +134,7 @@ describe('market type overview route', () => {
       headers: { cookie: browserSessionCookie() },
     });
     expect(response.statusCode).toBe(404);
-    expect(response.json()).toEqual({ error: 'Товар не найден в локальной базе.' });
+    expect(response.json()).toEqual({ error: 'type_not_found_in_local_db' });
   });
 
   it('reports best prices, volumes and the spread for a seeded book', async () => {
@@ -186,7 +186,7 @@ describe('market type orders route', () => {
         headers: { cookie },
       });
       expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({ error: "Параметр side должен быть 'sell' или 'buy'." });
+      expect(response.json()).toEqual({ error: "invalid_side_param" });
     }
   });
 
@@ -198,7 +198,7 @@ describe('market type orders route', () => {
       headers: { cookie },
     });
     expect(badLimit.statusCode).toBe(400);
-    expect(badLimit.json()).toEqual({ error: 'Лимит должен быть целым числом от 1 до 100.' });
+    expect(badLimit.json()).toEqual({ error: 'invalid_limit' });
 
     const badOffset = await app.inject({
       method: 'GET',
@@ -206,7 +206,7 @@ describe('market type orders route', () => {
       headers: { cookie },
     });
     expect(badOffset.statusCode).toBe(400);
-    expect(badOffset.json()).toEqual({ error: 'Смещение (offset) должно быть неотрицательным целым числом.' });
+    expect(badOffset.json()).toEqual({ error: 'invalid_offset' });
   });
 
   it('serves the sell side cheapest-first with pagination', async () => {
@@ -276,7 +276,7 @@ describe('market type regions route', () => {
       headers: { cookie: browserSessionCookie() },
     });
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ error: 'Некорректный идентификатор товара.' });
+    expect(response.json()).toEqual({ error: 'invalid_type_id' });
   });
 });
 
@@ -314,7 +314,7 @@ describe('market type history route', () => {
         headers: { cookie },
       });
       expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({ error: 'Параметр days должен быть одним из: 30, 90, 365, 0 (вся история).' });
+      expect(response.json()).toEqual({ error: 'invalid_days_param' });
     }
   });
 
@@ -369,7 +369,7 @@ describe('market type history route', () => {
       headers: { cookie: browserSessionCookie() },
     });
     expect(response.statusCode).toBe(404);
-    expect(response.json()).toEqual({ error: 'Предмет не найден.' });
+    expect(response.json()).toEqual({ error: 'item_not_found' });
     const sync = db.prepare('SELECT COUNT(*) AS count FROM market_history_sync').get() as { count: number };
     expect(sync.count).toBe(0);
   });
@@ -382,7 +382,7 @@ describe('market type history route', () => {
       headers: { cookie: browserSessionCookie() },
     });
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ error: 'Неизвестный регион.' });
+    expect(response.json()).toEqual({ error: 'unknown_region' });
     const sync = db.prepare('SELECT COUNT(*) AS count FROM market_history_sync').get() as { count: number };
     expect(sync.count).toBe(0);
   });

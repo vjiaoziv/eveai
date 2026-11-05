@@ -63,7 +63,7 @@ export function addAvoided(
   now = Date.now(),
 ): AddResult {
   const system = getMapSystem(db, systemId);
-  if (!system) return { ok: false, error: `System ${systemId} is not in the map graph.` };
+  if (!system) return { ok: false, error: 'system_not_in_graph' };
 
   const existing = db.prepare(
     'SELECT 1 FROM map_avoid_systems WHERE user_id = ? AND system_id = ?',
@@ -76,7 +76,7 @@ export function addAvoided(
     if (count >= MAX_AVOID_SYSTEMS) {
       return {
         ok: false,
-        error: `Список «избегать» ограничен ${MAX_AVOID_SYSTEMS} системами — иначе маршрут перестаёт строиться вообще.`,
+        error: 'avoid_list_full',
       };
     }
   }

@@ -126,7 +126,7 @@ export function registerMarketAlertRoutes(app: FastifyInstance, db: Db): void {
       ? undefined
       : db.prepare('SELECT name FROM sde_types WHERE type_id = ?').get(typeId) as { name: string } | undefined;
     if (typeId === null || !type) {
-      return reply.status(404).send({ error: 'Предмет не найден.' });
+      return reply.status(404).send({ error: 'item_not_found' });
     }
 
     const regionId = asPositiveInt(body.region_id);
@@ -134,18 +134,18 @@ export function registerMarketAlertRoutes(app: FastifyInstance, db: Db): void {
       ? undefined
       : db.prepare('SELECT name FROM sde_regions WHERE region_id = ?').get(regionId) as { name: string } | undefined;
     if (regionId === null || !region) {
-      return reply.status(400).send({ error: 'Неизвестный регион.' });
+      return reply.status(400).send({ error: 'unknown_region' });
     }
 
     if (typeof body.side !== 'string' || !ALERT_SIDES.has(body.side)) {
-      return reply.status(400).send({ error: "Сторона должна быть 'sell' или 'buy'." });
+      return reply.status(400).send({ error: 'invalid_alert_side' });
     }
     if (typeof body.comparator !== 'string' || !ALERT_COMPARATORS.has(body.comparator)) {
-      return reply.status(400).send({ error: "Условие должно быть 'above' или 'below'." });
+      return reply.status(400).send({ error: 'invalid_alert_condition' });
     }
     const threshold = body.threshold_price;
     if (typeof threshold !== 'number' || !Number.isFinite(threshold) || threshold <= 0) {
-      return reply.status(400).send({ error: 'Пороговая цена должна быть положительным числом.' });
+      return reply.status(400).send({ error: 'invalid_alert_threshold' });
     }
 
     const activeCount = db.prepare(`
@@ -153,7 +153,7 @@ export function registerMarketAlertRoutes(app: FastifyInstance, db: Db): void {
     `).get(session.userId) as { n: number };
     if (activeCount.n >= config.marketAlerts.maxActivePerUser) {
       return reply.status(409).send({
-        error: `Слишком много активных алертов (максимум ${config.marketAlerts.maxActivePerUser}).`,
+        error: 'too_many_active_alerts',
       });
     }
 
@@ -179,7 +179,7 @@ export function registerMarketAlertRoutes(app: FastifyInstance, db: Db): void {
           UPDATE market_price_alerts SET status = 'disabled'
           WHERE alert_id = ? AND user_id = ?
         `).run(alertId, session.userId).changes;
-    if (changed === 0) return reply.status(404).send({ error: 'Алерт не найден.' });
+    if (changed === 0) return reply.status(404).send({ error: 'alert_not_found' });
     return { ok: true };
   });
 

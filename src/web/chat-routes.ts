@@ -52,6 +52,8 @@ type ChatBody = {
   message?: unknown;
   threadId?: unknown;
   idempotencyKey?: unknown;
+  /** Viewer locale; validated by the coordinator, never trusted verbatim. */
+  locale?: unknown;
 };
 type EveLoginBody = { language?: unknown };
 type SessionBody = { turnstileToken?: unknown };
@@ -120,7 +122,7 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
 
   app.post<{ Body: SessionBody }>('/api/web/session', async (request, reply) => {
     if (!verifyWebSessionCreation(request)) {
-      return reply.status(403).send({ error: 'Запрос с другого источника отклонён.' });
+      return reply.status(403).send({ error: 'foreign_origin_rejected' });
     }
     const existing = readWebSession(db, request);
     if (existing) {
@@ -136,16 +138,14 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
     if (!turnstile.ok) {
       if (turnstile.retryable) reply.header('Retry-After', '3');
       return reply.status(turnstile.retryable ? 503 : 403).send({
-        error: turnstile.retryable
-          ? 'Проверка защиты временно недоступна. Попробуйте ещё раз.'
-          : 'Подтвердите, что вы не робот.',
+        error: turnstile.retryable ? 'turnstile_unavailable' : 'captcha_required',
       });
     }
     const ipKey = buildWebClientIpKey(request.ip);
     const allowance = evaluateWebSessionCreationAllowance(db, ipKey);
     if (!allowance.ok) {
       reply.header('Retry-After', String(allowance.retryAfterSeconds));
-      return reply.status(429).send({ error: 'Слишком много новых сессий. Попробуйте позже.' });
+      return reply.status(429).send({ error: 'too_many_sessions' });
     }
     const created = createWebSession(db, ipKey);
     setWebSessionCookies(reply, created);
@@ -165,7 +165,7 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
     if (!isEveSsoConfigured()) {
-      return reply.status(503).send({ error: 'EVE SSO пока не настроен оператором.' });
+      return reply.status(503).send({ error: 'eve_sso_not_configured' });
     }
     const state = createAuthRequestToken(db, 'eve_sso', session.userId, {
       chatId: session.chatId,
@@ -173,7 +173,8 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
       ttlSeconds: 600,
     });
     const base = config.web.baseUrl.replace(/\/+$/, '');
-    const language = request.body?.language === 'en' ? 'en' : 'ru';
+    const requested = request.body?.language;
+    const language = requested === 'zh' || requested === 'en' ? requested : 'ru';
     return { url: `${base}/auth/eve/login?state=${encodeURIComponent(state)}&language=${language}` };
   });
 
@@ -199,7 +200,7 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
     `).get(session.chatId, session.userId, characterId) as { count: number };
     if (count.count >= MAX_WEB_CONVERSATIONS) {
       return reply.status(409).send({
-        error: `Достигнут лимит в ${MAX_WEB_CONVERSATIONS} диалогов. Удалите ненужный диалог.`,
+        error: 'conversation_limit_reached',
       });
     }
     const threadId = createConversation(db, session);
@@ -210,7 +211,7 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
     const session = requireSession(db, request, reply);
     if (!session) return;
     const thread = ownedThread(db, session, request.params.threadId);
-    if (!thread) return reply.status(404).send({ error: 'Диалог не найден.' });
+    if (!thread) return reply.status(404).send({ error: 'conversation_not_found' });
     const messages = db.prepare(`
       SELECT id, role, content, created_at
       FROM (
@@ -234,12 +235,12 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
     const thread = ownedThread(db, session, request.params.threadId);
-    if (!thread) return reply.status(404).send({ error: 'Диалог не найден.' });
+    if (!thread) return reply.status(404).send({ error: 'conversation_not_found' });
     if (agentRequests.readActive(
       { userId: session.userId, chatId: session.chatId },
       thread.thread_id,
     )) {
-      return reply.status(409).send({ error: 'Сначала дождитесь завершения или отмените активный запрос.' });
+      return reply.status(409).send({ error: 'request_in_progress' });
     }
     const remove = db.transaction(() => {
       db.prepare('DELETE FROM thread_summaries WHERE thread_id = ?').run(thread.thread_id);
@@ -262,7 +263,7 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
     if (!session) return;
     const characterId = parsePositiveInteger(request.params.characterId);
     if (!characterId || !setActiveCharacter(db, sessionContext(session), characterId)) {
-      return reply.status(404).send({ error: 'Персонаж не найден.' });
+      return reply.status(404).send({ error: 'character_not_found' });
     }
     const monitor = getRouteMonitorRuntimeStatus(db, session.chatId).monitor;
     if (monitor && monitor.characterId !== characterId) {
@@ -275,12 +276,12 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
     const characterId = parsePositiveInteger(request.params.characterId);
-    if (!characterId) return reply.status(404).send({ error: 'Персонаж не найден.' });
+    if (!characterId) return reply.status(404).send({ error: 'character_not_found' });
     // unlinkCharacter takes the character lock itself, clears links/active
     // state and profile artifacts, and drops character_* data plus the
     // eve_accounts row (encrypted tokens) when no links remain.
     const unlinked = await unlinkCharacter(db, sessionContext(session), characterId);
-    if (!unlinked) return reply.status(404).send({ error: 'Персонаж не найден.' });
+    if (!unlinked) return reply.status(404).send({ error: 'character_not_found' });
     const monitor = getRouteMonitorRuntimeStatus(db, session.chatId).monitor;
     if (monitor && monitor.characterId === characterId) {
       discardRouteMonitor(session.chatId, db);
@@ -297,11 +298,11 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
       let result = await loadWebPilotProfile(db, sessionContext(session));
       if (result.stale) result = await loadWebPilotProfile(db, sessionContext(session));
       console.log('[web-profile] DONE duration_ms=%d status=%s', Date.now() - startedAt, result.stale ? 'stale' : 'ok');
-      if (result.stale) return reply.status(409).send({ error: 'Активный персонаж изменился. Повторите запрос.' });
+      if (result.stale) return reply.status(409).send({ error: 'active_character_changed' });
       return { profile: result.profile };
     } catch (error) {
       console.error('[web-profile] FAILED duration_ms=%d error=%s', Date.now() - startedAt, error instanceof Error ? error.message : 'unknown');
-      return reply.status(502).send({ error: 'Не удалось загрузить профиль EVE. Попробуйте ещё раз.' });
+      return reply.status(502).send({ error: 'eve_profile_load_failed' });
     }
   });
 
@@ -309,7 +310,7 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
     const session = requireSession(db, request, reply);
     if (!session) return;
     const character = getLinkedCharacter(db, sessionContext(session));
-    if (!character) return reply.status(404).send({ error: 'Персонаж не подключён.' });
+    if (!character) return reply.status(404).send({ error: 'character_not_linked' });
     try {
       const response = await fetchWithTimeout(
         `https://images.evetech.net/characters/${character.characterId}/portrait?tenant=tranquility&size=512`,
@@ -318,18 +319,18 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
       );
       const contentType = response.headers.get('content-type') ?? '';
       if (!response.ok || !contentType.startsWith('image/')) {
-        return reply.status(502).send({ error: 'Портрет EVE временно недоступен.' });
+        return reply.status(502).send({ error: 'portrait_unavailable' });
       }
       const contentLength = Number(response.headers.get('content-length') ?? 0);
-      if (contentLength > 5_000_000) return reply.status(502).send({ error: 'Портрет EVE слишком большой.' });
+      if (contentLength > 5_000_000) return reply.status(502).send({ error: 'portrait_too_large' });
       const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.length > 5_000_000) return reply.status(502).send({ error: 'Портрет EVE слишком большой.' });
+      if (bytes.length > 5_000_000) return reply.status(502).send({ error: 'portrait_too_large' });
       return reply
         .header('Cache-Control', 'private, max-age=300')
         .type(contentType)
         .send(bytes);
     } catch {
-      return reply.status(502).send({ error: 'Портрет EVE временно недоступен.' });
+      return reply.status(502).send({ error: 'portrait_unavailable' });
     }
   });
 
@@ -355,7 +356,7 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
       { userId: session.userId, chatId: session.chatId },
       request.params.requestId,
     );
-    if (!result) return reply.status(404).send({ error: 'Запрос не найден.' });
+    if (!result) return reply.status(404).send({ error: 'request_not_found' });
     return { request: result };
   });
 
@@ -364,10 +365,10 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
     if (!session) return;
     const owner = { userId: session.userId, chatId: session.chatId };
     const initial = agentRequests.readOwned(owner, request.params.requestId);
-    if (!initial) return reply.status(404).send({ error: 'Запрос не найден.' });
+    if (!initial) return reply.status(404).send({ error: 'request_not_found' });
     const laneStreams = openEventStreams.get(session.chatId) ?? 0;
     if (laneStreams >= MAX_EVENT_STREAMS_PER_LANE) {
-      return reply.status(429).header('Retry-After', '5').send({ error: 'Слишком много открытых потоков.' });
+      return reply.status(429).header('Retry-After', '5').send({ error: 'too_many_streams' });
     }
     openEventStreams.set(session.chatId, laneStreams + 1);
 
@@ -461,7 +462,7 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
       { userId: session.userId, chatId: session.chatId },
       request.params.requestId,
     );
-    if (!result) return reply.status(404).send({ error: 'Запрос не найден.' });
+    if (!result) return reply.status(404).send({ error: 'request_not_found' });
     return { request: result };
   });
 
@@ -470,16 +471,16 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
     if (!session) return;
     const message = typeof request.body?.message === 'string' ? request.body.message.trim() : '';
     const requestedThreadId = typeof request.body?.threadId === 'string' ? request.body.threadId : null;
-    if (!message) return reply.status(400).send({ error: 'Введите сообщение.' });
+    if (!message) return reply.status(400).send({ error: 'empty_message' });
     if (message.length > MAX_INPUT_LENGTH) {
-      return reply.status(413).send({ error: `Максимальная длина сообщения: ${MAX_INPUT_LENGTH} символов.` });
+      return reply.status(413).send({ error: 'message_too_long' });
     }
 
     const ctx = sessionContext(session);
     const threadId = requestedThreadId
       ? ownedThreadForActiveCharacter(db, session, requestedThreadId)?.thread_id
       : resolveThreadForChat(db, session.chatId, ctx);
-    if (!threadId) return reply.status(404).send({ error: 'Диалог не найден для активного персонажа.' });
+    if (!threadId) return reply.status(404).send({ error: 'conversation_missing_for_character' });
 
     const idempotencyKey = typeof request.body?.idempotencyKey === 'string'
       && /^[A-Za-z0-9_-]{16,96}$/.test(request.body.idempotencyKey)
@@ -500,6 +501,7 @@ export function registerWebChatRoutes(app: FastifyInstance, db: Db): WebAgentReq
       message,
       idempotencyKey,
       ipKey: buildWebClientIpKey(request.ip),
+      locale: typeof request.body?.locale === 'string' ? request.body.locale : undefined,
     });
     if (!accepted.ok) {
       if (accepted.retryAfterSeconds > 0) {

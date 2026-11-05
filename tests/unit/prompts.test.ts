@@ -2,6 +2,23 @@ import { describe, expect, it } from 'vitest';
 import { buildDeveloperPrompt, normalizeResponseLanguage } from '../../src/agent/prompts.js';
 
 describe('buildDeveloperPrompt', () => {
+  it('binds the answer language to the request locale (V9)', () => {
+    const capabilities = { authenticated: false, characterId: null, characterName: null, grantedScopes: [] };
+
+    expect(normalizeResponseLanguage('zh')).toBe('Chinese');
+    expect(normalizeResponseLanguage('en')).toBe('English');
+    expect(normalizeResponseLanguage('ru')).toBe('Russian');
+    // Empty config falls back to Chinese, matching config.openai.responseLanguage.
+    expect(normalizeResponseLanguage(undefined)).toBe('Chinese');
+
+    const en = buildDeveloperPrompt(capabilities, null, null, null, 'full', normalizeResponseLanguage('en'));
+    expect(en).toContain('Default answer language: English.');
+    const zh = buildDeveloperPrompt(capabilities, null, null, null, 'full', normalizeResponseLanguage('zh'));
+    expect(zh).toContain('默认回答语言：简体中文');
+    const ru = buildDeveloperPrompt(capabilities, null, null, null, 'full', normalizeResponseLanguage('ru'));
+    expect(ru).toContain('Default answer language: Russian.');
+  });
+
   it('adds the bounded nine-tool orchestration contract only when the feature is enabled', () => {
     const capabilities = {
       authenticated: false,

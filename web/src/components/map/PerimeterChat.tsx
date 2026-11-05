@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { webApi } from '../../api';
+import { translateApiErrorValue, webApi } from '../../api';
 import { useI18n } from '../../i18n';
 import type { PerimeterMessage } from '../../types';
 import type { LiveAdvisory } from './use-map-live';
@@ -147,7 +147,7 @@ export function PerimeterChat({ csrfToken, advisories, context, onFocusSystem }:
             return;
           }
           if (payload.request.status === 'failed' && payload.request.error) {
-            setError(payload.request.error);
+            setError(translateApiErrorValue(payload.request.error, 'requestFailed'));
           }
           await reloadHistory();
         } catch {
@@ -276,7 +276,7 @@ function ChatRow({
   onFocusSystem,
 }: {
   message: PerimeterMessage;
-  locale: 'zh' | 'zh' | 'en' | 'ru';
+  locale: 'zh' | 'en' | 'ru';
   onFocusSystem: (systemId: number) => void;
 }) {
   const { t } = useI18n();
@@ -294,7 +294,7 @@ function ChatRow({
     <p className="perimeter-msg__text">{message.content}</p>
     <footer className="perimeter-msg__foot">
       <time dateTime={message.createdAt}>
-        {new Date(message.createdAt).toLocaleTimeString(locale === 'ru' ? 'ru-RU' : 'en-GB', {
+{new Date(message.createdAt).toLocaleTimeString(locale === 'ru' ? 'ru-RU' : locale === 'zh' ? 'zh-CN' : 'en-GB', {
           hour: '2-digit', minute: '2-digit',
         })}
       </time>

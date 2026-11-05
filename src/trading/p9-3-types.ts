@@ -1,5 +1,3 @@
-import type { Db } from '../db/sqlite.js';
-
 export type P93VerificationStatus = 'VERIFIED' | 'USER_REPORTED' | 'PENDING' | 'CONFLICT' | 'REJECTED';
 export type P93RecordState = 'DRAFT' | 'ACTIVE' | 'VERIFIED' | 'REJECTED' | 'REVERSED' | 'CORRECTED';
 export type P93TradeKind =
@@ -111,7 +109,18 @@ export interface P93FifoLot {
   calculationVersion: string;
 }
 
+export type P93CalculationFreshnessStatus = 'CURRENT' | 'STALE' | 'NEVER_CALCULATED';
+
+export interface P93CalculationFreshness {
+  status: P93CalculationFreshnessStatus;
+  latestCalculationAt: string | null;
+  latestLedgerFactAt: string | null;
+  latestFailedCalculationAt: string | null;
+  message: string;
+}
+
 export interface P93Performance {
+  freshness: P93CalculationFreshness;
   realizedPnl: number | null;
   knownRealizedPnl: number;
   unrealizedPnl: number | null;
@@ -127,6 +136,10 @@ export interface P93Performance {
   byType: Array<{ typeId: number; realizedPnl: number | null; tradeCount: number }>;
   byLocation: Array<{ locationId: number; realizedPnl: number | null; tradeCount: number }>;
   byStrategy: Array<{ strategy: string | null; realizedPnl: number | null; tradeCount: number }>;
+  unknownConsumptionCount: number;
+  unknownOpenLotCount: number;
+  unknownCostSellCount: number;
+  deterministicSellCount: number;
   unknownCostCount: number;
 }
 
@@ -150,12 +163,4 @@ export function normalizeIso(value: string): string {
 
 export function roundMoney(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100;
-}
-
-export function getLatestCalculationRun(db: Db, characterId: number): any | null {
-  return db.prepare(`
-    SELECT * FROM real_calculation_runs
-    WHERE character_id = ? AND status = 'COMPLETED'
-    ORDER BY completed_at DESC, run_id DESC LIMIT 1
-  `).get(characterId) ?? null;
 }

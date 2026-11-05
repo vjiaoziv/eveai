@@ -120,7 +120,7 @@ function checkWebAgentQueue(db?: Db): DependencyHealthCheck {
     `).get() as { queued: number | null; running: number | null; stale: number | null };
     return {
       status: (counts.stale ?? 0) > 0 ? 'failed' : 'ok',
-      ...((counts.stale ?? 0) > 0 ? { error: 'Stale web agent lease detected' } : {}),
+      ...((counts.stale ?? 0) > 0 ? { error: 'stale_web_agent_lease' } : {}),
       details: {
         queued: counts.queued ?? 0,
         running: counts.running ?? 0,
@@ -140,7 +140,7 @@ async function checkDatabase(db?: Db): Promise<DependencyHealthCheck> {
   try {
     const row = db.prepare('SELECT 1 AS ok').get() as { ok: number } | undefined;
     if (row?.ok !== 1) {
-      return { status: 'failed', error: 'Unexpected SQLite probe result' };
+      return { status: 'failed', error: 'unexpected_sqlite_probe' };
     }
     return { status: 'ok' };
   } catch (error) {

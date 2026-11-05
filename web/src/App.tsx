@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { isAmbiguousApiRequestError, webApi } from './api';
+import { isAmbiguousApiRequestError, translateApiErrorValue, webApi } from './api';
 import {
   applyThreadDelta,
   applyThreadSnapshot,
@@ -26,7 +26,7 @@ import { PilotProfileScreen } from './components/PilotProfileScreen';
 import { SettingsScreen } from './components/SettingsScreen';
 import { SupportScreen } from './components/SupportScreen';
 import { clearMarketStaticCache } from './components/market/static-cache';
-import { useI18n } from './i18n';
+import { useI18n, type TranslationKey } from './i18n';
 import type {
   ActivityStep,
   ChatMessage,
@@ -52,10 +52,10 @@ const SNAPSHOT_POLL_MS = 60_000;
 /** Живые поля пилота (локация, корабль, кошелёк) в ESI кэшируются 5–120 с. */
 const PROFILE_POLL_MS = 60_000;
 
-function authResultMessage(): string | null {
+function authResultMessage(t: (key: TranslationKey) => string): string | null {
   const result = new URLSearchParams(window.location.search).get('auth');
-  if (result === 'denied') return 'Вход через EVE отменён.';
-  if (result === 'error') return 'Не удалось подключить персонажа. Попробуйте ещё раз.';
+  if (result === 'denied') return t('authDenied');
+  if (result === 'error') return t('authFailed');
   return null;
 }
 
@@ -75,7 +75,7 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(authResultMessage);
+  const [error, setError] = useState<string | null>(() => authResultMessage(t));
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pendingDraft, setPendingDraft] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<AppView>('chat');
@@ -146,7 +146,7 @@ export default function App() {
         }
       })
       .catch((reason: unknown) => {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : 'Не удалось открыть приложение.');
+        if (!cancelled) setError(reason instanceof Error ? reason.message : t('appOpenFailed'));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -283,10 +283,10 @@ export default function App() {
           // Агент мог сменить корабль/фит или потратить ISK — карточка догоняет.
           void loadProfile();
           if (request.status !== 'completed') {
-            setError(request.error ?? 'Не удалось завершить запрос.');
+            setError(translateApiErrorValue(request.error, 'requestFinishFailed'));
           }
         } catch (reason) {
-          setError(reason instanceof Error ? reason.message : 'Не удалось обновить диалог.');
+          setError(reason instanceof Error ? reason.message : t('conversationRefreshFailed'));
         } finally {
           finalizingRef.current.delete(request.requestId);
           setRequests((current) => untrackThreadRequest(current, request.threadId, request.requestId));
@@ -299,7 +299,7 @@ export default function App() {
     if (session) return session;
     const payload = await webApi.createSession(turnstileToken);
     setBootstrap(payload);
-    if (!payload.session) throw new Error('Сервер не создал браузерную сессию.');
+    if (!payload.session) throw new Error(t('sessionCreateFailed'));
     return payload.session;
   };
 
@@ -312,7 +312,7 @@ export default function App() {
       window.location.assign(url);
       return true;
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Не удалось начать вход через EVE.');
+      setError(reason instanceof Error ? reason.message : t('eveLoginStartFailed'));
       setBusy(false);
       return false;
     }
@@ -326,7 +326,7 @@ export default function App() {
       await loadConversations();
       return true;
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Не удалось открыть гостевой режим.');
+      setError(reason instanceof Error ? reason.message : t('guestStartFailed'));
       return false;
     } finally {
       setBusy(false);
@@ -343,7 +343,7 @@ export default function App() {
       await loadConversations();
       setSidebarOpen(false);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Не удалось переключить персонажа.');
+      setError(reason instanceof Error ? reason.message : t('characterSwitchFailed'));
     } finally {
       setBusy(false);
     }
@@ -373,7 +373,7 @@ export default function App() {
       await loadConversations(created.threadId);
       setSidebarOpen(false);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Не удалось создать диалог.');
+      setError(reason instanceof Error ? reason.message : t('conversationCreateFailed'));
     } finally {
       setBusy(false);
     }
@@ -391,7 +391,7 @@ export default function App() {
       }
       await recoverActiveRequest(threadId);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Не удалось загрузить диалог.');
+      setError(reason instanceof Error ? reason.message : t('conversationLoadFailed'));
     }
   };
 
@@ -443,7 +443,7 @@ export default function App() {
       await refreshConversationList();
     } catch (reason) {
       if (!isAmbiguousApiRequestError(reason)) pendingSubmissionRef.current = null;
-      setError(reason instanceof Error ? reason.message : 'Модель не ответила. Попробуйте ещё раз.');
+      setError(reason instanceof Error ? reason.message : t('modelNoReply'));
     } finally {
       setBusy(false);
     }
@@ -455,7 +455,7 @@ export default function App() {
       const response = await webApi.cancelAgentRequest(activeRequest.requestId, session.csrfToken);
       setRequests((current) => applyThreadSnapshot(current, response.request));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Не удалось отменить запрос.');
+      setError(reason instanceof Error ? reason.message : t('requestCancelFailed'));
     }
   };
 
@@ -485,14 +485,14 @@ export default function App() {
       setDockTab('market');
       setProfile(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Не удалось завершить сессию.');
+      setError(reason instanceof Error ? reason.message : t('sessionEndFailed'));
     } finally {
       setBusy(false);
     }
   };
 
   if (loading) {
-    return <div className="app-loading" aria-label="Загрузка"><span /><span /><span /></div>;
+    return <div className="app-loading" aria-label={t('loading')}><span /><span /><span /></div>;
   }
 
   if (!session) {
@@ -632,6 +632,7 @@ type RequestObserverProps = {
  * per active request, so several chats can stream at the same time.
  */
 function RequestObserver({ requestId, threadId, retryAfterMs, onSnapshot, onDelta, onPollError }: RequestObserverProps) {
+  const { t } = useI18n();
   const retryAfterRef = useRef(retryAfterMs);
   retryAfterRef.current = retryAfterMs;
   useEffect(() => {
@@ -646,7 +647,7 @@ function RequestObserver({ requestId, threadId, retryAfterMs, onSnapshot, onDelt
         void webApi.getAgentRequest(requestId)
           .then(({ request }) => applySnapshot(request))
           .catch((reason: unknown) => {
-            if (!cancelled) onPollError(reason instanceof Error ? reason.message : 'Не удалось проверить состояние запроса.');
+            if (!cancelled) onPollError(reason instanceof Error ? reason.message : t('requestPollFailed'));
           });
       }, Math.max(500, retryAfterRef.current));
     };

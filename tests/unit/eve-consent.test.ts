@@ -1,8 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { buildDeveloperPrompt } from '../../src/agent/prompts.js';
 import { buildEveConsentPage } from '../../src/web/eve-consent.js';
+import { buildLocalizedEveConsentPage } from '../../src/web/localized-eve-consent-page.js';
 
 describe('EVE informed-consent disclosure contract', () => {
+
+  it('renders the whole consent page in Chinese for the zh locale (V8)', () => {
+    const page = buildLocalizedEveConsentPage('state', 'zh');
+    expect(page).toContain('<html lang="zh">');
+    expect(page).toContain('<title>EVE AI — EVE SSO 授权</title>');
+    expect(page).toContain('由你决定副官能看到什么。');
+    expect(page).toContain('继续前往 EVE SSO →');
+    expect(page).toContain('<input type="hidden" name="language" value="zh">');
+    // The switcher offers the other two locales and never the active one.
+    expect(page).toContain('hreflang="en"');
+    expect(page).toContain('hreflang="ru"');
+    expect(page).not.toContain('hreflang="zh"');
+    // No English fallback copy may leak into the zh render.
+    expect(page).not.toContain('You decide what the agent can see.');
+  });
+
   it('discloses the persistent model context that normal agent turns actually include', () => {
     const prompt = buildDeveloperPrompt({
       authenticated: true,

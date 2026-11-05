@@ -2,6 +2,17 @@ import type { Db } from './sqlite.js';
 import { SCHEMA_SQL } from './schema.js';
 import { pathToFileURL } from 'node:url';
 
+
+function dropTriggersReferencingTable(db: Db, table: string): void {
+  const triggers = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'trigger' AND instr(lower(sql), lower(?)) > 0",
+  ).all(table) as Array<{ name: string }>;
+  for (const trigger of triggers) {
+    const quoted = trigger.name.replace(/"/g, '""');
+    db.prepare(`DROP TRIGGER IF EXISTS "${quoted}"`).run();
+  }
+}
+
 function backfillPaperTradingEscrow(db: Db): void {
   // Historical rows can be reconstructed only when their escrow_lock journal
   // entry exists. Rows without that evidence are isolated instead of being
@@ -423,22 +434,28 @@ export function runMigrations(db: Db): void {
     // NOT EXISTS so the migration is safely re-runnable on production data.
     db.exec(`
       CREATE TABLE IF NOT EXISTS real_asset_sync_jobs (
-        job_id          TEXT PRIMARY KEY,
-        character_id    INTEGER NOT NULL,
-        trigger         TEXT NOT NULL DEFAULT 'manual' CHECK (trigger IN ('manual', 'auto', 'api')),
-        status          TEXT NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED')),
-        phase           TEXT NOT NULL DEFAULT 'fetch' CHECK (phase IN ('fetch', 'validate', 'commit', 'done')),
-        pages_total     INTEGER,
-        pages_fetched   INTEGER,
-        items_fetched   INTEGER,
-        items_committed INTEGER,
-        items_skipped   INTEGER NOT NULL DEFAULT 0,
-        started_at      TEXT NOT NULL,
-        finished_at     TEXT,
-        duration_ms     INTEGER,
-        snapshot_id     TEXT,
-        last_error      TEXT,
-        source          TEXT NOT NULL DEFAULT 'esi_character_assets'
+        job_id             TEXT PRIMARY KEY,
+        character_id       INTEGER NOT NULL,
+        trigger            TEXT NOT NULL DEFAULT 'manual' CHECK (trigger IN ('manual', 'auto', 'api')),
+        status             TEXT NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED')),
+        phase              TEXT NOT NULL DEFAULT 'fetch' CHECK (phase IN ('fetch', 'validate', 'commit', 'done')),
+        generation         INTEGER NOT NULL DEFAULT 0,
+        owner_user_id      INTEGER,
+        owner_chat_id      INTEGER,
+        binding_epoch      INTEGER NOT NULL DEFAULT 0,
+        binding_digest     TEXT NOT NULL DEFAULT '',
+        account_owner_hash TEXT,
+        pages_total        INTEGER,
+        pages_fetched      INTEGER,
+        items_fetched      INTEGER,
+        items_committed    INTEGER,
+        items_skipped      INTEGER NOT NULL DEFAULT 0,
+        started_at         TEXT NOT NULL,
+        finished_at        TEXT,
+        duration_ms        INTEGER,
+        snapshot_id        TEXT,
+        last_error         TEXT,
+        source             TEXT NOT NULL DEFAULT 'esi_character_assets'
       );
       CREATE INDEX IF NOT EXISTS idx_real_asset_jobs_char_started
         ON real_asset_sync_jobs(character_id, started_at);
@@ -446,6 +463,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_asset_snapshots (
         snapshot_id         TEXT PRIMARY KEY,
         character_id        INTEGER NOT NULL,
+        owner_user_id       INTEGER,
+        owner_chat_id       INTEGER,
+        binding_epoch       INTEGER NOT NULL DEFAULT 0,
+        binding_digest      TEXT NOT NULL DEFAULT '',
         job_id              TEXT,
         started_at          TEXT NOT NULL,
         completed_at        TEXT,
@@ -462,7 +483,8 @@ export function runMigrations(db: Db): void {
       CREATE INDEX IF NOT EXISTS idx_real_asset_snapshots_char_completed
         ON real_asset_snapshots(character_id, completed_at);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_real_asset_snapshots_latest
-        ON real_asset_snapshots(character_id) WHERE is_latest = 1;
+        ON real_asset_snapshots(character_id, owner_user_id, owner_chat_id, binding_epoch)
+        WHERE is_latest = 1;
 
       CREATE TABLE IF NOT EXISTS real_asset_snapshot_items (
         snapshot_id       TEXT NOT NULL,
@@ -501,6 +523,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_asset_changes (
         change_id          TEXT PRIMARY KEY,
         character_id       INTEGER NOT NULL,
+        owner_user_id      INTEGER,
+        owner_chat_id      INTEGER,
+        binding_epoch      INTEGER NOT NULL DEFAULT 0,
+        binding_digest     TEXT NOT NULL DEFAULT '',
         item_id            INTEGER NOT NULL,
         type_id            INTEGER NOT NULL,
         change_type        TEXT NOT NULL CHECK (change_type IN ('ADDED', 'QTY_INCREASED', 'QTY_DECREASED', 'MOVED', 'REMOVED', 'REAPPEARED', 'CONTAINER_CHANGED')),
@@ -522,14 +548,22 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_asset_tags (
         character_id INTEGER NOT NULL,
         item_id      INTEGER NOT NULL,
+        owner_user_id INTEGER,
+        owner_chat_id INTEGER,
+        binding_epoch INTEGER NOT NULL DEFAULT 0,
+        binding_digest TEXT NOT NULL DEFAULT '',
         tag          TEXT NOT NULL CHECK (tag IN ('SELF_USE', 'FOR_SALE', 'PRODUCTION', 'MISSION', 'SPARE', 'TRADE_STOCK', 'HOLD')),
         updated_at   TEXT NOT NULL,
-        PRIMARY KEY (character_id, item_id)
+        PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch, item_id)
       );
 
       CREATE TABLE IF NOT EXISTS real_asset_valuations (
         valuation_id       TEXT PRIMARY KEY,
         character_id       INTEGER NOT NULL,
+        owner_user_id      INTEGER,
+        owner_chat_id      INTEGER,
+        binding_epoch      INTEGER NOT NULL DEFAULT 0,
+        binding_digest     TEXT NOT NULL DEFAULT '',
         snapshot_id        TEXT NOT NULL,
         hub_location_id    INTEGER NOT NULL,
         hub_region_id      INTEGER NOT NULL,
@@ -568,6 +602,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_asset_opportunity_matches (
         match_id          TEXT PRIMARY KEY,
         character_id      INTEGER NOT NULL,
+        owner_user_id     INTEGER,
+        owner_chat_id     INTEGER,
+        binding_epoch     INTEGER NOT NULL DEFAULT 0,
+        binding_digest    TEXT NOT NULL DEFAULT '',
         opportunity_id    TEXT NOT NULL,
         type_id           INTEGER NOT NULL,
         held_quantity     INTEGER NOT NULL DEFAULT 0,
@@ -578,11 +616,101 @@ export function runMigrations(db: Db): void {
         locations_json    TEXT NOT NULL DEFAULT '[]',
         snapshot_id       TEXT,
         computed_at       TEXT NOT NULL,
-        UNIQUE (character_id, opportunity_id)
+        UNIQUE (character_id, owner_user_id, owner_chat_id, binding_epoch, opportunity_id)
       );
       CREATE INDEX IF NOT EXISTS idx_real_asset_matches_char
         ON real_asset_opportunity_matches(character_id, computed_at);
     `);
+    // P9.3.3.4: each asset sync attempt gets a monotonic fencing generation.
+    // Lease acquisition and RUNNING job creation share one BEGIN IMMEDIATE
+    // transaction; the partial unique index is a database-level second barrier.
+    addColumnIfMissing(db, 'real_asset_sync_jobs', 'generation', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, 'real_asset_sync_jobs', 'owner_user_id', 'INTEGER');
+    addColumnIfMissing(db, 'real_asset_sync_jobs', 'owner_chat_id', 'INTEGER');
+    addColumnIfMissing(db, 'real_asset_sync_jobs', 'binding_epoch', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, 'real_asset_sync_jobs', 'binding_digest', "TEXT NOT NULL DEFAULT ''");
+    addColumnIfMissing(db, 'real_asset_sync_jobs', 'account_owner_hash', 'TEXT');
+    addColumnIfMissing(db, 'real_asset_snapshots', 'hash_algorithm', "TEXT NOT NULL DEFAULT 'sha256'");
+    addColumnIfMissing(db, 'real_asset_snapshots', 'canonical_version', 'INTEGER NOT NULL DEFAULT 0');
+    ensureAssetLineageSchema(db);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS real_asset_sync_leases (
+        character_id INTEGER PRIMARY KEY,
+        generation   INTEGER NOT NULL,
+        job_id       TEXT NOT NULL,
+        acquired_at  TEXT NOT NULL,
+        renewed_at   TEXT NOT NULL
+      );
+
+      -- Per-link epochs make unlink+rebind observable even if the same user and
+      -- character row is recreated. They do not replace SSO ownership checks.
+      CREATE TABLE IF NOT EXISTS eve_character_binding_epochs (
+        chat_id      INTEGER NOT NULL,
+        character_id INTEGER NOT NULL,
+        epoch        INTEGER NOT NULL DEFAULT 1,
+        updated_at   TEXT NOT NULL,
+        PRIMARY KEY (chat_id, character_id)
+      );
+      INSERT OR IGNORE INTO eve_character_binding_epochs
+        (chat_id, character_id, epoch, updated_at)
+      SELECT chat_id, character_id, 1, datetime('now') FROM eve_character_links;
+
+      CREATE TRIGGER IF NOT EXISTS trg_eve_character_links_binding_insert
+      AFTER INSERT ON eve_character_links
+      BEGIN
+        INSERT INTO eve_character_binding_epochs
+          (chat_id, character_id, epoch, updated_at)
+        VALUES (NEW.chat_id, NEW.character_id, 1, datetime('now'))
+        ON CONFLICT(chat_id, character_id) DO UPDATE SET
+          epoch = epoch + 1, updated_at = datetime('now');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_eve_character_links_binding_update
+      AFTER UPDATE ON eve_character_links
+      BEGIN
+        INSERT INTO eve_character_binding_epochs
+          (chat_id, character_id, epoch, updated_at)
+        VALUES (OLD.chat_id, OLD.character_id, 1, datetime('now'))
+        ON CONFLICT(chat_id, character_id) DO UPDATE SET
+          epoch = epoch + 1, updated_at = datetime('now');
+        INSERT INTO eve_character_binding_epochs
+          (chat_id, character_id, epoch, updated_at)
+        VALUES (NEW.chat_id, NEW.character_id, 1, datetime('now'))
+        ON CONFLICT(chat_id, character_id) DO UPDATE SET
+          epoch = epoch + 1, updated_at = datetime('now');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_eve_character_links_binding_delete
+      AFTER DELETE ON eve_character_links
+      BEGIN
+        INSERT INTO eve_character_binding_epochs
+          (chat_id, character_id, epoch, updated_at)
+        VALUES (OLD.chat_id, OLD.character_id, 1, datetime('now'))
+        ON CONFLICT(chat_id, character_id) DO UPDATE SET
+          epoch = epoch + 1, updated_at = datetime('now');
+      END;
+
+      -- Historical duplicate RUNNING rows are made auditable before the
+      -- invariant is installed. Only the newest remains live.
+      UPDATE real_asset_sync_jobs AS j
+      SET status = 'FAILED', finished_at = datetime('now'),
+          last_error = COALESCE(last_error, 'superseded while adding P9.3.3.4 sync ownership invariant')
+      WHERE status = 'RUNNING'
+        AND EXISTS (
+          SELECT 1 FROM real_asset_sync_jobs newer
+          WHERE newer.character_id = j.character_id
+            AND newer.status = 'RUNNING'
+            AND (
+              julianday(newer.started_at) > julianday(j.started_at)
+              OR (julianday(newer.started_at) = julianday(j.started_at) AND newer.job_id > j.job_id)
+            )
+        );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_real_asset_jobs_one_running
+        ON real_asset_sync_jobs(character_id) WHERE status = 'RUNNING';
+      CREATE INDEX IF NOT EXISTS idx_real_asset_jobs_char_generation
+        ON real_asset_sync_jobs(character_id, generation);
+    `);
+
 
 
     // P9.3: append-only REAL accounting ledger. These tables are deliberately
@@ -591,6 +719,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_trade_records (
         record_id             TEXT PRIMARY KEY,
         character_id          INTEGER NOT NULL,
+        owner_user_id         INTEGER,
+        owner_chat_id         INTEGER,
+        binding_epoch         INTEGER NOT NULL DEFAULT 0,
+        binding_digest        TEXT NOT NULL DEFAULT '',
         ledger_key            TEXT NOT NULL,
         record_state          TEXT NOT NULL DEFAULT 'DRAFT'
           CHECK (record_state IN ('DRAFT', 'ACTIVE', 'VERIFIED', 'REJECTED', 'REVERSED', 'CORRECTED')),
@@ -628,7 +760,7 @@ export function runMigrations(db: Db): void {
         created_at            TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
         is_paper              INTEGER NOT NULL DEFAULT 0 CHECK (is_paper = 0),
-        UNIQUE (character_id, ledger_key)
+        UNIQUE (character_id, owner_user_id, owner_chat_id, binding_epoch, ledger_key)
       );
       CREATE INDEX IF NOT EXISTS idx_real_trade_records_char_time
         ON real_trade_records(character_id, trade_time, record_id);
@@ -638,6 +770,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_trade_events (
         event_id       INTEGER PRIMARY KEY AUTOINCREMENT,
         character_id   INTEGER NOT NULL,
+        owner_user_id  INTEGER,
+        owner_chat_id  INTEGER,
+        binding_epoch  INTEGER NOT NULL DEFAULT 0,
+        binding_digest TEXT NOT NULL DEFAULT '',
         record_id      TEXT NOT NULL,
         event_type     TEXT NOT NULL,
         actor_type     TEXT NOT NULL CHECK (actor_type IN ('USER', 'SYSTEM', 'ESI_SYNC')),
@@ -655,6 +791,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_trade_fees (
         fee_id       TEXT PRIMARY KEY,
         record_id    TEXT NOT NULL,
+        owner_user_id  INTEGER,
+        owner_chat_id  INTEGER,
+        binding_epoch  INTEGER NOT NULL DEFAULT 0,
+        binding_digest TEXT NOT NULL DEFAULT '',
         fee_kind     TEXT NOT NULL CHECK (fee_kind IN ('BROKER', 'TRANSACTION_TAX', 'OTHER', 'MANUAL')),
         amount       REAL NOT NULL CHECK (amount >= 0),
         treatment    TEXT NOT NULL CHECK (treatment IN ('CAPITALIZED', 'SELL_EXPENSE', 'PERIOD_EXPENSE', 'UNRELATED', 'UNKNOWN')),
@@ -669,6 +809,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_trade_evidence (
         evidence_id    TEXT PRIMARY KEY,
         character_id   INTEGER NOT NULL,
+        owner_user_id  INTEGER,
+        owner_chat_id  INTEGER,
+        binding_epoch  INTEGER NOT NULL DEFAULT 0,
+        binding_digest TEXT NOT NULL DEFAULT '',
         evidence_type  TEXT NOT NULL CHECK (evidence_type IN ('ESI_WALLET_LOG', 'ESI_MARKET_ORDER', 'ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE', 'USER_ATTACHMENT', 'USER_CONFIRMATION')),
         source_system  TEXT NOT NULL,
         source_ref     TEXT,
@@ -682,8 +826,6 @@ export function runMigrations(db: Db): void {
       );
       CREATE INDEX IF NOT EXISTS idx_real_trade_evidence_char_time
         ON real_trade_evidence(character_id, captured_at);
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_real_trade_evidence_source
-        ON real_trade_evidence(character_id, source_system, source_ref) WHERE source_ref IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS real_trade_evidence_links (
         evidence_id  TEXT NOT NULL,
@@ -698,6 +840,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_fifo_lots (
         lot_id              TEXT PRIMARY KEY,
         character_id        INTEGER NOT NULL,
+        owner_user_id       INTEGER,
+        owner_chat_id       INTEGER,
+        binding_epoch       INTEGER NOT NULL DEFAULT 0,
+        binding_digest      TEXT NOT NULL DEFAULT '',
         type_id             INTEGER NOT NULL,
         location_id         INTEGER NOT NULL,
         source_record_id    TEXT NOT NULL,
@@ -718,6 +864,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_fifo_consumptions (
         consumption_id       TEXT PRIMARY KEY,
         character_id         INTEGER NOT NULL,
+        owner_user_id        INTEGER,
+        owner_chat_id        INTEGER,
+        binding_epoch        INTEGER NOT NULL DEFAULT 0,
+        binding_digest       TEXT NOT NULL DEFAULT '',
         sell_record_id       TEXT NOT NULL,
         lot_id               TEXT NOT NULL,
         type_id              INTEGER NOT NULL,
@@ -740,6 +890,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_calculation_runs (
         run_id               TEXT PRIMARY KEY,
         character_id         INTEGER NOT NULL,
+        owner_user_id        INTEGER,
+        owner_chat_id        INTEGER,
+        binding_epoch        INTEGER NOT NULL DEFAULT 0,
+        binding_digest       TEXT NOT NULL DEFAULT '',
         calculation_version  TEXT NOT NULL,
         status               TEXT NOT NULL CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED')),
         started_at           TEXT NOT NULL,
@@ -759,6 +913,10 @@ export function runMigrations(db: Db): void {
       CREATE TABLE IF NOT EXISTS real_reconciliation_runs (
         run_id              TEXT PRIMARY KEY,
         character_id        INTEGER NOT NULL,
+        owner_user_id       INTEGER,
+        owner_chat_id       INTEGER,
+        binding_epoch       INTEGER NOT NULL DEFAULT 0,
+        binding_digest      TEXT NOT NULL DEFAULT '',
         snapshot_id         TEXT,
         calculation_run_id  TEXT,
         status              TEXT NOT NULL CHECK (status IN ('MATCHED', 'RECONCILIATION_REQUIRED', 'FAILED')),
@@ -791,6 +949,10 @@ export function runMigrations(db: Db): void {
         case_id          TEXT PRIMARY KEY,
         run_id           TEXT NOT NULL,
         character_id     INTEGER NOT NULL,
+        owner_user_id    INTEGER,
+        owner_chat_id    INTEGER,
+        binding_epoch    INTEGER NOT NULL DEFAULT 0,
+        binding_digest   TEXT NOT NULL DEFAULT '',
         case_kind        TEXT NOT NULL,
         status           TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'RESOLVED', 'DISMISSED')),
         linked_record_id TEXT,
@@ -804,12 +966,54 @@ export function runMigrations(db: Db): void {
         ON real_reconciliation_cases(run_id, status);
 
       CREATE TABLE IF NOT EXISTS real_esi_transaction_sync (
-        character_id        INTEGER PRIMARY KEY,
+        character_id        INTEGER NOT NULL,
+        owner_user_id       INTEGER,
+        owner_chat_id       INTEGER,
+        binding_epoch       INTEGER NOT NULL DEFAULT 0,
+        binding_digest      TEXT NOT NULL DEFAULT '',
         last_transaction_id INTEGER,
         last_synced_at      TEXT,
         status              TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok', 'error')),
-        error               TEXT
+        error               TEXT,
+        PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch)
       );
+
+      -- P9.3.3.2: one durable lease per character serializes wallet persistence
+      -- across processes. Expired leases are reclaimable, but only the owner may
+      -- finalize a cursor write.
+      CREATE TABLE IF NOT EXISTS real_esi_transaction_sync_leases (
+        character_id INTEGER NOT NULL,
+        owner_user_id INTEGER,
+        owner_chat_id INTEGER,
+        binding_epoch INTEGER NOT NULL DEFAULT 0,
+        owner_id     TEXT NOT NULL,
+        acquired_at  TEXT NOT NULL,
+        expires_at   TEXT NOT NULL,
+        PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch)
+      );
+
+      -- A failed or malformed transaction remains retryable and blocks the
+      -- cursor from advancing past it until a later sync proves success.
+      CREATE TABLE IF NOT EXISTS real_esi_transaction_failures (
+        character_id   INTEGER NOT NULL,
+        owner_user_id  INTEGER,
+        owner_chat_id  INTEGER,
+        binding_epoch  INTEGER NOT NULL DEFAULT 0,
+        binding_digest TEXT NOT NULL DEFAULT '',
+        failure_key    TEXT NOT NULL,
+        transaction_id INTEGER,
+        error_code     TEXT NOT NULL,
+        error          TEXT NOT NULL,
+        first_failed_at TEXT NOT NULL,
+        last_failed_at TEXT NOT NULL,
+        retry_count    INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch, failure_key)
+      );
+    `);
+    ensureRealLedgerLineageSchema(db);
+    ensureRealLedgerCursorSchema(db);
+    ensureP9ControlPlaneLineageSchema(db);
+    db.exec(`
 
       DROP TRIGGER IF EXISTS real_trade_records_no_delete;
       CREATE TRIGGER real_trade_records_no_delete
@@ -1071,6 +1275,17 @@ export function runMigrations(db: Db): void {
         SELECT RAISE(ABORT, '已核实或终态记录不可删除证据关系');
       END;
     `);
+
+    addColumnIfMissing(db, 'real_reconciliation_runs', 'owner_user_id', 'INTEGER');
+    addColumnIfMissing(db, 'real_reconciliation_runs', 'owner_chat_id', 'INTEGER');
+    addColumnIfMissing(db, 'real_reconciliation_runs', 'binding_epoch', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, 'real_reconciliation_runs', 'binding_digest', "TEXT NOT NULL DEFAULT ''");
+    createIndexIfMissing(
+      db,
+      'idx_real_reconciliation_runs_lineage',
+      'real_reconciliation_runs',
+      'character_id, owner_user_id, owner_chat_id, binding_epoch, created_at',
+    );
     backfillPaperTradingEscrow(db);
     // Alert push redelivery: per-event attempts with exponential backoff and
     // a terminal abandoned_at so undeliverable events stop blocking the queue.
@@ -1201,6 +1416,532 @@ function addColumnIfMissing(db: Db, table: string, column: string, type: string)
   }
 }
 
+function tableColumns(db: Db, table: string): Set<string> {
+  return new Set(
+    (db.prepare(`PRAGMA table_xinfo(${table})`).all() as Array<{ name: string }>)
+      .map((column) => column.name),
+  );
+}
+
+function tableSql(db: Db, table: string): string {
+  const row = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get(table) as { sql: string } | undefined;
+  return row?.sql ?? '';
+}
+
+/**
+ * P9.3.3.8 REAL ledger ownership envelope.
+ *
+ * Existing financial rows are intentionally left ownerless rather than being
+ * attributed to whichever character binding happens to be current during a
+ * migration. They remain available for audit but are invisible to ordinary web
+ * routes. New writes stamp owner/chat/binding epoch/digest atomically.
+ */
+function ensureRealLedgerLineageSchema(db: Db): void {
+  const lineageTables = [
+    'real_trade_records',
+    'real_trade_events',
+    'real_trade_fees',
+    'real_trade_evidence',
+    'real_fifo_lots',
+    'real_fifo_consumptions',
+    'real_calculation_runs',
+    'real_reconciliation_runs',
+    'real_reconciliation_cases',
+  ];
+  for (const table of lineageTables) {
+    addColumnIfMissing(db, table, 'owner_user_id', 'INTEGER');
+    addColumnIfMissing(db, table, 'owner_chat_id', 'INTEGER');
+    addColumnIfMissing(db, table, 'binding_epoch', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, table, 'binding_digest', "TEXT NOT NULL DEFAULT ''");
+  }
+
+  // Older REAL ledgers used UNIQUE(character_id, ledger_key). Rebuild once so
+  // the same character can have independent records in separate owner/chat
+  // binding epochs while legacy rows stay ownerless.
+  const recordSql = tableSql(db, 'real_trade_records');
+  if (recordSql.includes('UNIQUE (character_id, ledger_key)')) {
+    // Triggers on related financial tables may keep SQLite bound to the table
+    // being rebuilt. They are recreated atomically by the final trigger block.
+    dropTriggersReferencingTable(db, 'real_trade_records');
+    db.exec(`
+      CREATE TABLE real_trade_records_p9338 (
+        record_id             TEXT PRIMARY KEY,
+        character_id          INTEGER NOT NULL,
+        owner_user_id         INTEGER,
+        owner_chat_id         INTEGER,
+        binding_epoch         INTEGER NOT NULL DEFAULT 0,
+        binding_digest        TEXT NOT NULL DEFAULT '',
+        ledger_key            TEXT NOT NULL,
+        record_state          TEXT NOT NULL DEFAULT 'DRAFT'
+          CHECK (record_state IN ('DRAFT', 'ACTIVE', 'VERIFIED', 'REJECTED', 'REVERSED', 'CORRECTED')),
+        verification_status   TEXT NOT NULL DEFAULT 'PENDING'
+          CHECK (verification_status IN ('VERIFIED', 'USER_REPORTED', 'PENDING', 'CONFLICT', 'REJECTED')),
+        trade_kind            TEXT NOT NULL
+          CHECK (trade_kind IN ('BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL', 'FEE_ADJUSTMENT', 'COST_ADJUSTMENT', 'INVENTORY_TRANSFER', 'REVERSAL')),
+        direction             TEXT NOT NULL CHECK (direction IN ('BUY', 'SELL', 'NONE')),
+        type_id               INTEGER NOT NULL,
+        location_id           INTEGER NOT NULL,
+        quantity              INTEGER NOT NULL CHECK (quantity >= 0),
+        unit_price            REAL NOT NULL DEFAULT 0 CHECK (unit_price >= 0),
+        gross_amount          REAL GENERATED ALWAYS AS (quantity * unit_price) STORED,
+        fee_status            TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK (fee_status IN ('COMPLETE', 'UNKNOWN')),
+        trade_time            TEXT NOT NULL,
+        source_type           TEXT NOT NULL,
+        source_ref            TEXT,
+        source_hash           TEXT,
+        order_id              TEXT,
+        fill_id               TEXT,
+        execution_status      TEXT NOT NULL DEFAULT 'MANUAL_ENTRY'
+          CHECK (execution_status IN ('FULL_FILL', 'PARTIAL_FILL', 'MULTI_BATCH', 'MANUAL_ENTRY', 'ADJUSTMENT', 'TRANSFER')),
+        opportunity_id        TEXT,
+        plan_id               TEXT,
+        notes                 TEXT,
+        adjustment_mode       TEXT CHECK (adjustment_mode IN ('INCREASE', 'DECREASE')),
+        adjustment_amount     REAL,
+        target_lot_id         TEXT,
+        from_location_id      INTEGER,
+        to_location_id        INTEGER,
+        supersedes_record_id  TEXT,
+        reverses_record_id    TEXT,
+        rejected_reason       TEXT,
+        verified_at           TEXT,
+        created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+        is_paper              INTEGER NOT NULL DEFAULT 0 CHECK (is_paper = 0),
+        UNIQUE (character_id, owner_user_id, owner_chat_id, binding_epoch, ledger_key)
+      );
+      INSERT INTO real_trade_records_p9338 (
+        record_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+        ledger_key, record_state, verification_status, trade_kind, direction, type_id,
+        location_id, quantity, unit_price, fee_status, trade_time, source_type, source_ref,
+        source_hash, order_id, fill_id, execution_status, opportunity_id, plan_id, notes,
+        adjustment_mode, adjustment_amount, target_lot_id, from_location_id, to_location_id,
+        supersedes_record_id, reverses_record_id, rejected_reason, verified_at, created_at,
+        updated_at, is_paper
+      )
+      SELECT
+        record_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+        ledger_key, record_state, verification_status, trade_kind, direction, type_id,
+        location_id, quantity, unit_price, fee_status, trade_time, source_type, source_ref,
+        source_hash, order_id, fill_id, execution_status, opportunity_id, plan_id, notes,
+        adjustment_mode, adjustment_amount, target_lot_id, from_location_id, to_location_id,
+        supersedes_record_id, reverses_record_id, rejected_reason, verified_at, created_at,
+        updated_at, is_paper
+      FROM real_trade_records;
+      DROP TABLE real_trade_records;
+      ALTER TABLE real_trade_records_p9338 RENAME TO real_trade_records;
+      CREATE INDEX idx_real_trade_records_char_time
+        ON real_trade_records(character_id, trade_time, record_id);
+      CREATE INDEX idx_real_trade_records_source
+        ON real_trade_records(character_id, source_type, source_ref);
+      CREATE INDEX idx_real_trade_records_lineage
+        ON real_trade_records(character_id, owner_user_id, owner_chat_id, binding_epoch, trade_time, record_id);
+    `);
+  }
+  // The source uniqueness boundary must be per binding, not per character.
+  db.exec(`
+    DROP INDEX IF EXISTS idx_real_trade_evidence_source;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_real_trade_evidence_source
+      ON real_trade_evidence(
+        character_id, owner_user_id, owner_chat_id, binding_epoch,
+        source_system, source_ref
+      )
+      WHERE source_ref IS NOT NULL;
+  `);
+  createIndexIfMissing(
+    db,
+    'idx_real_trade_records_lineage',
+    'real_trade_records',
+    'character_id, owner_user_id, owner_chat_id, binding_epoch, trade_time, record_id',
+  );
+  createIndexIfMissing(
+    db,
+    'idx_real_trade_events_lineage',
+    'real_trade_events',
+    'character_id, owner_user_id, owner_chat_id, binding_epoch, created_at, event_id',
+  );
+  createIndexIfMissing(
+    db,
+    'idx_real_trade_evidence_lineage',
+    'real_trade_evidence',
+    'character_id, owner_user_id, owner_chat_id, binding_epoch, captured_at',
+  );
+  createIndexIfMissing(
+    db,
+    'idx_real_trade_fees_lineage',
+    'real_trade_fees',
+    'record_id, owner_user_id, owner_chat_id, binding_epoch',
+  );
+  createIndexIfMissing(
+    db,
+    'idx_real_fifo_lots_lineage',
+    'real_fifo_lots',
+    'character_id, owner_user_id, owner_chat_id, binding_epoch, type_id, location_id, acquired_at',
+  );
+  createIndexIfMissing(
+    db,
+    'idx_real_fifo_consumptions_lineage',
+    'real_fifo_consumptions',
+    'character_id, owner_user_id, owner_chat_id, binding_epoch, sell_record_id',
+  );
+  createIndexIfMissing(
+    db,
+    'idx_real_calculation_runs_lineage',
+    'real_calculation_runs',
+    'character_id, owner_user_id, owner_chat_id, binding_epoch, completed_at',
+  );
+  createIndexIfMissing(
+    db,
+    'idx_real_reconciliation_cases_lineage',
+    'real_reconciliation_cases',
+    'character_id, owner_user_id, owner_chat_id, binding_epoch, created_at',
+  );
+
+  // The old mirror primary key (character_id, item_id) makes it impossible for
+  // two chat lanes to retain their own last-known-good copy. Preserve legacy
+  // rows as ownerless audit data and rebuild once with the lineage key.
+  const assetSql = tableSql(db, 'character_assets');
+  if (!assetSql.includes('PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch, item_id)')) {
+    db.exec(`
+      CREATE TABLE character_assets_p9338 (
+        character_id      INTEGER NOT NULL,
+        item_id           INTEGER NOT NULL,
+        owner_user_id     INTEGER,
+        owner_chat_id     INTEGER,
+        binding_epoch     INTEGER NOT NULL DEFAULT 0,
+        binding_digest    TEXT NOT NULL DEFAULT '',
+        type_id           INTEGER NOT NULL,
+        location_id       INTEGER NOT NULL,
+        location_type     TEXT,
+        location_flag     TEXT,
+        quantity          INTEGER,
+        is_singleton      INTEGER NOT NULL DEFAULT 0,
+        is_blueprint_copy INTEGER,
+        data_json         TEXT NOT NULL,
+        synced_at         TEXT NOT NULL,
+        PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch, item_id)
+      );
+      INSERT INTO character_assets_p9338
+        (character_id, item_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         type_id, location_id, location_type, location_flag, quantity, is_singleton,
+         is_blueprint_copy, data_json, synced_at)
+      SELECT character_id, item_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+             type_id, location_id, location_type, location_flag, quantity, is_singleton,
+             is_blueprint_copy, data_json, synced_at
+      FROM character_assets;
+      DROP TABLE character_assets;
+      ALTER TABLE character_assets_p9338 RENAME TO character_assets;
+    `);
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_character_assets_type
+      ON character_assets(character_id, type_id);
+    CREATE INDEX IF NOT EXISTS idx_character_assets_location
+      ON character_assets(character_id, location_id);
+    CREATE INDEX IF NOT EXISTS idx_character_assets_lineage
+      ON character_assets(character_id, owner_user_id, owner_chat_id, binding_epoch, item_id);
+  `);
+}
+
+/**
+ * Wallet sync state is keyed by the full isolation domain. Legacy
+ * character-only cursors and failures are preserved ownerless so they can be
+ * inspected for reconciliation but can never seed a new owner/lane.
+ */
+function ensureRealLedgerCursorSchema(db: Db): void {
+  const cursorTables = [
+    'real_esi_transaction_sync',
+    'real_esi_transaction_sync_leases',
+    'real_esi_transaction_failures',
+  ];
+  for (const table of cursorTables) {
+    addColumnIfMissing(db, table, 'owner_user_id', 'INTEGER');
+    addColumnIfMissing(db, table, 'owner_chat_id', 'INTEGER');
+    addColumnIfMissing(db, table, 'binding_epoch', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, table, 'binding_digest', "TEXT NOT NULL DEFAULT ''");
+  }
+
+  const cursorSql = tableSql(db, 'real_esi_transaction_sync');
+  if (!cursorSql.includes('PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch)')) {
+    db.exec(`
+      CREATE TABLE real_esi_transaction_sync_p9338 (
+        character_id        INTEGER NOT NULL,
+        owner_user_id       INTEGER,
+        owner_chat_id       INTEGER,
+        binding_epoch       INTEGER NOT NULL DEFAULT 0,
+        binding_digest      TEXT NOT NULL DEFAULT '',
+        last_transaction_id INTEGER,
+        last_synced_at      TEXT,
+        status              TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok', 'error')),
+        error               TEXT,
+        PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch)
+      );
+      INSERT INTO real_esi_transaction_sync_p9338
+        (character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         last_transaction_id, last_synced_at, status, error)
+      SELECT character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+             last_transaction_id, last_synced_at, status, error
+      FROM real_esi_transaction_sync;
+      DROP TABLE real_esi_transaction_sync;
+      ALTER TABLE real_esi_transaction_sync_p9338 RENAME TO real_esi_transaction_sync;
+    `);
+  }
+
+  const leaseSql = tableSql(db, 'real_esi_transaction_sync_leases');
+  if (!leaseSql.includes('PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch)')) {
+    db.exec(`
+      CREATE TABLE real_esi_transaction_sync_leases_p9338 (
+        character_id INTEGER NOT NULL,
+        owner_user_id INTEGER,
+        owner_chat_id INTEGER,
+        binding_epoch INTEGER NOT NULL DEFAULT 0,
+        binding_digest TEXT NOT NULL DEFAULT '',
+        owner_id     TEXT NOT NULL,
+        acquired_at  TEXT NOT NULL,
+        expires_at   TEXT NOT NULL,
+        PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch)
+      );
+      INSERT INTO real_esi_transaction_sync_leases_p9338
+        (character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         owner_id, acquired_at, expires_at)
+      SELECT character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+             owner_id, acquired_at, expires_at
+      FROM real_esi_transaction_sync_leases;
+      DROP TABLE real_esi_transaction_sync_leases;
+      ALTER TABLE real_esi_transaction_sync_leases_p9338 RENAME TO real_esi_transaction_sync_leases;
+    `);
+  }
+
+  const failureSql = tableSql(db, 'real_esi_transaction_failures');
+  if (!failureSql.includes('PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch, failure_key)')) {
+    db.exec(`
+      CREATE TABLE real_esi_transaction_failures_p9338 (
+        character_id   INTEGER NOT NULL,
+        owner_user_id  INTEGER,
+        owner_chat_id  INTEGER,
+        binding_epoch  INTEGER NOT NULL DEFAULT 0,
+        binding_digest TEXT NOT NULL DEFAULT '',
+        failure_key    TEXT NOT NULL,
+        transaction_id INTEGER,
+        error_code     TEXT NOT NULL,
+        error          TEXT NOT NULL,
+        first_failed_at TEXT NOT NULL,
+        last_failed_at TEXT NOT NULL,
+        retry_count    INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch, failure_key)
+      );
+      INSERT INTO real_esi_transaction_failures_p9338
+        (character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         failure_key, transaction_id, error_code, error, first_failed_at, last_failed_at, retry_count)
+      SELECT character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+             failure_key, transaction_id, error_code, error, first_failed_at, last_failed_at, retry_count
+      FROM real_esi_transaction_failures;
+      DROP TABLE real_esi_transaction_failures;
+      ALTER TABLE real_esi_transaction_failures_p9338 RENAME TO real_esi_transaction_failures;
+    `);
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_real_esi_tx_failures_cursor
+      ON real_esi_transaction_failures(
+        character_id, owner_user_id, owner_chat_id, binding_epoch, transaction_id
+      );
+  `);
+}
+/**
+ * P9 research/planning data is private even though it is not a REAL ledger
+ * fact. Add the same durable owner/chat/epoch envelope. Existing rows are
+ * preserved as ownerless (sentinel 0) audit data and are never assigned to a
+ * newly bound owner implicitly.
+ */
+function ensureP9ControlPlaneLineageSchema(db: Db): void {
+  const tables = [
+    'p9_scan_settings',
+    'p9_real_opportunities',
+    'p9_trade_plans',
+    'p9_trade_audit_events',
+    'p9_job_runs',
+  ];
+  for (const table of tables) {
+    addColumnIfMissing(db, table, 'owner_user_id', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, table, 'owner_chat_id', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, table, 'binding_epoch', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, table, 'binding_digest', "TEXT NOT NULL DEFAULT ''");
+  }
+
+  const settingsSql = tableSql(db, 'p9_scan_settings');
+  if (!settingsSql.includes('PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch)')) {
+    db.exec(`
+      CREATE TABLE p9_scan_settings_p9338 (
+        character_id              INTEGER NOT NULL,
+        owner_user_id             INTEGER NOT NULL DEFAULT 0,
+        owner_chat_id             INTEGER NOT NULL DEFAULT 0,
+        binding_epoch             INTEGER NOT NULL DEFAULT 0,
+        binding_digest            TEXT NOT NULL DEFAULT '',
+        hubs_json                 TEXT NOT NULL,
+        strategies_json           TEXT NOT NULL,
+        min_net_profit            REAL NOT NULL DEFAULT 100000,
+        min_roi_pct               REAL NOT NULL DEFAULT 5,
+        max_capital               REAL NOT NULL DEFAULT 100000000,
+        max_market_age_minutes    INTEGER NOT NULL DEFAULT 60,
+        max_results               INTEGER NOT NULL DEFAULT 100,
+        auto_scan_enabled         INTEGER NOT NULL DEFAULT 0 CHECK (auto_scan_enabled IN (0, 1)),
+        auto_scan_interval_minutes INTEGER NOT NULL DEFAULT 30,
+        updated_at                TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch)
+      );
+      INSERT INTO p9_scan_settings_p9338
+        (character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         hubs_json, strategies_json, min_net_profit, min_roi_pct, max_capital,
+         max_market_age_minutes, max_results, auto_scan_enabled,
+         auto_scan_interval_minutes, updated_at)
+      SELECT character_id, 0, 0, 0, '',
+             hubs_json, strategies_json, min_net_profit, min_roi_pct, max_capital,
+             max_market_age_minutes, max_results, auto_scan_enabled,
+             auto_scan_interval_minutes, updated_at
+      FROM p9_scan_settings;
+      DROP TABLE p9_scan_settings;
+      ALTER TABLE p9_scan_settings_p9338 RENAME TO p9_scan_settings;
+    `);
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_p9_opportunities_owner_state
+      ON p9_real_opportunities(
+        character_id, owner_user_id, owner_chat_id, binding_epoch, state, updated_at
+      );
+    CREATE INDEX IF NOT EXISTS idx_p9_plans_owner_status
+      ON p9_trade_plans(
+        character_id, owner_user_id, owner_chat_id, binding_epoch, status, updated_at
+      );
+    CREATE INDEX IF NOT EXISTS idx_p9_audit_owner_time
+      ON p9_trade_audit_events(
+        character_id, owner_user_id, owner_chat_id, binding_epoch, created_at, event_id
+      );
+    CREATE INDEX IF NOT EXISTS idx_p9_jobs_owner_type_time
+      ON p9_job_runs(
+        character_id, owner_user_id, owner_chat_id, binding_epoch, job_type, started_at
+      );
+  `);
+}
+
+/**
+ * P9.3.3.6 owner/binding lineage migration.
+ *
+ * Existing rows intentionally remain ownerless. They are retained for audit
+ * and must not be attributed to whichever account happens to bind the
+ * character next. New writes always populate all four lineage columns.
+ */
+function ensureAssetLineageSchema(db: Db): void {
+  const lineageTables = [
+    'character_assets',
+    'real_asset_sync_jobs',
+    'real_asset_snapshots',
+    'real_asset_changes',
+    'real_asset_valuations',
+  ];
+  for (const table of lineageTables) {
+    addColumnIfMissing(db, table, 'owner_user_id', 'INTEGER');
+    addColumnIfMissing(db, table, 'owner_chat_id', 'INTEGER');
+    addColumnIfMissing(db, table, 'binding_epoch', 'INTEGER NOT NULL DEFAULT 0');
+    addColumnIfMissing(db, table, 'binding_digest', "TEXT NOT NULL DEFAULT ''");
+  }
+
+  // Tags and matches had character-only primary/unique constraints that would
+  // prevent two bindings of the same character from retaining independent
+  // local annotations/matches. Rebuild legacy tables once, preserving rows as
+  // ownerless audit records.
+  const tagSql = tableSql(db, 'real_asset_tags');
+  if (!tagSql.includes('owner_user_id') || tagSql.includes('PRIMARY KEY (character_id, item_id)')) {
+    const columns = tableColumns(db, 'real_asset_tags');
+    const ownerUserId = columns.has('owner_user_id') ? 'owner_user_id' : 'NULL';
+    const ownerChatId = columns.has('owner_chat_id') ? 'owner_chat_id' : 'NULL';
+    const bindingEpoch = columns.has('binding_epoch') ? 'binding_epoch' : '0';
+    const bindingDigest = columns.has('binding_digest') ? 'binding_digest' : "''";
+    db.exec(`
+      CREATE TABLE real_asset_tags_p9336 (
+        character_id INTEGER NOT NULL,
+        item_id      INTEGER NOT NULL,
+        owner_user_id INTEGER,
+        owner_chat_id INTEGER,
+        binding_epoch INTEGER NOT NULL DEFAULT 0,
+        binding_digest TEXT NOT NULL DEFAULT '',
+        tag          TEXT NOT NULL CHECK (tag IN ('SELF_USE', 'FOR_SALE', 'PRODUCTION', 'MISSION', 'SPARE', 'TRADE_STOCK', 'HOLD')),
+        updated_at   TEXT NOT NULL,
+        PRIMARY KEY (character_id, owner_user_id, owner_chat_id, binding_epoch, item_id)
+      );
+      INSERT INTO real_asset_tags_p9336
+        (character_id, item_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest, tag, updated_at)
+      SELECT character_id, item_id, ${ownerUserId}, ${ownerChatId}, ${bindingEpoch}, ${bindingDigest}, tag, updated_at
+      FROM real_asset_tags;
+      DROP TABLE real_asset_tags;
+      ALTER TABLE real_asset_tags_p9336 RENAME TO real_asset_tags;
+    `);
+  }
+
+  const matchSql = tableSql(db, 'real_asset_opportunity_matches');
+  if (
+    !matchSql.includes('owner_user_id')
+    || matchSql.includes('UNIQUE (character_id, opportunity_id)')
+  ) {
+    const columns = tableColumns(db, 'real_asset_opportunity_matches');
+    const ownerUserId = columns.has('owner_user_id') ? 'owner_user_id' : 'NULL';
+    const ownerChatId = columns.has('owner_chat_id') ? 'owner_chat_id' : 'NULL';
+    const bindingEpoch = columns.has('binding_epoch') ? 'binding_epoch' : '0';
+    const bindingDigest = columns.has('binding_digest') ? 'binding_digest' : "''";
+    db.exec(`
+      CREATE TABLE real_asset_opportunity_matches_p9336 (
+        match_id          TEXT PRIMARY KEY,
+        character_id      INTEGER NOT NULL,
+        owner_user_id     INTEGER,
+        owner_chat_id     INTEGER,
+        binding_epoch     INTEGER NOT NULL DEFAULT 0,
+        binding_digest    TEXT NOT NULL DEFAULT '',
+        opportunity_id    TEXT NOT NULL,
+        type_id           INTEGER NOT NULL,
+        held_quantity     INTEGER NOT NULL DEFAULT 0,
+        accessible_quantity INTEGER NOT NULL DEFAULT 0,
+        required_quantity INTEGER NOT NULL DEFAULT 0,
+        support_class     TEXT NOT NULL CHECK (support_class IN ('SUPPORTED', 'PARTIAL', 'NEEDS_PURCHASE', 'UNAVAILABLE', 'UNKNOWN')),
+        needs_transport   INTEGER NOT NULL DEFAULT 0 CHECK (needs_transport IN (0, 1)),
+        locations_json    TEXT NOT NULL DEFAULT '[]',
+        snapshot_id       TEXT,
+        computed_at       TEXT NOT NULL,
+        UNIQUE (character_id, owner_user_id, owner_chat_id, binding_epoch, opportunity_id)
+      );
+      INSERT INTO real_asset_opportunity_matches_p9336
+        (match_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         opportunity_id, type_id, held_quantity, accessible_quantity, required_quantity,
+         support_class, needs_transport, locations_json, snapshot_id, computed_at)
+      SELECT match_id, character_id, ${ownerUserId}, ${ownerChatId}, ${bindingEpoch}, ${bindingDigest},
+             opportunity_id, type_id, held_quantity, accessible_quantity, required_quantity,
+             support_class, needs_transport, locations_json, snapshot_id, computed_at
+      FROM real_asset_opportunity_matches;
+      DROP TABLE real_asset_opportunity_matches;
+      ALTER TABLE real_asset_opportunity_matches_p9336 RENAME TO real_asset_opportunity_matches;
+    `);
+  }
+
+  db.exec(`
+    DROP INDEX IF EXISTS idx_real_asset_snapshots_latest;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_real_asset_snapshots_latest
+      ON real_asset_snapshots(character_id, owner_user_id, owner_chat_id, binding_epoch)
+      WHERE is_latest = 1;
+    CREATE INDEX IF NOT EXISTS idx_real_asset_snapshots_lineage
+      ON real_asset_snapshots(character_id, owner_user_id, owner_chat_id, binding_epoch, completed_at);
+    CREATE INDEX IF NOT EXISTS idx_real_asset_changes_lineage
+      ON real_asset_changes(character_id, owner_user_id, owner_chat_id, binding_epoch, detected_at);
+    CREATE INDEX IF NOT EXISTS idx_real_asset_valuations_lineage
+      ON real_asset_valuations(character_id, owner_user_id, owner_chat_id, binding_epoch, created_at);
+    CREATE INDEX IF NOT EXISTS idx_real_asset_tags_lineage
+      ON real_asset_tags(character_id, owner_user_id, owner_chat_id, binding_epoch, item_id);
+    CREATE INDEX IF NOT EXISTS idx_real_asset_matches_lineage
+      ON real_asset_opportunity_matches(character_id, owner_user_id, owner_chat_id, binding_epoch, computed_at);
+  `);
+}
+
 function createIndexIfMissing(db: Db, index: string, table: string, columns: string): void {
   const row = db.prepare(
     "SELECT name FROM sqlite_master WHERE type='index' AND name = ?"
@@ -1244,11 +1985,15 @@ function ensureConsentLanguageGuards(db: Db): void {
   for (const table of ['auth_requests', 'eve_accounts']) {
     for (const event of ['INSERT', 'UPDATE']) {
       const triggerName = `validate_${table}_consent_language_${event.toLowerCase()}`;
+      // Rebuild the guard: CREATE TRIGGER IF NOT EXISTS never updates an
+      // existing trigger's condition, so an old database would keep aborting
+      // after zh joins the allowed list.
+      db.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
       db.exec(`
         CREATE TRIGGER IF NOT EXISTS ${triggerName}
         BEFORE ${event} ON ${table}
         WHEN NEW.consent_language IS NOT NULL
-          AND NEW.consent_language NOT IN ('ru', 'en')
+          AND NEW.consent_language NOT IN ('zh', 'ru', 'en')
         BEGIN
           SELECT RAISE(ABORT, 'invalid consent_language');
         END

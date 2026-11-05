@@ -4,6 +4,7 @@ import {
   characterDatasetRequirements,
   getCharacterDatasetStatuses,
 } from '../eve/character-sync.js';
+import { assetLineagePredicate, type AssetLineage } from '../assets/asset-lineage.js';
 
 /**
  * Read models for the web "living profile": pure SQLite projections of the
@@ -155,17 +156,21 @@ type LocationInfo = {
  * last known location_id as the root. Doing this in SQL keeps 40k-item
  * hangars out of JS parameter lists (SQLite caps variables at 32766).
  */
-const ROOT_LOCATION_CTE = `
+function rootLocationCte(lineage: AssetLineage): string {
+  const assetOwnership = assetLineagePredicate('a', lineage);
+  const parentOwnership = assetLineagePredicate('parent', lineage);
+  return `
 WITH RECURSIVE
 walk(item_id, root_location_id, location_type, hops) AS (
   SELECT a.item_id, a.location_id, a.location_type, 0
   FROM character_assets a
-  WHERE a.character_id = ?
+  WHERE a.character_id = ? AND ${assetOwnership.sql}
   UNION ALL
   SELECT walk.item_id, parent.location_id, parent.location_type, walk.hops + 1
   FROM walk
   JOIN character_assets parent
     ON parent.character_id = ? AND parent.item_id = walk.root_location_id
+       AND ${parentOwnership.sql}
   WHERE walk.location_type = 'item' AND walk.hops < ${MAX_CONTAINER_HOPS}
 ),
 roots AS (
@@ -178,6 +183,7 @@ roots AS (
   WHERE hops = max_hops
 )
 `;
+}
 
 /**
  * Generic labels stay out of the payload: structures resolve to name=null
@@ -301,8 +307,10 @@ function toAssetLocation(db: Db, row: LocationGroupRow): AssetLocation {
  * copies are excluded from the valuation basis — a copy is not worth the
  * original's sell price; they still count toward item/quantity/volume sums.
  */
-const LOCATION_GROUPS_SQL = `
-${ROOT_LOCATION_CTE},
+function locationGroupsSql(lineage: AssetLineage): string {
+  const ownership = assetLineagePredicate('a', lineage);
+  return `
+${rootLocationCte(lineage)},
 loc AS (
   SELECT r.root_location_id AS location_id,
          COUNT(*) AS item_count,
@@ -313,7 +321,7 @@ loc AS (
   FROM character_assets a
   JOIN roots r ON r.item_id = a.item_id
   LEFT JOIN sde_types t ON t.type_id = a.type_id
-  WHERE a.character_id = ?
+  WHERE a.character_id = ? AND ${ownership.sql}
   GROUP BY r.root_location_id
 ),
 regions AS (
@@ -337,7 +345,8 @@ typeqty AS (
          SUM(COALESCE(a.quantity, 0)) AS quantity
   FROM character_assets a
   JOIN roots r ON r.item_id = a.item_id
-  WHERE a.character_id = ? AND COALESCE(a.is_blueprint_copy, 0) = 0
+  WHERE a.character_id = ? AND ${ownership.sql}
+    AND COALESCE(a.is_blueprint_copy, 0) = 0
   GROUP BY r.root_location_id, a.type_id
 ),
 val AS (
@@ -363,29 +372,45 @@ LEFT JOIN val ON val.location_id = loc.location_id
 ORDER BY (val.value IS NULL), val.value DESC, loc.item_count DESC, loc.location_id ASC
 LIMIT ? OFFSET ?
 `;
+}
 
-const LOCATION_GROUPS_COUNT_SQL = `
-${ROOT_LOCATION_CTE}
+function locationGroupsCountSql(lineage: AssetLineage): string {
+  const ownership = assetLineagePredicate('a', lineage);
+  return `
+${rootLocationCte(lineage)}
 SELECT COUNT(DISTINCT r.root_location_id) AS count
 FROM character_assets a
 JOIN roots r ON r.item_id = a.item_id
-WHERE a.character_id = ?
+WHERE a.character_id = ? AND ${ownership.sql}
 `;
+}
 
 export function assetLocations(
   db: Db,
   characterId: number,
   limit: number,
   offset: number,
+  lineage: AssetLineage,
 ): { locations: AssetLocation[]; total: number } {
-  // The recursive character filter appears in every CTE arm above.
-  const params = [characterId, characterId, characterId, characterId, limit, offset];
-  const rows = db.prepare(LOCATION_GROUPS_SQL).all(...params) as LocationGroupRow[];
+  const assetOwnership = assetLineagePredicate('a', lineage);
+  const parentOwnership = assetLineagePredicate('parent', lineage);
+  const params = [
+    characterId, ...assetOwnership.params,
+    characterId, ...parentOwnership.params,
+    characterId, ...assetOwnership.params,
+    characterId, ...assetOwnership.params,
+    limit, offset,
+  ];
+  const rows = db.prepare(locationGroupsSql(lineage)).all(...params) as LocationGroupRow[];
   let total = rows[0]?.total ?? 0;
   if (rows.length === 0 && offset > 0) {
     // An out-of-range page yields no window row to carry the total.
-    total = (db.prepare(LOCATION_GROUPS_COUNT_SQL)
-      .get(characterId, characterId, characterId) as { count: number }).count;
+    total = (db.prepare(locationGroupsCountSql(lineage))
+      .get(
+        characterId, ...assetOwnership.params,
+        characterId, ...parentOwnership.params,
+        characterId, ...assetOwnership.params,
+      ) as { count: number }).count;
   }
   return { locations: rows.map((row) => toAssetLocation(db, row)), total };
 }
@@ -396,15 +421,18 @@ export function locationItems(
   locationId: number,
   limit: number,
   offset: number,
+  lineage: AssetLineage,
 ): { items: AssetItem[]; total: number } {
   // Best sell is regional: locations without a known region (structures,
   // unrecognized ids) price every item as null. Blueprint copies are priced
   // null too — a copy is not worth the original's sell price (the UI shows
   // the copy badge instead).
   const regionId = resolveLocationInfo(db, locationId).regionId;
+  const assetOwnership = assetLineagePredicate('a', lineage);
+  const parentOwnership = assetLineagePredicate('parent', lineage);
 
   const itemRows = db.prepare(`
-    ${ROOT_LOCATION_CTE}
+    ${rootLocationCte(lineage)}
     SELECT
       item_id, type_id, quantity, is_blueprint_copy, type_name, group_name,
       unit_volume, unit_price,
@@ -427,11 +455,18 @@ export function locationItems(
       JOIN roots r ON r.item_id = a.item_id
       LEFT JOIN sde_types t ON t.type_id = a.type_id
       LEFT JOIN sde_groups g ON g.group_id = t.group_id
-      WHERE a.character_id = ? AND r.root_location_id = ?
+      WHERE a.character_id = ? AND ${assetOwnership.sql}
+        AND r.root_location_id = ?
     )
     ORDER BY total_value DESC, COALESCE(quantity, 0) DESC, item_id ASC
     LIMIT ? OFFSET ?
-  `).all(characterId, characterId, regionId, characterId, locationId, limit, offset) as Array<{
+  `).all(
+    characterId, ...assetOwnership.params,
+    characterId, ...parentOwnership.params,
+    regionId,
+    characterId, ...assetOwnership.params,
+    locationId, limit, offset,
+  ) as Array<{
     item_id: number;
     type_id: number;
     quantity: number | null;
@@ -447,12 +482,18 @@ export function locationItems(
   if (itemRows.length === 0) {
     // Empty page (empty location or out-of-range offset): count in SQL.
     total = (db.prepare(`
-      ${ROOT_LOCATION_CTE}
+      ${rootLocationCte(lineage)}
       SELECT COUNT(*) AS count
       FROM character_assets a
       JOIN roots r ON r.item_id = a.item_id
-      WHERE a.character_id = ? AND r.root_location_id = ?
-    `).get(characterId, characterId, characterId, locationId) as { count: number }).count;
+      WHERE a.character_id = ? AND ${assetOwnership.sql}
+        AND r.root_location_id = ?
+    `).get(
+      characterId, ...assetOwnership.params,
+      characterId, ...parentOwnership.params,
+      characterId, ...assetOwnership.params,
+      locationId,
+    ) as { count: number }).count;
   }
 
   return {

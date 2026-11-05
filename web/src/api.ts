@@ -42,9 +42,37 @@ import type {
   UniverseWormholes,
   InspectedSystem,
 } from './types';
-import type { Locale } from './i18n';
+import { LOCALE_STORAGE_KEY, readStoredLocale, translateOutOfReact, type Locale, type TranslationKey } from './i18n-dictionary';
+import { apiErrorKey } from './api-error-keys';
+
+/**
+ * Localize an error value that arrives inside a successful payload (for
+ * example the agent-request DTO). Snake_case codes go through
+ * API_ERROR_KEYS; anything else is legacy server text shown as-is.
+ */
+export function translateApiErrorValue(value: string | null | undefined, fallbackKey: TranslationKey): string {
+  if (!value) return translateOutOfReact(fallbackKey, currentLocale());
+  const key = apiErrorKey(value);
+  return key ? translateOutOfReact(key, currentLocale()) : value;
+}
 
 type ErrorPayload = { error?: string };
+
+/**
+ * Transport errors are built before any React tree exists, so they read the
+ * persisted locale directly instead of useI18n(). Same storage key as the
+ * provider keeps both sides in sync; without storage we fall back to zh, the
+ * provider's own default.
+ */
+function currentLocale(): Locale {
+  try {
+    const saved = globalThis.localStorage?.getItem(LOCALE_STORAGE_KEY);
+    if (saved === 'zh' || saved === 'en' || saved === 'ru') return saved;
+  } catch {
+    // Storage unavailable (private mode, tests): fall through to the default.
+  }
+  return 'zh';
+}
 
 export class AmbiguousApiRequestError extends Error {
   readonly ambiguous = true;
@@ -68,15 +96,15 @@ export function isAmbiguousApiRequestError(error: unknown): error is AmbiguousAp
 
 function httpErrorMessage(status: number, serverMessage?: string): string {
   if (status === 401 || status === 403) {
-    return serverMessage || 'Сессия истекла. Обновите страницу и войдите снова.';
+    return serverMessage || translateOutOfReact('errorSessionExpired', currentLocale());
   }
   if (status === 429) {
-    return serverMessage || 'Слишком много запросов. Подождите немного и повторите.';
+    return serverMessage || translateOutOfReact('requestTooMany', currentLocale());
   }
   if (status >= 500) {
-    return serverMessage || 'Сервер временно недоступен. Попробуйте позже.';
+    return serverMessage || translateOutOfReact('errorServerUnavailable', currentLocale());
   }
-  return serverMessage || 'Не удалось выполнить запрос.';
+  return serverMessage || translateOutOfReact('requestFailed', currentLocale());
 }
 
 async function request<T>(
@@ -95,7 +123,7 @@ async function request<T>(
       credentials: 'same-origin',
     });
   } catch {
-    throw new AmbiguousApiRequestError('Соединение с сервером прервано. Повторяем безопасно.');
+    throw new AmbiguousApiRequestError(translateOutOfReact('errorNetworkInterrupted', currentLocale()));
   }
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as ErrorPayload;
@@ -105,13 +133,19 @@ async function request<T>(
     const code = typeof payload.error === 'string' && /^[a-z][a-z0-9_]*$/.test(payload.error)
       ? payload.error
       : undefined;
-    throw new ApiRequestError(response.status, httpErrorMessage(response.status, code ? undefined : payload.error), code);
+    // A code is translated once, here, so every screen gets localized text
+    // without repeating a code->key table. Unknown codes fall back to the
+    // generic status message rather than leaking a raw token.
+    const message = code
+      ? translateOutOfReact(apiErrorKey(code) ?? 'requestFailed', currentLocale())
+      : httpErrorMessage(response.status, payload.error);
+    throw new ApiRequestError(response.status, message, code);
   }
   if (response.status === 204) return undefined as T;
   try {
     return await response.json() as T;
   } catch {
-    throw new AmbiguousApiRequestError('Сервер принял запрос, но ответ не удалось прочитать.');
+    throw new AmbiguousApiRequestError(translateOutOfReact('errorUnreadableResponse', currentLocale()));
   }
 }
 
@@ -164,7 +198,7 @@ export const webApi = {
     eventsUrl: string;
   }>('/api/web/chat', {
     method: 'POST',
-    body: JSON.stringify({ message, threadId, idempotencyKey }),
+    body: JSON.stringify({ message, threadId, idempotencyKey, locale: readStoredLocale() }),
   }, csrfToken),
   getAgentRequest: (requestId: string) => request<{ request: WebAgentRequest }>(
     `/api/web/chat/requests/${encodeURIComponent(requestId)}`,
@@ -213,8 +247,13 @@ export const webApi = {
       for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value));
       return request<unknown>(`/api/web/assets/snapshots?${search.toString()}`);
     },
-    snapshot: (snapshotId: string) =>
-      request<unknown>(`/api/web/assets/snapshots/${encodeURIComponent(snapshotId)}`),
+    snapshot: (snapshotId: string, params: { limit?: number; offset?: number } = {}) => {
+      const search = new URLSearchParams();
+      if (params.limit !== undefined) search.set('limit', String(params.limit));
+      if (params.offset !== undefined) search.set('offset', String(params.offset));
+      const suffix = search.toString();
+      return request<unknown>(`/api/web/assets/snapshots/${encodeURIComponent(snapshotId)}${suffix ? `?${suffix}` : ''}`);
+    },
     changes: (params: Record<string, string | number | undefined> = {}) => {
       const search = new URLSearchParams();
       for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value));

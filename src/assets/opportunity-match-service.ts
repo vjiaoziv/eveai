@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
+import { assetLineagePredicate, type AssetLineage } from './asset-lineage.js';
+import { p9LineagePredicate } from '../trading/p9-control-plane-lineage.js';
 
 /**
  * P9.2.6 deterministic linkage between current real inventory and P9.1
@@ -61,18 +63,19 @@ type OpportunityRow = {
   detected_at: string;
 };
 
-function activeOpportunities(db: Db, characterId: number): OpportunityRow[] {
+function activeOpportunities(db: Db, characterId: number, lineage: AssetLineage): OpportunityRow[] {
+  const owner = p9LineagePredicate('o', lineage);
   return db.prepare(`
-    SELECT opportunity_id, character_id, strategy, type_id, suggested_quantity,
-           executable_quantity, buy_location_id, state, fee_net_profit, detected_at
-    FROM p9_real_opportunities
-    WHERE character_id = ?
-      AND state IN ('ACTIONABLE', 'NEW', 'WATCHING', 'STALE')
+    SELECT o.opportunity_id, o.character_id, o.strategy, o.type_id, o.suggested_quantity,
+           o.executable_quantity, o.buy_location_id, o.state, o.fee_net_profit, o.detected_at
+    FROM p9_real_opportunities o
+    WHERE o.character_id = ? AND ${owner.sql}
+      AND o.state IN ('ACTIONABLE', 'NEW', 'WATCHING', 'STALE')
     ORDER BY CASE state
                WHEN 'ACTIONABLE' THEN 0 WHEN 'NEW' THEN 1
                WHEN 'WATCHING' THEN 2 ELSE 3 END,
-             fee_net_profit DESC, detected_at ASC, opportunity_id ASC
-  `).all(characterId) as OpportunityRow[];
+             o.fee_net_profit DESC, o.detected_at ASC, o.opportunity_id ASC
+  `).all(characterId, ...owner.params) as OpportunityRow[];
 }
 
 function terminalLocation(row: AssetRow, registry: Map<number, number>): number {
@@ -85,36 +88,78 @@ function terminalLocation(row: AssetRow, registry: Map<number, number>): number 
   return current;
 }
 
-function latestCompleteSnapshot(db: Db, characterId: number): any {
+function latestCompleteSnapshot(db: Db, characterId: number, lineage: AssetLineage): any {
+  const ownership = assetLineagePredicate(null, lineage);
   return db.prepare(`
     SELECT * FROM real_asset_snapshots
-    WHERE character_id = ? AND status = 'COMPLETED'
+    WHERE character_id = ? AND status = 'COMPLETED' AND ${ownership.sql}
     ORDER BY is_latest DESC, COALESCE(completed_at, started_at) DESC
     LIMIT 1
-  `).get(characterId);
+  `).get(characterId, ...ownership.params);
 }
 
-function currentSetIsConsistent(db: Db, characterId: number, snapshot: any): boolean {
+function currentSetIsConsistent(db: Db, characterId: number, snapshot: any, lineage: AssetLineage): boolean {
   if (!snapshot) return false;
-  const current = db.prepare(`
-    SELECT COUNT(*) AS items,
-           COALESCE(SUM(quantity), 0) AS quantity,
-           COUNT(DISTINCT type_id) AS unique_types
-    FROM character_assets WHERE character_id = ?
-  `).get(characterId) as { items: number; quantity: number; unique_types: number };
-  return current.items === Number(snapshot.total_items)
-    && current.quantity === Number(snapshot.total_quantity)
-    && current.unique_types === Number(snapshot.total_unique_types);
+  const ownership = assetLineagePredicate(null, lineage);
+  const mirror = db.prepare(`
+    SELECT item_id, type_id, quantity, location_id, location_type,
+           location_flag, is_singleton, is_blueprint_copy
+    FROM character_assets
+    WHERE character_id = ? AND ${ownership.sql}
+    ORDER BY item_id
+  `).all(characterId, ...ownership.params) as Array<{
+    item_id: number;
+    type_id: number;
+    quantity: number;
+    location_id: number;
+    location_type: string | null;
+    location_flag: string | null;
+    is_singleton: number;
+    is_blueprint_copy: number | null;
+  }>;
+  const stored = db.prepare(`
+    SELECT item_id, type_id, quantity, location_id, location_type,
+           location_flag, is_singleton, is_blueprint_copy
+    FROM real_asset_snapshot_items
+    WHERE snapshot_id = ?
+    ORDER BY item_id
+  `).all(snapshot.snapshot_id) as typeof mirror;
+
+  // Aggregate counts are not an integrity proof: two different item sets can
+  // share item/quantity/type totals. Compare the complete persisted item set
+  // field-by-field so opportunity matching cannot consume an inconsistent
+  // current mirror under a "consistent snapshot" label.
+  if (mirror.length !== stored.length) return false;
+  for (let index = 0; index < mirror.length; index += 1) {
+    const currentRow = mirror[index];
+    const snapshotRow = stored[index];
+    if (
+      Number(currentRow.item_id) !== Number(snapshotRow.item_id)
+      || Number(currentRow.type_id) !== Number(snapshotRow.type_id)
+      || Number(currentRow.quantity) !== Number(snapshotRow.quantity)
+      || Number(currentRow.location_id) !== Number(snapshotRow.location_id)
+      || currentRow.location_type !== snapshotRow.location_type
+      || currentRow.location_flag !== snapshotRow.location_flag
+      || Number(currentRow.is_singleton) !== Number(snapshotRow.is_singleton)
+      || (currentRow.is_blueprint_copy === null ? null : Number(currentRow.is_blueprint_copy))
+        !== (snapshotRow.is_blueprint_copy === null ? null : Number(snapshotRow.is_blueprint_copy))
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
-function insertMatch(db: Db, match: OpportunityMatch): void {
+function insertMatch(db: Db, match: OpportunityMatch, lineage: AssetLineage): void {
   db.prepare(`
     INSERT INTO real_asset_opportunity_matches
-      (match_id, character_id, opportunity_id, type_id, held_quantity,
+      (match_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+       opportunity_id, type_id, held_quantity,
        accessible_quantity, required_quantity, support_class, needs_transport,
        locations_json, snapshot_id, computed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(character_id, opportunity_id) DO UPDATE SET
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(character_id, owner_user_id, owner_chat_id, binding_epoch, opportunity_id) DO UPDATE SET
+      binding_digest = excluded.binding_digest,
       type_id = excluded.type_id,
       held_quantity = excluded.held_quantity,
       accessible_quantity = excluded.accessible_quantity,
@@ -125,7 +170,14 @@ function insertMatch(db: Db, match: OpportunityMatch): void {
       snapshot_id = excluded.snapshot_id,
       computed_at = excluded.computed_at
   `).run(
-    match.matchId, match.characterId, match.opportunityId, match.typeId,
+    match.matchId,
+    match.characterId,
+    lineage.ownerUserId,
+    lineage.ownerChatId,
+    lineage.bindingEpoch,
+    lineage.bindingDigest,
+    match.opportunityId,
+    match.typeId,
     match.heldQuantity, match.accessibleQuantity, match.requiredQuantity,
     match.supportClass, match.needsTransport ? 1 : 0,
     JSON.stringify(match.locations), match.snapshotId, match.computedAt,
@@ -138,15 +190,16 @@ export class RealOpportunityMatchService {
    * Directly usable stock is reserved once, in deterministic priority order,
    * so two opportunities never claim the same units.
    */
-  static recompute(db: Db, characterId: number): { computed: number; matches: OpportunityMatch[] } {
-    const opportunities = activeOpportunities(db, characterId);
-    const snapshot = latestCompleteSnapshot(db, characterId);
-    const consistent = currentSetIsConsistent(db, characterId, snapshot);
+  static recompute(db: Db, characterId: number, lineage: AssetLineage): { computed: number; matches: OpportunityMatch[] } {
+    const opportunities = activeOpportunities(db, characterId, lineage);
+    const snapshot = latestCompleteSnapshot(db, characterId, lineage);
+    const consistent = currentSetIsConsistent(db, characterId, snapshot, lineage);
+    const mirrorOwnership = assetLineagePredicate(null, lineage);
     const assets = consistent
       ? db.prepare(`
           SELECT item_id, type_id, quantity, location_id
-          FROM character_assets WHERE character_id = ?
-        `).all(characterId) as AssetRow[]
+          FROM character_assets WHERE character_id = ? AND ${mirrorOwnership.sql}
+        `).all(characterId, ...mirrorOwnership.params) as AssetRow[]
       : [];
     const registry = new Map<number, number>(assets.map((row) => [row.item_id, row.location_id]));
     const locationCache = new Map<number, any>((db.prepare(
@@ -182,14 +235,17 @@ export class RealOpportunityMatchService {
     const tx = db.transaction(() => {
       // Remove stale/terminal matches so the UI never shows linkage for an
       // opportunity that is no longer eligible for planning.
+      const matchOwnership = assetLineagePredicate(null, lineage);
+      const opportunityOwnership = p9LineagePredicate('o', lineage);
       db.prepare(`
         DELETE FROM real_asset_opportunity_matches
-        WHERE character_id = ?
+        WHERE character_id = ? AND ${matchOwnership.sql}
           AND opportunity_id NOT IN (
-            SELECT opportunity_id FROM p9_real_opportunities
-            WHERE character_id = ? AND state IN ('ACTIONABLE', 'NEW', 'WATCHING', 'STALE')
+            SELECT o.opportunity_id FROM p9_real_opportunities o
+            WHERE o.character_id = ? AND ${opportunityOwnership.sql}
+              AND o.state IN ('ACTIONABLE', 'NEW', 'WATCHING', 'STALE')
           )
-      `).run(characterId, characterId);
+      `).run(characterId, ...matchOwnership.params, characterId, ...opportunityOwnership.params);
 
       for (const opportunity of opportunities) {
         const required = Math.max(
@@ -300,7 +356,7 @@ export class RealOpportunityMatchService {
           snapshotId: consistent ? snapshot.snapshot_id : null,
           computedAt: now,
         };
-        insertMatch(db, match);
+        insertMatch(db, match, lineage);
         matches.push(match);
       }
     });
@@ -308,7 +364,7 @@ export class RealOpportunityMatchService {
     return { computed: matches.length, matches };
   }
 
-  static list(db: Db, characterId: number, filters: { supportClass?: string; state?: string; limit?: number; offset?: number } = {}): {
+  static list(db: Db, characterId: number, lineage: AssetLineage, filters: { supportClass?: string; state?: string; limit?: number; offset?: number } = {}): {
     rows: any[];
     total: number;
     limit: number;
@@ -316,8 +372,10 @@ export class RealOpportunityMatchService {
   } {
     const limit = clampPositiveInteger(filters.limit, 100, 500);
     const offset = clampNonNegativeInteger(filters.offset);
-    const where = ['m.character_id = ?'];
-    const params: unknown[] = [characterId];
+    const ownership = assetLineagePredicate('m', lineage);
+    const opportunityOwnership = p9LineagePredicate('o', lineage);
+    const where = ['m.character_id = ?', ownership.sql, opportunityOwnership.sql];
+    const params: unknown[] = [characterId, ...ownership.params, ...opportunityOwnership.params];
     if (filters.supportClass) {
       where.push('m.support_class = ?');
       params.push(filters.supportClass);

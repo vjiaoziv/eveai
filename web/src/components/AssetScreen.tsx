@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { webApi } from '../api';
 import { ChartIcon, MenuIcon } from '../icons';
+import { LocaleSwitch, useI18n } from '../i18n';
 
 type AssetTab = 'overview' | 'characters' | 'inventory' | 'detail' | 'changes' | 'valuation' | 'opportunities';
 
@@ -82,14 +83,33 @@ const dateTime = (value: unknown): string => {
     : parsed.toLocaleString('zh-CN', { hour12: false });
 };
 
+
+
+type SnapshotDetail = {
+  snapshot: Record<string, any>;
+  items: Array<Record<string, any>>;
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  nextOffset: number | null;
+};
+
+type Props = { onMenu: () => void; csrfToken: string };
+
+export function AssetScreen({ onMenu, csrfToken }: Props) {
+  const { t } = useI18n();
+
+  // Label maps live inside the component: they are built from t(), which only
+  // exists in render scope (the same lesson as pageLabels in P93AccountingPanel).
 const TAG_LABELS: Record<string, string> = {
-  SELF_USE: '自用', FOR_SALE: '待出售', PRODUCTION: '生产材料', MISSION: '任务用途',
-  SPARE: '备用装备', TRADE_STOCK: '交易库存', HOLD: '暂不处理',
+  SELF_USE: t('assetTagSelfUse'), FOR_SALE: t('assetTagForSale'), PRODUCTION: t('assetTagProduction'), MISSION: t('assetTagMission'),
+  SPARE: t('assetTagSpare'), TRADE_STOCK: t('assetTagTradeStock'), HOLD: t('assetTagHold'),
 };
 
 const CHANGE_LABELS: Record<string, string> = {
-  ADDED: '新增', QTY_INCREASED: '数量增加', QTY_DECREASED: '数量减少', MOVED: '位置变化',
-  REMOVED: '消失', REAPPEARED: '重新出现', CONTAINER_CHANGED: '容器变化',
+  ADDED: t('assetChangeAdded'), QTY_INCREASED: t('assetChangeQtyUp'), QTY_DECREASED: t('assetChangeQtyDown'), MOVED: t('assetChangeMoved'),
+  REMOVED: t('assetChangeRemoved'), REAPPEARED: t('assetChangeReappeared'), CONTAINER_CHANGED: t('assetChangeContainer'),
 };
 
 const BUCKETS = [
@@ -98,15 +118,11 @@ const BUCKETS = [
 ];
 
 const BUCKET_LABELS: Record<string, string> = {
-  SHIPS: '舰船', SHIP_MODULES: '舰船装备', DRONES: '无人机', AMMO: '弹药',
-  ORES_MINERALS: '矿石与矿物', MANUFACTURING: '制造材料', BPO: '蓝图原件 BPO',
-  BPC: '蓝图复制件 BPC', MISSION: '任务物品', IMPLANTS: '植入体',
-  CONSUMABLES: '消耗品', TRADING_GOODS: '贸易商品', OTHER: '其他物品', UNKNOWN: '未知分类',
+  SHIPS: t('ship'), SHIP_MODULES: t('assetCatShipModules'), DRONES: t('marketAttrGroup_drones'), AMMO: t('assetCatAmmo'),
+  ORES_MINERALS: t('assetCatOres'), MANUFACTURING: t('assetCatManufacturing'), BPO: t('assetCatBpo'),
+  BPC: t('assetCatBpc'), MISSION: t('assetCatMission'), IMPLANTS: t('assetCatImplants'),
+  CONSUMABLES: t('assetCatConsumables'), TRADING_GOODS: t('assetCatTradingGoods'), OTHER: t('assetCatOther'), UNKNOWN: t('assetCatUnknown'),
 };
-
-type Props = { onMenu: () => void; csrfToken: string };
-
-export function AssetScreen({ onMenu, csrfToken }: Props) {
   const [tab, setTab] = useState<AssetTab>('overview');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +135,8 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
   const [changes, setChanges] = useState<any[]>([]);
   const [changeTotal, setChangeTotal] = useState(0);
   const [totalsHistory, setTotalsHistory] = useState<any[]>([]);
+  const [snapshotDetail, setSnapshotDetail] = useState<SnapshotDetail | null>(null);
+  const [snapshotPage, setSnapshotPage] = useState({ snapshotId: '', offset: 0, limit: 500 });
   const [compareResult, setCompareResult] = useState<Record<string, any> | null>(null);
   const [valuations, setValuations] = useState<Record<string, any> | null>(null);
   const [valuationDetail, setValuationDetail] = useState<Record<string, any> | null>(null);
@@ -171,7 +189,32 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
     const completed = (snapshotPayload.snapshots ?? []).filter((row: any) => row.status === 'COMPLETED');
     setCompareFrom((current) => current || completed[1]?.snapshot_id || '');
     setCompareTo((current) => current || completed[0]?.snapshot_id || '');
+    setSnapshotPage((current) => ({
+      ...current,
+      snapshotId: completed.some((row: any) => row.snapshot_id === current.snapshotId)
+        ? current.snapshotId
+        : (completed[0]?.snapshot_id || ''),
+      offset: 0,
+    }));
   }, [characterId, changeQuery]);
+
+  const loadSnapshotPage = async (snapshotId: string, offset: number) => {
+    if (!snapshotId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const payload = await webApi.assets.snapshot(snapshotId, {
+        limit: snapshotPage.limit,
+        offset,
+      }) as SnapshotDetail;
+      setSnapshotDetail(payload);
+      setSnapshotPage((current) => ({ ...current, snapshotId, offset }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t('assetSnapshotLoadFailed'));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const loadValuation = useCallback(async () => {
     if (characterId === null) return;
@@ -198,7 +241,7 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
       if (nextTab === 'valuation') await loadValuation();
       if (nextTab === 'opportunities') await loadMatches();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '资产数据加载失败');
+      setError(reason instanceof Error ? reason.message : t('assetLoadFailed'));
     } finally {
       setBusy(false);
     }
@@ -215,22 +258,22 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
       setNotice(success);
       await loadTab(tab);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '操作失败');
+      setError(reason instanceof Error ? reason.message : t('assetActionFailed'));
     } finally {
       setBusy(false);
     }
   }, [loadTab, tab]);
 
   const syncCharacter = (targetId: number) =>
-    runAction(() => webApi.assets.sync(targetId, csrfToken), 'ESI 资产只读同步已执行。');
+    runAction(() => webApi.assets.sync(targetId, csrfToken), t('assetSyncDone'));
   const runValuation = () => characterId === null
     ? Promise.resolve()
-    : runAction(() => webApi.assets.runValuation({ characterId }, csrfToken), '多口径估值已执行。');
+    : runAction(() => webApi.assets.runValuation({ characterId }, csrfToken), t('assetValuationDone'));
   const recomputeMatches = () => characterId === null
     ? Promise.resolve()
-    : runAction(() => webApi.assets.recomputeMatches(characterId, csrfToken), '库存与机会联动已重新计算。');
+    : runAction(() => webApi.assets.recomputeMatches(characterId, csrfToken), t('assetMatchesRecomputed'));
   const saveTag = (itemId: number, tag: string) =>
-    runAction(() => webApi.assets.setTag(itemId, tag || null, csrfToken), '本地标签已保存；不会发送到 EVE。');
+    runAction(() => webApi.assets.setTag(itemId, tag || null, csrfToken), t('assetTagSaved'));
 
   const openItem = async (itemId: number) => {
     setBusy(true);
@@ -240,7 +283,7 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
       setSelectedItem(payload.item);
       setTab('detail');
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '物品详情加载失败');
+      setError(reason instanceof Error ? reason.message : t('assetDetailLoadFailed'));
     } finally {
       setBusy(false);
     }
@@ -249,7 +292,7 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
   const compareSnapshots = () => runAction(async () => {
     if (!compareFrom || !compareTo) return;
     setCompareResult(await webApi.assets.compareSnapshots(compareFrom, compareTo) as Record<string, any>);
-  }, '快照对比完成；结果仅表示观察到的变化。');
+  }, t('assetCompareDone'));
 
   const characters = overview?.characters ?? [];
   const latestSync = characters
@@ -275,38 +318,39 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
     : null;
 
   const tabs: Array<{ id: AssetTab; label: string }> = [
-    { id: 'overview', label: '资产总览' },
-    { id: 'characters', label: '角色资产' },
-    { id: 'inventory', label: '库存列表' },
-    { id: 'detail', label: '资产详情' },
-    { id: 'changes', label: '资产变化' },
-    { id: 'valuation', label: '估值分析' },
-    { id: 'opportunities', label: '库存与套利机会' },
+    { id: 'overview', label: t('assetTabOverview') },
+    { id: 'characters', label: t('assetTabCharacters') },
+    { id: 'inventory', label: t('assetTabInventory') },
+    { id: 'detail', label: t('assetTabDetail') },
+    { id: 'changes', label: t('assetTabChanges') },
+    { id: 'valuation', label: t('assetTabValuation') },
+    { id: 'opportunities', label: t('assetTabOpportunities') },
   ];
 
   return (
     <section className="market-screen">
       <header className="market-screen__topbar asset-screen__topbar">
-        <button className="icon-button" type="button" onClick={onMenu} aria-label="打开菜单"><MenuIcon size={20} /></button>
-        <h1><ChartIcon size={18} /> EVEAI 真实资产工作台</h1>
-        <span className="status-pill">ESI GET-only · 真实资产写入禁用</span>
+        <button className="icon-button" type="button" onClick={onMenu} aria-label={t('openMenu')}><MenuIcon size={20} /></button>
+        <h1><ChartIcon size={18} /> {t('assetTitle')}</h1>
+        <span className="status-pill">{t('assetModePill')}</span>
         <select
           className="market-select"
           value={characterId ?? ''}
           onChange={(event) => setCharacterId(Number(event.target.value))}
-          aria-label="选择角色"
+          aria-label={t('assetSelectCharacter')}
         >
           {characters.map((row) => (
-            <option key={row.characterId} value={row.characterId}>{row.characterName || `角色 ${row.characterId}`}</option>
+            <option key={row.characterId} value={row.characterId}>{row.characterName || t('assetCharacterLabel', { value: String(row.characterId) })}</option>
           ))}
         </select>
+        <LocaleSwitch />
         <button className="button button--secondary" type="button" disabled={busy || characterId === null} onClick={() => characterId !== null && void syncCharacter(characterId)}>
-          同步当前角色
+          {t('assetSyncCurrent')}
         </button>
-        <button className="button button--secondary" type="button" disabled={busy} onClick={() => void loadTab(tab)}>刷新</button>
+        <button className="button button--secondary" type="button" disabled={busy} onClick={() => void loadTab(tab)}>{t('refresh')}</button>
       </header>
 
-      <nav className="market-tabs" aria-label="真实资产工作台视图">
+      <nav className="market-tabs" aria-label={t('assetViewNav')}>
         {tabs.map((item) => (
           <button key={item.id} type="button" className={tab === item.id ? 'market-tabs__tab market-tabs__tab--active' : 'market-tabs__tab'} onClick={() => setTab(item.id)}>
             {item.label}
@@ -316,50 +360,50 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
 
       {error ? <div className="screen-error" role="alert">{error}</div> : null}
       {notice ? <div className="screen-success" role="status">{notice}</div> : null}
-      {busy ? <p>处理中，请稍候…</p> : null}
-      {!overview ? <div className="app-loading" aria-label="加载资产数据"><span /><span /><span /></div> : null}
+      {busy ? <p>{t('assetProcessing')}</p> : null}
+      {!overview ? <div className="app-loading" aria-label={t('assetLoading')}><span /><span /><span /></div> : null}
 
       {overview && tab === 'overview' ? (
         <>
           <div className="metric-grid">
-            <div className="metric-card"><span>已授权角色</span><strong>{overview.totals.characters}</strong></div>
-            <div className="metric-card"><span>最近同步</span><strong>{dateTime(latestSync)}</strong></div>
-            <div className="metric-card"><span>资产物品行</span><strong>{num(overview.totals.items, 0)}</strong></div>
-            <div className="metric-card"><span>完整快照角色</span><strong>{overview.totals.withSnapshot} / {overview.totals.characters}</strong></div>
-            <div className="metric-card"><span>市场参考估值（估值快照）</span><strong>{num(marketReferenceTotal, 2)}</strong></div>
-            <div className="metric-card"><span>买单深度可执行估值（估值快照）</span><strong>{num(liquidationTotal, 2)}</strong></div>
-            <div className="metric-card"><span>估值快照未知物品</span><strong>{num(unknownItems, 0)}</strong></div>
-            <div className="metric-card"><span>真实交易执行</span><strong>DISABLED</strong></div>
+            <div className="metric-card"><span>{t('assetAuthorizedCharacters')}</span><strong>{overview.totals.characters}</strong></div>
+            <div className="metric-card"><span>{t('assetLastSync')}</span><strong>{dateTime(latestSync)}</strong></div>
+            <div className="metric-card"><span>{t('assetItemRows')}</span><strong>{num(overview.totals.items, 0)}</strong></div>
+            <div className="metric-card"><span>{t('assetFullSnapshotCharacters')}</span><strong>{overview.totals.withSnapshot} / {overview.totals.characters}</strong></div>
+            <div className="metric-card"><span>{t('assetMarketReference')}</span><strong>{num(marketReferenceTotal, 2)}</strong></div>
+            <div className="metric-card"><span>{t('assetBidLiquidation')}</span><strong>{num(liquidationTotal, 2)}</strong></div>
+            <div className="metric-card"><span>{t('assetUnknownValuedItems')}</span><strong>{num(unknownItems, 0)}</strong></div>
+            <div className="metric-card"><span>{t('assetRealTrades')}</span><strong>DISABLED</strong></div>
           </div>
           {staleValuationCharacters.length > 0 ? (
             <div className="support-note support-note--warn" role="status">
-              <strong>估值快照已过期：</strong>{staleValuationSummary}市场参考和可执行估值不代表当前库存总值，请对最新资产快照重新执行估值。
+              <strong>{t('assetValuationStale')}</strong>{staleValuationSummary}{t('assetValuationStaleNote')}
             </div>
           ) : null}
-          <p>不同估值口径分别展示，禁止相加形成虚假总资产。{overview.valuationNote}</p>
-          <h2>分类库存（当前集）</h2>
+          <p>{t('assetValuationBasesNoSum')}{overview.valuationNote}</p>
+          <h2>{t('assetCategoryInventory')}</h2>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>分类</th><th>物品行</th><th>总数量</th></tr></thead>
+              <thead><tr><th>{t('profileGroup')}</th><th>{t('assetItemRow')}</th><th>{t('colTotalQuantity')}</th></tr></thead>
               <tbody>
                 {selectedCharacter?.bucketSummary.map((row) => (
                   <tr key={row.bucket}><td>{row.labelZh}</td><td>{row.items}</td><td>{num(row.quantity, 0)}</td></tr>
                 ))}
-                {!selectedCharacter?.bucketSummary.length ? <tr><td colSpan={3}>尚无当前库存。</td></tr> : null}
+                {!selectedCharacter?.bucketSummary.length ? <tr><td colSpan={3}>{t('assetNoCurrentInventory')}</td></tr> : null}
               </tbody>
             </table>
           </div>
-          <h2>角色同步与估值</h2>
+          <h2>{t('assetSyncAndValuation')}</h2>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>角色</th><th>当前物品</th><th>最近任务</th><th>完整快照</th><th>市场参考</th><th>可执行出售</th></tr></thead>
+              <thead><tr><th>{t('assetCharacter')}</th><th>{t('assetCurrentItems')}</th><th>{t('assetRecentJobs')}</th><th>{t('assetFullSnapshot')}</th><th>{t('assetMarketRefShort')}</th><th>{t('assetExecutableSell')}</th></tr></thead>
               <tbody>
                 {characters.map((row) => (
                   <tr key={row.characterId}>
                     <td>{row.characterName || row.characterId}</td>
                     <td>{row.currentAssetItems}</td>
                     <td>{String(row.lastJob?.status ?? 'N/A')} · {dateTime(row.lastJob?.completedAt ?? row.lastJob?.completed_at)}</td>
-                    <td>{row.latestSnapshot ? `${dateTime(row.latestSnapshot.completed_at)} · ${row.latestSnapshot.total_items} 行` : '无'}</td>
+                    <td>{row.latestSnapshot ? t('assetRowsLine', { time: dateTime(row.latestSnapshot.completed_at), rows: String(row.latestSnapshot.total_items) }) : t('paperNoRiskFlags')}</td>
                     <td>{num(row.latestValuation?.marketReferenceValue, 2)}</td>
                     <td>{num(row.latestValuation?.bidLiquidationNet, 2)}</td>
                   </tr>
@@ -373,20 +417,20 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
       {overview && tab === 'characters' ? (
         <div className="data-table-wrap">
           <table className="data-table">
-            <thead><tr><th>角色</th><th>角色 ID</th><th>同步状态</th><th>最后同步</th><th>物品数</th><th>估值摘要</th><th>操作</th></tr></thead>
+            <thead><tr><th>{t('assetCharacter')}</th><th>{t('colCharacterId')}</th><th>{t('colSyncStatus')}</th><th>{t('assetLastSynced')}</th><th>{t('assetItemCount')}</th><th>{t('assetValuationSummary')}</th><th>{t('colAction')}</th></tr></thead>
             <tbody>
               {characters.map((row) => (
                 <tr key={row.characterId}>
-                  <td>{row.characterName || '未知角色'}</td>
+                  <td>{row.characterName || t('assetUnknownCharacter')}</td>
                   <td>{row.characterId}</td>
-                  <td>{String(row.lastJob?.status ?? (row.syncEnabled ? '待同步' : '自动同步关闭'))}</td>
+                  <td>{String(row.lastJob?.status ?? (row.syncEnabled ? t('assetPendingSync') : t('assetAutoSyncOff')))}</td>
                   <td>{dateTime(row.lastJob?.completedAt ?? row.lastJob?.completed_at ?? row.latestSnapshot?.completed_at)}</td>
                   <td>{row.currentAssetItems}</td>
                   <td>
-                    参考 {num(row.latestValuation?.marketReferenceValue, 2)} ·
-                    {' '}可执行 {num(row.latestValuation?.bidLiquidationNet, 2)}
+                    {t('assetRefLabel', { value: num(row.latestValuation?.marketReferenceValue, 2) })} ·
+                    {' '}{t('assetExecutableLabel', { value: num(row.latestValuation?.bidLiquidationNet, 2) })}
                   </td>
-                  <td><button type="button" disabled={busy} onClick={() => void syncCharacter(row.characterId)}>单独同步</button></td>
+                  <td><button type="button" disabled={busy} onClick={() => void syncCharacter(row.characterId)}>{t('assetSyncAlone')}</button></td>
                 </tr>
               ))}
             </tbody>
@@ -398,7 +442,7 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
           <div className="toolbar">
             <input
               className="market-input"
-              placeholder="搜索名称或 Type ID"
+              placeholder={t('assetSearchPlaceholder')}
               value={inventoryQuery.q}
               onChange={(event) => setInventoryQuery((current) => ({ ...current, q: event.target.value, offset: 0 }))}
             />
@@ -407,16 +451,16 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
               value={inventoryQuery.bucket}
               onChange={(event) => setInventoryQuery((current) => ({ ...current, bucket: event.target.value, offset: 0 }))}
             >
-              {BUCKETS.map((bucket) => <option key={bucket} value={bucket}>{bucket ? BUCKET_LABELS[bucket] : '全部分类'}</option>)}
+              {BUCKETS.map((bucket) => <option key={bucket} value={bucket}>{bucket ? BUCKET_LABELS[bucket] : t('assetAllCategories')}</option>)}
             </select>
             <select
               className="market-select"
               value={inventoryQuery.tradable}
               onChange={(event) => setInventoryQuery((current) => ({ ...current, tradable: event.target.value, offset: 0 }))}
             >
-              <option value="">全部交易状态</option>
-              <option value="true">有市场订单</option>
-              <option value="false">无市场订单</option>
+              <option value="">{t('assetAllTradeStates')}</option>
+              <option value="true">{t('assetHasOrders')}</option>
+              <option value="false">{t('assetNoOrders')}</option>
             </select>
             <select
               className="market-select"
@@ -426,20 +470,20 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
                 setInventoryQuery((current) => ({ ...current, sort, order, offset: 0 }));
               }}
             >
-              <option value="quantity:desc">数量从多到少</option>
-              <option value="quantity:asc">数量从少到多</option>
-              <option value="name:asc">名称 A→Z</option>
-              <option value="type:asc">Type ID 升序</option>
+              <option value="quantity:desc">{t('assetSortQtyDesc')}</option>
+              <option value="quantity:asc">{t('assetSortQtyAsc')}</option>
+              <option value="name:asc">{t('assetSortName')}</option>
+              <option value="type:asc">{t('assetSortTypeId')}</option>
             </select>
-            <button type="button" disabled={busy} onClick={() => void loadInventory()}>查询</button>
+            <button type="button" disabled={busy} onClick={() => void loadInventory()}>{t('assetQuery')}</button>
           </div>
-          <p>共 {inventory?.total ?? 0} 行；估值来自最近一次完成运行。</p>
+          <p>{t('assetInventoryTotalLine', { count: String(inventory?.total ?? 0) })}</p>
           <div className="data-table-wrap">
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>物品</th><th>数量</th><th>分类</th><th>位置</th><th>市场参考</th>
-                  <th>可执行出售</th><th>估值状态</th><th>本地标签</th><th>操作</th>
+                  <th>{t('marketWatchlistItem')}</th><th>{t('marketQuantity')}</th><th>{t('profileGroup')}</th><th>{t('colLocation')}</th><th>{t('assetMarketRefShort')}</th>
+                  <th>{t('assetExecutableSell')}</th><th>{t('assetValuationStatus')}</th><th>{t('assetLocalTag')}</th><th>{t('colAction')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -459,17 +503,17 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
                     <td>{num(row.quantity, 0)}</td>
                     <td>{row.bucketLabelZh}</td>
                     <td>
-                      {row.regionName || '区域 UNKNOWN'}<br />
-                      <small>{row.solarSystemName || '星系 UNKNOWN'} · {row.resolvedName || row.resolvedType || '位置 UNKNOWN'} · {row.resolutionStatus}</small>
+                      {row.regionName || t('assetRegionUnknown')}<br />
+                      <small>{row.solarSystemName || t('assetSystemUnknown')} · {row.resolvedName || row.resolvedType || t('assetPlaceUnknown')} · {row.resolutionStatus}</small>
                     </td>
                     <td>{num(row.marketReferenceValue, 2)}</td>
                     <td>{num(row.bidLiquidationNet, 2)}</td>
-                    <td>{row.valuationStatuses.length ? row.valuationStatuses.join(' / ') : '未估值'}</td>
-                    <td>{row.tag ? TAG_LABELS[row.tag] || row.tag : '无'}</td>
-                    <td><button type="button" onClick={() => void openItem(row.itemId)}>详情</button></td>
+                    <td>{row.valuationStatuses.length ? row.valuationStatuses.join(' / ') : t('assetNotValued')}</td>
+                    <td>{row.tag ? TAG_LABELS[row.tag] || row.tag : t('paperNoRiskFlags')}</td>
+                    <td><button type="button" onClick={() => void openItem(row.itemId)}>{t('p93Detail')}</button></td>
                   </tr>
                 ))}
-                {!inventory?.rows.length ? <tr><td colSpan={9}>没有匹配的库存。</td></tr> : null}
+                {!inventory?.rows.length ? <tr><td colSpan={9}>{t('assetNoInventoryMatches')}</td></tr> : null}
               </tbody>
             </table>
           </div>
@@ -479,15 +523,15 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
               disabled={busy || inventoryQuery.offset <= 0}
               onClick={() => setInventoryQuery((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) }))}
             >
-              上一页
+              {t('p93PrevPage')}
             </button>
-            <span>第 {Math.floor(inventoryQuery.offset / inventoryQuery.limit) + 1} 页</span>
+            <span>{t('assetPageOf', { page: String(Math.floor(inventoryQuery.offset / inventoryQuery.limit) + 1) })}</span>
             <button
               type="button"
               disabled={busy || (inventory?.offset ?? 0) + (inventory?.limit ?? 0) >= (inventory?.total ?? 0)}
               onClick={() => setInventoryQuery((current) => ({ ...current, offset: current.offset + current.limit }))}
             >
-              下一页
+              {t('p93NextPage')}
             </button>
           </div>
         </>
@@ -497,40 +541,40 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
         selectedItem ? (
           <>
             <div className="metric-grid">
-              <div className="metric-card"><span>物品名称</span><strong>{selectedItem.typeNameZh || selectedItem.typeName}</strong></div>
+              <div className="metric-card"><span>{t('assetItemName')}</span><strong>{selectedItem.typeNameZh || selectedItem.typeName}</strong></div>
               <div className="metric-card"><span>Type ID</span><strong>{selectedItem.typeId}</strong></div>
               <div className="metric-card"><span>Item ID</span><strong>{selectedItem.itemId}</strong></div>
-              <div className="metric-card"><span>数量</span><strong>{num(selectedItem.quantity, 0)}</strong></div>
-              <div className="metric-card"><span>分类</span><strong>{selectedItem.bucketLabelZh}</strong></div>
-              <div className="metric-card"><span>市场参考</span><strong>{num(selectedItem.marketReferenceValue, 2)}</strong></div>
-              <div className="metric-card"><span>买单深度可执行</span><strong>{num(selectedItem.bidLiquidationNet, 2)}</strong></div>
-              <div className="metric-card"><span>本地标签</span><strong>{selectedItem.tag ? TAG_LABELS[selectedItem.tag] || selectedItem.tag : '无'}</strong></div>
+              <div className="metric-card"><span>{t('marketQuantity')}</span><strong>{num(selectedItem.quantity, 0)}</strong></div>
+              <div className="metric-card"><span>{t('profileGroup')}</span><strong>{selectedItem.bucketLabelZh}</strong></div>
+              <div className="metric-card"><span>{t('assetMarketRefShort')}</span><strong>{num(selectedItem.marketReferenceValue, 2)}</strong></div>
+              <div className="metric-card"><span>{t('assetBidDepthExecutable')}</span><strong>{num(selectedItem.bidLiquidationNet, 2)}</strong></div>
+              <div className="metric-card"><span>{t('assetLocalTag')}</span><strong>{selectedItem.tag ? TAG_LABELS[selectedItem.tag] || selectedItem.tag : t('paperNoRiskFlags')}</strong></div>
             </div>
-            <h2>位置与容器</h2>
+            <h2>{t('assetLocationAndContainer')}</h2>
             <p>
-              {selectedItem.regionName || '区域 UNKNOWN'} · {selectedItem.solarSystemName || '星系 UNKNOWN'} ·
-              {' '}{selectedItem.resolvedName || selectedItem.resolvedType || '位置 UNKNOWN'} ·
+              {selectedItem.regionName || t('assetRegionUnknown')} · {selectedItem.solarSystemName || t('assetSystemUnknown')} ·
+              {' '}{selectedItem.resolvedName || selectedItem.resolvedType || t('assetPlaceUnknown')} ·
               {' '}{selectedItem.locationType || 'container UNKNOWN'} · {selectedItem.locationFlag || 'flag UNKNOWN'} ·
               {' '}{selectedItem.resolutionStatus || 'UNKNOWN'}
             </p>
-            <h2>估值状态</h2>
-            <p>{selectedItem.valuationStatuses?.length ? selectedItem.valuationStatuses.join(' / ') : '尚无完成估值'}</p>
-            <h2>本地标签</h2>
+            <h2>{t('assetValuationStatus')}</h2>
+            <p>{selectedItem.valuationStatuses?.length ? selectedItem.valuationStatuses.join(' / ') : t('assetNoCompletedValuation')}</p>
+            <h2>{t('assetLocalTag')}</h2>
             <div className="toolbar">
               <select
                 className="market-select"
                 value={selectedItem.tag ?? ''}
                 onChange={(event) => void saveTag(selectedItem.itemId, event.target.value)}
               >
-                <option value="">无标签</option>
+                <option value="">{t('assetNoTag')}</option>
                 {Object.entries(TAG_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
-              <button type="button" onClick={() => setTab('inventory')}>返回库存</button>
+              <button type="button" onClick={() => setTab('inventory')}>{t('assetBackToInventory')}</button>
             </div>
-            <h2>快照历史</h2>
+            <h2>{t('assetSnapshotHistory')}</h2>
             <div className="data-table-wrap">
               <table className="data-table">
-                <thead><tr><th>快照</th><th>时间</th><th>数量</th><th>位置</th><th>状态</th></tr></thead>
+                <thead><tr><th>{t('colSnapshot')}</th><th>{t('colTime')}</th><th>{t('marketQuantity')}</th><th>{t('colLocation')}</th><th>{t('profileStatus')}</th></tr></thead>
                 <tbody>
                   {(selectedItem.snapshotHistory ?? []).map((row: any) => (
                     <tr key={row.snapshot_id}>
@@ -541,14 +585,14 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
                       <td>{row.status}</td>
                     </tr>
                   ))}
-                  {!selectedItem.snapshotHistory?.length ? <tr><td colSpan={5}>暂无快照历史。</td></tr> : null}
+                  {!selectedItem.snapshotHistory?.length ? <tr><td colSpan={5}>{t('assetNoSnapshotHistory')}</td></tr> : null}
                 </tbody>
               </table>
             </div>
-            <h2>历史变化</h2>
+            <h2>{t('assetHistoryChanges')}</h2>
             <div className="data-table-wrap">
               <table className="data-table">
-                <thead><tr><th>变化</th><th>前数量</th><th>后数量</th><th>前位置</th><th>后位置</th><th>来源</th><th>时间</th></tr></thead>
+                <thead><tr><th>{t('colChange')}</th><th>{t('assetQtyBefore')}</th><th>{t('assetQtyAfter')}</th><th>{t('assetLocationBefore')}</th><th>{t('assetLocationAfter')}</th><th>{t('colSource')}</th><th>{t('colTime')}</th></tr></thead>
                 <tbody>
                   {(selectedItem.changeHistory ?? []).map((row: any) => (
                     <tr key={row.change_id}>
@@ -561,16 +605,16 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
                       <td>{dateTime(row.detected_at)}</td>
                     </tr>
                   ))}
-                  {!selectedItem.changeHistory?.length ? <tr><td colSpan={7}>暂无观察变化。</td></tr> : null}
+                  {!selectedItem.changeHistory?.length ? <tr><td colSpan={7}>{t('assetNoObservedChanges')}</td></tr> : null}
                 </tbody>
               </table>
             </div>
           </>
         ) : (
           <div className="workspace-empty">
-            <h2>尚未选择物品</h2>
-            <p>请先在库存列表中打开一个物品。</p>
-            <button type="button" onClick={() => setTab('inventory')}>返回库存列表</button>
+            <h2>{t('assetNoItemSelected')}</h2>
+            <p>{t('assetOpenItemFirst')}</p>
+            <button type="button" onClick={() => setTab('inventory')}>{t('assetBackToInventoryList')}</button>
           </div>
         )
       ) : null}
@@ -583,17 +627,17 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
               value={changeQuery.changeType}
               onChange={(event) => setChangeQuery((current) => ({ ...current, changeType: event.target.value }))}
             >
-              <option value="">全部变化</option>
+              <option value="">{t('assetAllChanges')}</option>
               {Object.entries(CHANGE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
-            <label>从<input type="date" value={changeQuery.from} onChange={(event) => setChangeQuery((current) => ({ ...current, from: event.target.value }))} /></label>
-            <label>到<input type="date" value={changeQuery.to} onChange={(event) => setChangeQuery((current) => ({ ...current, to: event.target.value }))} /></label>
-            <button type="button" disabled={busy} onClick={() => void loadChanges()}>查询变化</button>
+            <label>{t('colFrom')}<input type="date" value={changeQuery.from} onChange={(event) => setChangeQuery((current) => ({ ...current, from: event.target.value }))} /></label>
+            <label>{t('colTo')}<input type="date" value={changeQuery.to} onChange={(event) => setChangeQuery((current) => ({ ...current, to: event.target.value }))} /></label>
+            <button type="button" disabled={busy} onClick={() => void loadChanges()}>{t('assetQueryChanges')}</button>
           </div>
-          <p>共 {changeTotal} 条持久化观察变化；不推断购买、出售、损失等因果。</p>
+          <p>{t('assetChangeTotalLine', { count: String(changeTotal) })}</p>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>变化</th><th>物品</th><th>数量</th><th>位置变化</th><th>来源/置信度</th><th>快照</th><th>时间</th></tr></thead>
+              <thead><tr><th>{t('colChange')}</th><th>{t('marketWatchlistItem')}</th><th>{t('marketQuantity')}</th><th>{t('assetChangeMoved')}</th><th>{t('assetSourceConfidence')}</th><th>{t('colSnapshot')}</th><th>{t('colTime')}</th></tr></thead>
               <tbody>
                 {changes.map((row) => (
                   <tr key={row.change_id}>
@@ -606,40 +650,106 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
                     <td>{dateTime(row.detected_at)}</td>
                   </tr>
                 ))}
-                {!changes.length ? <tr><td colSpan={7}>没有匹配的变化。</td></tr> : null}
+                {!changes.length ? <tr><td colSpan={7}>{t('assetNoChangeMatches')}</td></tr> : null}
               </tbody>
             </table>
           </div>
 
-          <h2>对比两个完整快照</h2>
+          <h2>{t('assetSnapshotItems')}</h2>
+          <div className="toolbar">
+            <select
+              className="market-select"
+              value={snapshotPage.snapshotId}
+              onChange={(event) => {
+                setSnapshotDetail(null);
+                setSnapshotPage((current) => ({ ...current, snapshotId: event.target.value, offset: 0 }));
+              }}
+            >
+              <option value="">{t('assetSnapshotSelect')}</option>
+              {snapshots.filter((row) => row.status === 'COMPLETED').map((row) => (
+                <option key={row.snapshot_id} value={row.snapshot_id}>{t('assetRowsLine', { time: dateTime(row.completed_at), rows: String(row.total_items) })}</option>
+              ))}
+            </select>
+            <button type="button" disabled={busy || !snapshotPage.snapshotId} onClick={() => void loadSnapshotPage(snapshotPage.snapshotId, 0)}>
+              {t('assetSnapshotLoad')}
+            </button>
+          </div>
+          {snapshotDetail ? (
+            <>
+              <p>{t('assetSnapshotPageStatus', {
+                from: String(snapshotDetail.offset + (snapshotDetail.items.length ? 1 : 0)),
+                to: String(snapshotDetail.offset + snapshotDetail.items.length),
+                total: String(snapshotDetail.total),
+              })}</p>
+              <div className="data-table-wrap">
+                <table className="data-table">
+                  <thead><tr><th>Item ID</th><th>Type ID</th><th>{t('marketQuantity')}</th><th>{t('colLocation')}</th></tr></thead>
+                  <tbody>
+                    {snapshotDetail.items.map((row) => (
+                      <tr key={row.item_id}>
+                        <td>{row.item_id}</td>
+                        <td>{row.type_id}</td>
+                        <td>{row.quantity}</td>
+                        <td>{row.location_id}</td>
+                      </tr>
+                    ))}
+                    {!snapshotDetail.items.length ? <tr><td colSpan={4}>{t('assetNoSnapshotHistory')}</td></tr> : null}
+                  </tbody>
+                </table>
+              </div>
+              <div className="toolbar">
+                <button
+                  type="button"
+                  disabled={busy || snapshotDetail.offset <= 0}
+                  onClick={() => void loadSnapshotPage(snapshotDetail.snapshot.snapshot_id, Math.max(0, snapshotDetail.offset - snapshotDetail.limit))}
+                >
+                  {t('p93PrevPage')}
+                </button>
+                <span>{t('assetSnapshotPageStatus', {
+                  from: String(snapshotDetail.offset + (snapshotDetail.items.length ? 1 : 0)),
+                  to: String(snapshotDetail.offset + snapshotDetail.items.length),
+                  total: String(snapshotDetail.total),
+                })}</span>
+                <button
+                  type="button"
+                  disabled={busy || !snapshotDetail.hasMore || snapshotDetail.nextOffset === null}
+                  onClick={() => void loadSnapshotPage(snapshotDetail.snapshot.snapshot_id, snapshotDetail.nextOffset ?? snapshotDetail.offset + snapshotDetail.limit)}
+                >
+                  {t('p93NextPage')}
+                </button>
+              </div>
+            </>
+          ) : null}
+
+          <h2>{t('assetCompareSnapshots')}</h2>
           <div className="toolbar">
             <select className="market-select" value={compareFrom} onChange={(event) => setCompareFrom(event.target.value)}>
-              <option value="">起始快照</option>
+              <option value="">{t('assetFromSnapshot')}</option>
               {snapshots.filter((row) => row.status === 'COMPLETED').map((row) => (
-                <option key={row.snapshot_id} value={row.snapshot_id}>{dateTime(row.completed_at)} · {row.total_items} 行</option>
+                <option key={row.snapshot_id} value={row.snapshot_id}>{t('assetRowsLine', { time: dateTime(row.completed_at), rows: String(row.total_items) })}</option>
               ))}
             </select>
             <select className="market-select" value={compareTo} onChange={(event) => setCompareTo(event.target.value)}>
-              <option value="">目标快照</option>
+              <option value="">{t('assetToSnapshot')}</option>
               {snapshots.filter((row) => row.status === 'COMPLETED').map((row) => (
-                <option key={row.snapshot_id} value={row.snapshot_id}>{dateTime(row.completed_at)} · {row.total_items} 行</option>
+                <option key={row.snapshot_id} value={row.snapshot_id}>{t('assetRowsLine', { time: dateTime(row.completed_at), rows: String(row.total_items) })}</option>
               ))}
             </select>
             <button type="button" disabled={busy || !compareFrom || !compareTo || compareFrom === compareTo} onClick={() => void compareSnapshots()}>
-              对比
+              {t('assetCompare')}
             </button>
           </div>
           {compareResult ? (
             <>
               <p>
-                对比摘要：
+                {t('assetCompareSummary')}
                 {Object.entries(compareResult.summary ?? {})
                   .map(([key, value]) => `${CHANGE_LABELS[key] || key} ${value}`)
-                  .join(' · ') || '无差异'}
+                  .join(' · ') || t('assetNoDifference')}
               </p>
               <div className="data-table-wrap">
                 <table className="data-table">
-                  <thead><tr><th>变化</th><th>Item ID</th><th>Type ID</th><th>前数量</th><th>后数量</th><th>前位置</th><th>后位置</th><th>来源</th></tr></thead>
+                  <thead><tr><th>{t('colChange')}</th><th>Item ID</th><th>Type ID</th><th>{t('assetQtyBefore')}</th><th>{t('assetQtyAfter')}</th><th>{t('assetLocationBefore')}</th><th>{t('assetLocationAfter')}</th><th>{t('colSource')}</th></tr></thead>
                   <tbody>
                     {(compareResult.changes ?? []).map((row: any) => (
                       <tr key={row.changeId}>
@@ -659,10 +769,10 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
             </>
           ) : null}
 
-          <h2>角色资产总量变化</h2>
+          <h2>{t('assetCharacterTotalsChanges')}</h2>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>快照</th><th>完成时间</th><th>物品行</th><th>Δ物品</th><th>种类</th><th>位置</th><th>总数量</th><th>Δ数量</th></tr></thead>
+              <thead><tr><th>{t('colSnapshot')}</th><th>{t('profileFinish')}</th><th>{t('assetItemRow')}</th><th>{t('assetDeltaItems')}</th><th>{t('assetKinds')}</th><th>{t('colLocation')}</th><th>{t('colTotalQuantity')}</th><th>{t('assetDeltaQuantity')}</th></tr></thead>
               <tbody>
                 {totalsHistory.map((row) => (
                   <tr key={row.snapshot_id}>
@@ -676,7 +786,7 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
                     <td>{row.deltaQuantity ?? 'N/A'}</td>
                   </tr>
                 ))}
-                {!totalsHistory.length ? <tr><td colSpan={8}>暂无完整快照。</td></tr> : null}
+                {!totalsHistory.length ? <tr><td colSpan={8}>{t('assetNoFullSnapshot')}</td></tr> : null}
               </tbody>
             </table>
           </div>
@@ -686,35 +796,35 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
       {tab === 'valuation' ? (
         <>
           <div className="toolbar">
-            <button type="button" disabled={busy || characterId === null} onClick={() => void runValuation()}>执行最新快照估值</button>
+            <button type="button" disabled={busy || characterId === null} onClick={() => void runValuation()}>{t('assetRunLatestValuation')}</button>
             <span>
-              费用模型：{valuations?.latestTotals?.feeModelVersion || '尚未运行'} ·
-              {' '}行情快照：{dateTime(valuations?.latestTotals?.marketSnapshotAt)} ·
-              {' '}资产快照：{valuations?.latestTotals?.snapshotId || 'N/A'} ·
-              {' '}费用假设：{(valuations?.latestTotals?.feeAssumptions as any)?.note || '默认 Alpha 技能 / NPC 空间站'}
+              {t('assetFeeModelLabel')}{valuations?.latestTotals?.feeModelVersion || t('assetNotRun')} ·
+              {' '}{t('assetMarketSnapshotLabel')}{dateTime(valuations?.latestTotals?.marketSnapshotAt)} ·
+              {' '}{t('assetAssetSnapshotLabel')}{valuations?.latestTotals?.snapshotId || 'N/A'} ·
+              {' '}{t('assetFeeAssumptionsLabel')}{(valuations?.latestTotals?.feeAssumptions as any)?.note || t('assetDefaultAssumptions')}
             </span>
           </div>
           {selectedCharacter?.valuationFreshness?.status === 'STALE' ? (
             <div className="support-note support-note--warn" role="status">
-              <strong>当前估值不是最新资产快照：</strong>{selectedCharacter.valuationFreshness.message} 请使用“执行最新快照估值”生成新结果。
+              <strong>{t('assetValuationNotLatest')}</strong>{selectedCharacter.valuationFreshness.message} {t('assetValuationHint')}
             </div>
           ) : null}
           <div className="metric-grid">
-            <div className="metric-card"><span>市场参考估值（估值快照）</span><strong>{num(valuations?.latestTotals?.marketReferenceValue, 2)}</strong></div>
-            <div className="metric-card"><span>买单深度可执行估值（估值快照）</span><strong>{num(valuations?.latestTotals?.bidLiquidationNet, 2)}</strong></div>
-            <div className="metric-card"><span>卖单重置成本</span><strong>{num(valuations?.latestTotals?.askReplacementGross, 2)}</strong></div>
-            <div className="metric-card"><span>历史成本</span><strong>UNKNOWN</strong></div>
-            <div className="metric-card"><span>估值覆盖率</span><strong>{valuationCoverage === null ? 'N/A' : `${valuationCoverage.toFixed(2)}%`}</strong></div>
-            <div className="metric-card"><span>估值快照未知物品</span><strong>{num(unknownValuation, 0)}</strong></div>
-            <div className="metric-card"><span>深度不足物品</span><strong>{num(depthShortfall, 0)}</strong></div>
-            <div className="metric-card"><span>估值物品总数</span><strong>{num(valuationRows.length, 0)}</strong></div>
+            <div className="metric-card"><span>{t('assetMarketReference')}</span><strong>{num(valuations?.latestTotals?.marketReferenceValue, 2)}</strong></div>
+            <div className="metric-card"><span>{t('assetBidLiquidation')}</span><strong>{num(valuations?.latestTotals?.bidLiquidationNet, 2)}</strong></div>
+            <div className="metric-card"><span>{t('assetAskResetCost')}</span><strong>{num(valuations?.latestTotals?.askReplacementGross, 2)}</strong></div>
+            <div className="metric-card"><span>{t('assetHistoricalCost')}</span><strong>UNKNOWN</strong></div>
+            <div className="metric-card"><span>{t('assetValuationCoverage')}</span><strong>{valuationCoverage === null ? 'N/A' : `${valuationCoverage.toFixed(2)}%`}</strong></div>
+            <div className="metric-card"><span>{t('assetUnknownValuedItems')}</span><strong>{num(unknownValuation, 0)}</strong></div>
+            <div className="metric-card"><span>{t('assetShallowDepthItems')}</span><strong>{num(depthShortfall, 0)}</strong></div>
+            <div className="metric-card"><span>{t('assetValuedItemTotal')}</span><strong>{num(valuationRows.length, 0)}</strong></div>
           </div>
-          <p>四个口径分别展示，绝不相加。历史成本保持 UNKNOWN，直到 P9.3 提供独立真实采购记录。</p>
+          <p>{t('assetFourBasesNote')}</p>
 
-          <h2>估值运行历史（不同贸易中心）</h2>
+          <h2>{t('assetValuationRuns')}</h2>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>估值 ID</th><th>地点</th><th>状态</th><th>创建时间</th><th>已估值</th><th>未知</th><th>费用版本</th></tr></thead>
+              <thead><tr><th>{t('assetValuationId')}</th><th>{t('marketLocation')}</th><th>{t('profileStatus')}</th><th>{t('born')}</th><th>{t('assetValuated')}</th><th>{t('supportCostUnknownShort')}</th><th>{t('assetFeeVersion')}</th></tr></thead>
               <tbody>
                 {(valuations?.runs ?? []).map((row: any) => (
                   <tr key={row.valuation_id}>
@@ -727,15 +837,15 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
                     <td>{row.fee_model_version}</td>
                   </tr>
                 ))}
-                {!valuations?.runs?.length ? <tr><td colSpan={7}>尚无估值运行。</td></tr> : null}
+                {!valuations?.runs?.length ? <tr><td colSpan={7}>{t('assetNoValuationRuns')}</td></tr> : null}
               </tbody>
             </table>
           </div>
 
-          <h2>最近一次估值明细</h2>
+          <h2>{t('assetLatestValuationDetail')}</h2>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>物品</th><th>数量</th><th>市场参考</th><th>买单毛值</th><th>买单净额</th><th>可售/未售</th><th>卖单重置</th><th>状态</th></tr></thead>
+              <thead><tr><th>{t('marketWatchlistItem')}</th><th>{t('marketQuantity')}</th><th>{t('assetMarketRefShort')}</th><th>{t('assetBidGross')}</th><th>{t('assetBidNet')}</th><th>{t('assetSellableUnsold')}</th><th>{t('assetAskReset')}</th><th>{t('profileStatus')}</th></tr></thead>
               <tbody>
                 {valuationRows.map((row: any) => (
                   <tr key={row.itemId}>
@@ -749,7 +859,7 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
                     <td>{row.statuses.join(' / ')}</td>
                   </tr>
                 ))}
-                {!valuationRows.length ? <tr><td colSpan={8}>最近一次运行没有明细。</td></tr> : null}
+                {!valuationRows.length ? <tr><td colSpan={8}>{t('assetNoRunDetail')}</td></tr> : null}
               </tbody>
             </table>
           </div>
@@ -760,16 +870,16 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
         <>
           <div className="toolbar">
             <button type="button" disabled={busy || characterId === null} onClick={() => void recomputeMatches()}>
-              重新计算库存联动
+              {t('assetRecomputeMatches')}
             </button>
-            <span>共 {matches?.total ?? 0} 个活跃机会匹配；仅本地确定性计算，不生成真实订单。</span>
+            <span>{t('assetMatchTotalLine', { count: String(matches?.total ?? 0) })}</span>
           </div>
           <div className="data-table-wrap">
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>机会</th><th>库存支持</th><th>持有/可用/需求</th><th>位置</th>
-                  <th>运输</th><th>费用后利润</th><th>综合利润</th><th>数据质量</th>
+                  <th>{t('colOpportunity')}</th><th>{t('assetInventorySupport')}</th><th>{t('assetHeldAvailableDemand')}</th><th>{t('colLocation')}</th>
+                  <th>{t('assetTransport')}</th><th>{t('assetNetAfterFees')}</th><th>{t('assetComprehensiveProfit')}</th><th>{t('assetDataQuality')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -781,7 +891,7 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
                     <tr key={row.opportunity_id}>
                       <td>
                         {row.type_name || row.type_id}<br />
-                        <small>{row.strategy === 'station_arbitrage' ? '站内套利' : '跨贸易中心'} · {row.state}</small><br />
+                        <small>{row.strategy === 'station_arbitrage' ? t('assetStationArbitrage') : t('assetCrossTradeHub')} · {row.state}</small><br />
                         <small>{row.buy_location_name} → {row.sell_location_name}</small>
                       </td>
                       <td>{row.supportClassZh}<br /><small>{row.support_class}</small></td>
@@ -789,29 +899,29 @@ export function AssetScreen({ onMenu, csrfToken }: Props) {
                       <td>
                         {locationRows.map((item) => (
                           <div key={String(item.terminalLocationId)}>
-                            {item.locationName || `地点 ${item.terminalLocationId}`} · {item.quantity} · {item.resolutionStatus}
+                            {item.locationName || t('assetLocationLabel', { value: String(item.terminalLocationId) })} · {item.quantity} · {item.resolutionStatus}
                             {item.atBuyHub ? ' · BUY HUB' : ''}
                           </div>
                         ))}
-                        {!locationRows.length ? '无位置明细' : ''}
+                        {!locationRows.length ? t('assetNoLocationDetail') : ''}
                       </td>
-                      <td>{row.needs_transport ? '需要运输 / UNKNOWN' : '不需要'}</td>
+                      <td>{row.needs_transport ? t('assetNeedsTransportUnknown') : t('assetNotNeeded')}</td>
                       <td>{num(row.fee_net_profit, 2)}</td>
                       <td>{row.comprehensive_net_profit == null ? row.comprehensive_status : num(row.comprehensive_net_profit, 2)}</td>
                       <td>
-                        快照 {quality?.dataQuality?.snapshotId || 'UNKNOWN'}<br />
-                        未知位置数量 {quality?.dataQuality?.unknownLocationQuantity ?? 'N/A'}<br />
-                        已预留 {reservation?.reservation?.reservedByEarlierOpportunities ?? 0} ·
-                        {' '}本机会分配 {reservation?.reservation?.allocatedToThisOpportunity ?? 0}
+                        {t('assetSnapshotLabel', { value: String(quality?.dataQuality?.snapshotId ?? 'UNKNOWN') })}<br />
+                        {t('assetUnknownLocationQty', { value: String(quality?.dataQuality?.unknownLocationQuantity ?? 'N/A') })}<br />
+                        {t('assetReservedLine', { value: String(reservation?.reservation?.reservedByEarlierOpportunities ?? 0) })} ·
+                        {' '}{t('assetAllocatedLine', { value: String(reservation?.reservation?.allocatedToThisOpportunity ?? 0) })}
                       </td>
                     </tr>
                   );
                 })}
-                {!matches?.rows.length ? <tr><td colSpan={8}>暂无活跃机会联动结果。</td></tr> : null}
+                {!matches?.rows.length ? <tr><td colSpan={8}>{t('assetNoActiveMatches')}</td></tr> : null}
               </tbody>
             </table>
           </div>
-          <p>跨贸易中心机会的运输成本仍为 UNKNOWN 时，综合利润保持 UNKNOWN；库存已在买入地点不等于运输已完成。</p>
+          <p>{t('assetCrossTransportNote')}</p>
         </>
       ) : null}
     </section>

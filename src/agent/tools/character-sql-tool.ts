@@ -7,6 +7,7 @@ import {
   type CharacterDatasetStatus,
 } from '../../eve/character-sync.js';
 import { getLinkedCharacter } from '../../eve/sso.js';
+import { resolveAssetLineage, type AssetLineage } from '../../assets/asset-lineage.js';
 import { analyzeCharacterSqlTables, executeCharacterSql } from './character-execution.js';
 
 /**
@@ -37,6 +38,18 @@ export async function runCharacterSqlTool(
     return { ok: false, rows: [], count: 0, error: analysis.error };
   }
 
+  let lineage: AssetLineage;
+  try {
+    lineage = resolveAssetLineage(db, linked.characterId, ctx.userId, ctx.chatId);
+  } catch {
+    return {
+      ok: false,
+      rows: [],
+      count: 0,
+      error: 'Character asset ownership context is unavailable; refusing private asset data access.',
+    };
+  }
+
   const datasets = datasetsForTables(analysis.characterTables);
   const statuses = await ensureCharacterDatasetsFresh(db, ctx, datasets, guard);
 
@@ -44,7 +57,7 @@ export async function runCharacterSqlTool(
     return { ok: false, blocked: true, error: 'Turn identity changed or request was cancelled during profile sync' };
   }
 
-  const result = executeCharacterSql(db, sql, linked.characterId);
+  const result = executeCharacterSql(db, sql, linked.characterId, lineage);
   return {
     ...result,
     data_status: statuses.map(slimStatus),

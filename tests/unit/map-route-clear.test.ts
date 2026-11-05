@@ -137,7 +137,7 @@ describe('POST /api/web/map/route keeps a good line when it cannot plan a new on
     });
 
     expect(response.statusCode).toBe(405);
-    expect(response.json().error).toContain('read-only phase');
+    expect(response.json().error).toContain('autopilot_writes_blocked');
   });
 
   it('does not wipe the drawn route when the destination is unroutable', async () => {

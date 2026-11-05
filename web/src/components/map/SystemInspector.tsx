@@ -106,8 +106,8 @@ export function SystemInspector({ system, kills, onClose, onRouteTo, onAvoid, on
   </section>;
 }
 
-function formatIsk(value: number, locale: 'zh' | 'zh' | 'en' | 'ru'): string {
-  const formatter = new Intl.NumberFormat(locale === 'ru' ? 'ru-RU' : 'en-GB', {
+function formatIsk(value: number, locale: 'zh' | 'en' | 'ru'): string {
+  const formatter = new Intl.NumberFormat(locale === 'ru' ? 'ru-RU' : locale === 'zh' ? 'zh-CN' : 'en-GB', {
     maximumFractionDigits: 1,
   });
   if (value >= 1_000_000_000) return `${formatter.format(value / 1_000_000_000)}B`;
@@ -115,8 +115,9 @@ function formatIsk(value: number, locale: 'zh' | 'zh' | 'en' | 'ru'): string {
   return formatter.format(value);
 }
 
-function formatAge(timeMs: number, locale: 'zh' | 'zh' | 'en' | 'ru'): string {
+function formatAge(timeMs: number, locale: 'zh' | 'en' | 'ru'): string {
   const minutes = Math.max(0, Math.round((Date.now() - timeMs) / 60_000));
+  if (locale === 'zh') return minutes < 60 ? `${minutes} 分钟前` : `${Math.round(minutes / 60)} 小时前`;
   if (locale === 'ru') return minutes < 60 ? `${minutes} мин назад` : `${Math.round(minutes / 60)} ч назад`;
   return minutes < 60 ? `${minutes}m ago` : `${Math.round(minutes / 60)}h ago`;
 }

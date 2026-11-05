@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS auth_requests (
   redirect_url TEXT,
   requested_scopes_json TEXT,
   consent_version TEXT,
-  consent_language TEXT CHECK (consent_language IS NULL OR consent_language IN ('ru', 'en')),
+  consent_language TEXT CHECK (consent_language IS NULL OR consent_language IN ('zh', 'ru', 'en')),
   consented_at TEXT,
   created_at   TEXT NOT NULL DEFAULT (datetime('now')),
   expires_at   TEXT NOT NULL,
@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS eve_accounts (
   expires_at      TEXT NOT NULL,
   scopes_json     TEXT NOT NULL DEFAULT '[]',
   consent_version TEXT,
-  consent_language TEXT CHECK (consent_language IS NULL OR consent_language IN ('ru', 'en')),
+  consent_language TEXT CHECK (consent_language IS NULL OR consent_language IN ('zh', 'ru', 'en')),
   consented_at    TEXT,
   user_id         INTEGER,
   -- EVE SSO CharacterOwnerHash of the account that authorized these tokens.
@@ -546,6 +546,10 @@ CREATE TABLE IF NOT EXISTS eve_kill_migrations (
 CREATE TABLE IF NOT EXISTS character_assets (
   character_id      INTEGER NOT NULL,
   item_id           INTEGER NOT NULL,
+  owner_user_id     INTEGER,
+  owner_chat_id     INTEGER,
+  binding_epoch     INTEGER NOT NULL DEFAULT 0,
+  binding_digest    TEXT NOT NULL DEFAULT '',
   type_id           INTEGER NOT NULL,
   location_id       INTEGER NOT NULL,
   location_type     TEXT,

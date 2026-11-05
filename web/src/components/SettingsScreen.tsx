@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ApiRequestError, webApi } from '../api';
+import { webApi } from '../api';
 import { LocaleSwitch, useI18n } from '../i18n';
 import { MenuIcon } from '../icons';
 import type { ModelPricing, ModelSettingsPayload } from '../types';
@@ -9,7 +9,6 @@ type Props = { csrfToken: string; onMenu: () => void };
 type EffortKey = 'settingsEffortAuto' | 'settingsEffortNone' | 'settingsEffortLow' | 'settingsEffortMedium' | 'settingsEffortHigh' | 'settingsEffortXhigh' | 'settingsEffortMax';
 type VerbosityKey = 'settingsVerbosityLow' | 'settingsVerbosityMedium' | 'settingsVerbosityHigh';
 type ModelKey = 'settingsModelLuna6' | 'settingsModelSol6' | 'settingsModelAstra6' | 'settingsModelSol' | 'settingsModelTerra' | 'settingsModelLuna';
-type SettingsErrorKey = 'settingsErrorUnknownModel' | 'settingsErrorInvalidEffort' | 'settingsErrorInvalidVerbosity' | 'settingsErrorCharacterRequired';
 
 const EFFORT_LABELS: Record<string, EffortKey> = {
   auto: 'settingsEffortAuto',
@@ -36,14 +35,6 @@ const MODEL_DESCRIPTIONS: Record<string, ModelKey> = {
   'gpt-5.6-luna': 'settingsModelLuna',
 };
 
-/** Server error codes from /api/web/settings/model → localized client text. */
-const SETTINGS_ERROR_LABELS: Record<string, SettingsErrorKey> = {
-  unknown_model: 'settingsErrorUnknownModel',
-  invalid_reasoning_effort: 'settingsErrorInvalidEffort',
-  invalid_verbosity: 'settingsErrorInvalidVerbosity',
-  character_required: 'settingsErrorCharacterRequired',
-};
-
 export function SettingsScreen({ csrfToken, onMenu }: Props) {
   const { t } = useI18n();
   const [payload, setPayload] = useState<ModelSettingsPayload | null>(null);
@@ -62,12 +53,10 @@ export function SettingsScreen({ csrfToken, onMenu }: Props) {
     setVerbosity(next.settings.verbosity);
   };
 
-  const describeError = useCallback((reason: unknown): string => {
-    if (reason instanceof ApiRequestError && reason.code && SETTINGS_ERROR_LABELS[reason.code]) {
-      return t(SETTINGS_ERROR_LABELS[reason.code]!);
-    }
-    return reason instanceof Error ? reason.message : t('requestFailed');
-  }, [t]);
+  // Codes are localized once in api.ts, so the message is already in the
+  // viewer locale by the time it reaches a screen.
+  const describeError = useCallback((reason: unknown): string =>
+    reason instanceof Error ? reason.message : t('requestFailed'), [t]);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);

@@ -6,6 +6,7 @@ import { config } from '../../src/config.js';
 import { SCHEMA_SQL } from '../../src/db/schema.js';
 import { runMigrations } from '../../src/db/migrations.js';
 import { registerProfileRoutes } from '../../src/web/profile-routes.js';
+import { resolveAssetLineage } from '../../src/assets/asset-lineage.js';
 import {
   createWebSession,
   resetWebSessionCreationGuardForTests,
@@ -127,6 +128,14 @@ function seedSde(): void {
   insertType(SKILL_GUNNERY, 'Gunnery', null, {});
 }
 
+function characterLineage(characterId: number) {
+  const link = db.prepare(
+    'SELECT user_id, chat_id FROM eve_character_links WHERE character_id = ? ORDER BY chat_id LIMIT 1',
+  ).get(characterId) as { user_id: number; chat_id: number } | undefined;
+  if (!link) throw new Error(`No linked character fixture for ${characterId}`);
+  return resolveAssetLineage(db, characterId, link.user_id, link.chat_id);
+}
+
 function insertAsset(
   characterId: number,
   itemId: number,
@@ -134,13 +143,16 @@ function insertAsset(
   locationId: number,
   options: { locationType?: string; quantity?: number; isBlueprintCopy?: number } = {},
 ): void {
+  const lineage = characterLineage(characterId);
   db.prepare(`
     INSERT INTO character_assets (
-      character_id, item_id, type_id, location_id, location_type, location_flag,
+      character_id, item_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+      type_id, location_id, location_type, location_flag,
       quantity, is_singleton, is_blueprint_copy, data_json, synced_at
-    ) VALUES (?, ?, ?, ?, ?, 'Hangar', ?, 0, ?, '{}', datetime('now'))
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Hangar', ?, 0, ?, '{}', datetime('now'))
   `).run(
-    characterId, itemId, typeId, locationId,
+    characterId, itemId, lineage.ownerUserId, lineage.ownerChatId, lineage.bindingEpoch, lineage.bindingDigest,
+    typeId, locationId,
     options.locationType ?? 'station',
     options.quantity ?? 1,
     options.isBlueprintCopy ?? 0,
@@ -203,7 +215,7 @@ describe('profile routes access', () => {
   it('rejects requests without a browser session', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/web/profile/assets' });
     expect(response.statusCode).toBe(401);
-    expect(response.json()).toEqual({ error: 'Сессия истекла. Обновите страницу.' });
+    expect(response.json()).toEqual({ error: 'session_expired' });
   });
 
   it('returns 404 when the session has no linked character', async () => {
@@ -214,7 +226,7 @@ describe('profile routes access', () => {
       headers: { cookie: session.cookie },
     });
     expect(response.statusCode).toBe(404);
-    expect(response.json()).toEqual({ error: 'Персонаж не подключён.' });
+    expect(response.json()).toEqual({ error: 'character_not_linked' });
   });
 });
 
@@ -764,7 +776,7 @@ describe('profile sync route', () => {
       payload: {},
     });
     expect(response.statusCode).toBe(403);
-    expect(response.json()).toEqual({ error: 'Проверка безопасности запроса не пройдена.' });
+    expect(response.json()).toEqual({ error: 'csrf_check_failed' });
   });
 
   it('rejects unknown dataset ids', async () => {
@@ -777,7 +789,7 @@ describe('profile sync route', () => {
       payload: { datasets: ['assets', 'not_a_dataset'] },
     });
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ error: 'Неизвестный набор данных: not_a_dataset.' });
+    expect(response.json()).toEqual({ error: 'unknown_dataset' });
   });
 
   it('refreshes due datasets for the active character only', async () => {
@@ -900,7 +912,7 @@ describe('profile sync route', () => {
       expect(response.statusCode).toBe(503);
       expect(response.headers['retry-after']).toBe('60');
       const payload = response.json() as { error: string; statuses: Array<Record<string, unknown>> };
-      expect(payload.error).toContain('не уложилась');
+      expect(payload.error).toContain('sync_timeout');
       expect(payload.statuses).toHaveLength(1);
       expect(payload.statuses[0]).toMatchObject({ dataset: 'assets' });
       // The sync was really stopped: the dataset is not 'ok'.
@@ -916,15 +928,20 @@ describe('profile routes hardening', () => {
     seedSde();
     const session = browserSession();
     linkCharacter(session, CHARACTER_A, 'Pilot A');
+    const lineage = characterLineage(CHARACTER_A);
     const insert = db.prepare(`
       INSERT INTO character_assets (
-        character_id, item_id, type_id, location_id, location_type, location_flag,
+        character_id, item_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+        type_id, location_id, location_type, location_flag,
         quantity, is_singleton, is_blueprint_copy, data_json, synced_at
-      ) VALUES (?, ?, ?, ?, 'station', 'Hangar', 1, 0, 0, '{}', datetime('now'))
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'station', 'Hangar', 1, 0, 0, '{}', datetime('now'))
     `);
     db.transaction(() => {
       for (let itemId = 1; itemId <= 40_000; itemId += 1) {
-        insert.run(CHARACTER_A, itemId, TRITANIUM, JITA_STATION);
+        insert.run(
+          CHARACTER_A, itemId, lineage.ownerUserId, lineage.ownerChatId,
+          lineage.bindingEpoch, lineage.bindingDigest, TRITANIUM, JITA_STATION,
+        );
       }
     })();
 

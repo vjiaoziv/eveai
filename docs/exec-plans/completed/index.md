@@ -13,3 +13,4 @@
 - [osint-zkill-hardening.md](./osint-zkill-hardening.md): stronger OSINT source quality via direct zKill entity feeds, public ESI killmail enrichment, and sharper noise filtering for residence/staging analysis.
 - [security-hardening-full.md](./security-hardening-full.md): multi-user auth isolation, Telegram ingress hardening, prompt-safe profile context, fragment-based web handoff, and retained-state cleanup from the threat model.
 - [telegram-region-moons-debug.md](./telegram-region-moons-debug.md): runtime investigation for the `Сколько лун в моем регионе` Telegram failure, with live-context region enrichment and provider/tool-state recovery notes.
+- [trading-system-implementation.md](./trading-system-implementation.md): completed P0-P7 trading-system design and implementation roadmap, retained as historical context.

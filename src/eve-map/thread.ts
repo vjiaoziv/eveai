@@ -91,7 +91,7 @@ export function appendAdvisory(
   db: Db,
   threadId: string,
   advisory: Advisory,
-  locale: 'ru' | 'en',
+  locale: 'zh' | 'ru' | 'en',
   authored: 'rule' | 'model' = 'rule',
   overrideText?: string,
 ): PerimeterMessage {
@@ -154,13 +154,14 @@ export function readPerimeterHistory(
 export function perimeterThreadTitle(
   db: Db,
   threadId: string,
-  locale: 'ru' | 'en',
+  locale: 'zh' | 'ru' | 'en',
 ): string {
   const row = db.prepare(`
     SELECT content FROM messages WHERE thread_id = ? AND role = 'user'
     ORDER BY id ASC LIMIT 1
   `).get(threadId) as { content: string } | undefined;
   if (row?.content.trim()) return row.content.trim().slice(0, 72);
+  if (locale === 'zh') return '周边空域';
   return locale === 'ru' ? 'Периметр' : 'Perimeter';
 }
 

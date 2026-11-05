@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../../src/db/migrations.js';
 import { RealOpportunityMatchService } from '../../src/assets/opportunity-match-service.js';
 import type { Db } from '../../src/db/sqlite.js';
+import { testAssetLineage } from '../helpers/asset-lineage.js';
 
 const CHARACTER_ID = 90000041;
 const OTHER_CHARACTER_ID = 90000042;
@@ -10,6 +11,8 @@ const JITA = 60003760;
 const AMARR = 60008494;
 const JITA_REGION = 10000002;
 const AMARR_REGION = 10000043;
+const LINEAGE = testAssetLineage(CHARACTER_ID);
+const OTHER_LINEAGE = testAssetLineage(OTHER_CHARACTER_ID);
 
 let db: Database.Database;
 
@@ -27,9 +30,13 @@ function insertAsset(itemId: number, typeId: number, quantity: number, locationI
   db.prepare(`
     INSERT INTO character_assets
       (character_id, item_id, type_id, location_id, location_type, location_flag,
-       quantity, is_singleton, is_blueprint_copy, data_json, synced_at)
-    VALUES (?, ?, ?, ?, 'station', 'Hangar', ?, 0, 0, '{}', datetime('now'))
-  `).run(CHARACTER_ID, itemId, typeId, locationId, quantity);
+       quantity, is_singleton, is_blueprint_copy, data_json, synced_at,
+       owner_user_id, owner_chat_id, binding_epoch, binding_digest)
+    VALUES (?, ?, ?, ?, 'station', 'Hangar', ?, 0, 0, '{}', datetime('now'), ?, ?, ?, ?)
+  `).run(
+    CHARACTER_ID, itemId, typeId, locationId, quantity,
+    LINEAGE.ownerUserId, LINEAGE.ownerChatId, LINEAGE.bindingEpoch, LINEAGE.bindingDigest,
+  );
 }
 
 function seedSnapshot(totalItems: number, totalQuantity: number, uniqueTypes: number): void {
@@ -37,11 +44,27 @@ function seedSnapshot(totalItems: number, totalQuantity: number, uniqueTypes: nu
     INSERT INTO real_asset_snapshots
       (snapshot_id, character_id, job_id, started_at, completed_at, status,
        total_items, total_unique_types, total_locations, total_quantity,
-       data_hash, source, is_latest)
+       data_hash, source, is_latest, owner_user_id, owner_chat_id, binding_epoch, binding_digest)
     VALUES ('SNAP-MATCH-1', ?, NULL, '2026-11-03T04:00:00.000Z',
        '2026-11-03T04:00:10.000Z', 'COMPLETED', ?, ?, 2, ?,
-       'hash-match-1', 'esi_character_assets', 1)
-  `).run(CHARACTER_ID, totalItems, uniqueTypes, totalQuantity);
+       'hash-match-1', 'esi_character_assets', 1, ?, ?, ?, ?)
+  `).run(
+    CHARACTER_ID, totalItems, uniqueTypes, totalQuantity,
+    LINEAGE.ownerUserId, LINEAGE.ownerChatId, LINEAGE.bindingEpoch, LINEAGE.bindingDigest,
+  );
+  db.prepare(`
+    INSERT INTO real_asset_snapshot_items
+      (snapshot_id, item_id, type_id, quantity, location_id, location_type,
+       location_flag, is_singleton, is_blueprint_copy, parent_item_id, raw_json)
+    SELECT 'SNAP-MATCH-1', item_id, type_id, COALESCE(quantity, 1), location_id,
+           location_type, location_flag, is_singleton, is_blueprint_copy, NULL, data_json
+    FROM character_assets
+    WHERE character_id = ?
+      AND owner_user_id = ? AND owner_chat_id = ? AND binding_epoch = ?
+    ORDER BY item_id
+  `).run(
+    CHARACTER_ID, LINEAGE.ownerUserId, LINEAGE.ownerChatId, LINEAGE.bindingEpoch,
+  );
 }
 
 function insertOpportunity(input: {
@@ -58,6 +81,8 @@ function insertOpportunity(input: {
   const buyLocationId = input.buyLocationId ?? JITA;
   const buyRegionId = input.buyRegionId ?? JITA_REGION;
   const required = input.required ?? 10;
+  const characterId = input.characterId ?? CHARACTER_ID;
+  const lineage = characterId === CHARACTER_ID ? LINEAGE : OTHER_LINEAGE;
   db.prepare(`
     INSERT INTO p9_real_opportunities
       (opportunity_id, character_id, scan_key, strategy, type_id,
@@ -66,16 +91,19 @@ function insertOpportunity(input: {
        purchase_amount, sales_revenue, broker_fees, sales_tax,
        theoretical_gross_profit, executable_gross_profit, fee_net_profit,
        capital_required, roi_pct, buy_snapshot_id, sell_snapshot_id,
-       calculation_version, original_snapshot_json, state, detected_at, expires_at)
+       calculation_version, original_snapshot_json, state, detected_at, expires_at,
+       owner_user_id, owner_chat_id, binding_epoch, binding_digest)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 10, 12, ?, ?, 100, 120, 1, 1,
        20, 18, ?, 100, 10, 'BUY-SNAP', 'SELL-SNAP', 'test-v1', '{}', ?,
-       '2026-11-03T04:00:00.000Z', '2027-01-01T00:00:00.000Z')
+       '2026-11-03T04:00:00.000Z', '2027-01-01T00:00:00.000Z', ?, ?, ?, ?)
   `).run(
-    input.id, input.characterId ?? CHARACTER_ID, `scan:${input.id}`,
+    input.id, characterId, `scan:${input.id}`,
     input.strategy ?? 'station_arbitrage', input.typeId,
     buyLocationId, AMARR, buyRegionId, AMARR_REGION,
     required, required, input.feeNet ?? 1000,
     input.state ?? 'NEW',
+    lineage.ownerUserId, lineage.ownerChatId ?? 0,
+    lineage.bindingEpoch, lineage.bindingDigest,
   );
 }
 
@@ -133,7 +161,7 @@ describe('real inventory to opportunity matching (P9.2.6)', () => {
       id: 'OPP-HAUL', typeId: 591, strategy: 'regional_hauling', required: 5, state: 'WATCHING',
     });
 
-    const result = RealOpportunityMatchService.recompute(db as Db, CHARACTER_ID);
+    const result = RealOpportunityMatchService.recompute(db as Db, CHARACTER_ID, LINEAGE);
     expect(result.computed).toBe(6);
     const byId = new Map(result.matches.map((match) => [match.opportunityId, match]));
 
@@ -182,7 +210,7 @@ describe('real inventory to opportunity matching (P9.2.6)', () => {
       marketTradable: true,
     });
 
-    const listed = RealOpportunityMatchService.list(db as Db, CHARACTER_ID, { supportClass: 'SUPPORTED' });
+    const listed = RealOpportunityMatchService.list(db as Db, CHARACTER_ID, LINEAGE, { supportClass: 'SUPPORTED' });
     expect(listed.total).toBe(2);
     expect(listed.rows.every((row) => row.support_class === 'SUPPORTED')).toBe(true);
     expect(listed.rows[0].supportClassZh).toBe('库存可支持');
@@ -190,9 +218,9 @@ describe('real inventory to opportunity matching (P9.2.6)', () => {
 
     // Terminal opportunity states drop their old linkage on the next recompute.
     db.prepare("UPDATE p9_real_opportunities SET state = 'REJECTED' WHERE opportunity_id = 'OPP-S2'").run();
-    const afterReject = RealOpportunityMatchService.recompute(db as Db, CHARACTER_ID);
+    const afterReject = RealOpportunityMatchService.recompute(db as Db, CHARACTER_ID, LINEAGE);
     expect(afterReject.matches.some((match) => match.opportunityId === 'OPP-S2')).toBe(false);
-    expect(RealOpportunityMatchService.list(db as Db, CHARACTER_ID).total).toBe(5);
+    expect(RealOpportunityMatchService.list(db as Db, CHARACTER_ID, LINEAGE).total).toBe(5);
   });
 
   it('keeps UNKNOWN when the current set does not match the latest complete snapshot', () => {
@@ -201,11 +229,35 @@ describe('real inventory to opportunity matching (P9.2.6)', () => {
     seedMarketOrder(34);
     insertOpportunity({ id: 'OPP-STALE-SET', typeId: 34, required: 10 });
 
-    // Corrupt only the snapshot header: linkage must not trust the current set.
-    db.prepare('UPDATE real_asset_snapshots SET total_quantity = 999 WHERE snapshot_id = ?')
+    // Corrupt the persisted item set: linkage must not trust the current set.
+    db.prepare('UPDATE real_asset_snapshot_items SET quantity = quantity + 1 WHERE snapshot_id = ?')
       .run('SNAP-MATCH-1');
 
-    const result = RealOpportunityMatchService.recompute(db as Db, CHARACTER_ID);
+    const result = RealOpportunityMatchService.recompute(db as Db, CHARACTER_ID, LINEAGE);
+    expect(result.matches[0]).toMatchObject({
+      supportClass: 'UNKNOWN',
+      heldQuantity: 0,
+      accessibleQuantity: 0,
+      snapshotId: null,
+    });
+    const quality = result.matches[0].locations.find((row) => 'dataQuality' in row) as any;
+    expect(quality.dataQuality.consistentCurrentSnapshot).toBe(false);
+  });
+
+  it('rejects different item sets when aggregate counts, quantities, and type counts match', () => {
+    insertAsset(1, 34, 1, JITA);
+    insertAsset(2, 35, 9, JITA);
+    seedSnapshot(2, 10, 2);
+
+    // Replace A+B with C+D. The aggregate header values remain identical, but
+    // neither the item identities nor the held type IDs are the same.
+    db.prepare('DELETE FROM character_assets WHERE character_id = ?').run(CHARACTER_ID);
+    insertAsset(3, 36, 1, JITA);
+    insertAsset(4, 37, 9, JITA);
+    seedMarketOrder(36);
+    insertOpportunity({ id: 'OPP-ITEM-SET', typeId: 36, required: 1 });
+
+    const result = RealOpportunityMatchService.recompute(db as Db, CHARACTER_ID, LINEAGE);
     expect(result.matches[0]).toMatchObject({
       supportClass: 'UNKNOWN',
       heldQuantity: 0,
@@ -223,10 +275,10 @@ describe('real inventory to opportunity matching (P9.2.6)', () => {
     insertOpportunity({ id: 'OPP-MINE', typeId: 34, required: 10 });
     insertOpportunity({ id: 'OPP-THEIRS', typeId: 34, required: 10, characterId: OTHER_CHARACTER_ID });
 
-    const mine = RealOpportunityMatchService.recompute(db as Db, CHARACTER_ID);
+    const mine = RealOpportunityMatchService.recompute(db as Db, CHARACTER_ID, LINEAGE);
     expect(mine.matches.map((match) => match.opportunityId)).toEqual(['OPP-MINE']);
 
-    const others = RealOpportunityMatchService.recompute(db as Db, OTHER_CHARACTER_ID);
+    const others = RealOpportunityMatchService.recompute(db as Db, OTHER_CHARACTER_ID, OTHER_LINEAGE);
     // The other character has their own opportunity but no snapshot: their row
     // is UNKNOWN and must never inherit THIS character's inventory.
     expect(others.matches.map((match) => match.opportunityId)).toEqual(['OPP-THEIRS']);
@@ -236,7 +288,7 @@ describe('real inventory to opportunity matching (P9.2.6)', () => {
       supportClass: 'UNKNOWN',
       snapshotId: null,
     });
-    const otherList = RealOpportunityMatchService.list(db as Db, OTHER_CHARACTER_ID);
+    const otherList = RealOpportunityMatchService.list(db as Db, OTHER_CHARACTER_ID, OTHER_LINEAGE);
     expect(otherList.total).toBe(1);
     expect(otherList.rows[0].opportunity_id).toBe('OPP-THEIRS');
   });

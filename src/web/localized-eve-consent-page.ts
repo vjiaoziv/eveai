@@ -6,7 +6,7 @@ import {
 } from '../eve/scopes.js';
 import { CONSENT_STYLES, EVE_ACCESS_GROUP_COPY } from './eve-consent.js';
 
-export type ConsentLocale = 'ru' | 'en';
+export type ConsentLocale = 'zh' | 'ru' | 'en';
 
 export function buildLocalizedEveConsentPage(
   state: string,
@@ -14,6 +14,7 @@ export function buildLocalizedEveConsentPage(
   error?: string,
 ): string {
   const ru = locale === 'ru';
+  const zh = locale === 'zh';
   const cancelPath = config.web.chatEnabled ? '/app' : '/health';
   const defaults = new Set<EveAccessGroupId>(DEFAULT_EVE_ACCESS_GROUPS);
   const groups = EVE_ACCESS_GROUP_IDS.map((groupId) => {
@@ -21,14 +22,20 @@ export function buildLocalizedEveConsentPage(
     return `<label class="access-card${copy.sensitive ? ' access-card--sensitive' : ''}">
       <input type="checkbox" name="access" value="${groupId}"${defaults.has(groupId) ? ' checked' : ''}>
       <span class="access-card__check" aria-hidden="true"></span>
-      <span class="access-card__copy"><strong>${escapeHtml(ru ? copy.ruTitle : copy.enTitle)}</strong><span>${escapeHtml(ru ? copy.ruDescription : copy.enDescription)}</span></span>
-      ${copy.sensitive ? `<em>${ru ? 'ДЕЙСТВИЯ' : 'WRITE'}</em>` : ''}
+        <span class="access-card__copy"><strong>${escapeHtml(zh ? copy.zhTitle : ru ? copy.ruTitle : copy.enTitle)}</strong><span>${escapeHtml(zh ? copy.zhDescription : ru ? copy.ruDescription : copy.enDescription)}</span></span>
+      ${copy.sensitive ? `<em>${zh ? '写操作' : ru ? 'ДЕЙСТВИЯ' : 'WRITE'}</em>` : ''}
     </label>`;
   }).join('');
-  const copy = ru ? RU : EN;
-  const switchLocale: ConsentLocale = ru ? 'en' : 'ru';
-  const switchLabel = ru ? 'EN' : 'RU';
-  const switchUrl = `/auth/eve/login?state=${encodeURIComponent(state)}&language=${switchLocale}`;
+  const copy = zh ? ZH : ru ? RU : EN;
+const LANGUAGE_LABELS: Record<ConsentLocale, string> = { zh: '中文', en: 'EN', ru: 'RU' };
+const otherLocaleLinks = (state: string, locale: ConsentLocale): string =>
+  (['zh', 'en', 'ru'] as ConsentLocale[])
+    .filter((item) => item !== locale)
+    .map((item) => {
+      const href = `/auth/eve/login?state=${encodeURIComponent(state)}&language=${item}`;
+      return `<a class="language-switch" href="${href}" hreflang="${item}">${LANGUAGE_LABELS[item]}</a>`;
+    })
+    .join(' ');
 
   return `<!doctype html>
 <html lang="${locale}">
@@ -41,7 +48,7 @@ export function buildLocalizedEveConsentPage(
 </head>
 <body>
   <main class="shell">
-    <header class="brand"><span class="brand__mark">✦</span><span>EVE <strong>AI</strong></span><span class="brand__step">EVE SSO · 01</span><a class="language-switch" href="${switchUrl}" hreflang="${switchLocale}">${switchLabel}</a></header>
+    <header class="brand"><span class="brand__mark">✦</span><span>EVE <strong>AI</strong></span><span class="brand__step">EVE SSO · 01</span>${otherLocaleLinks(state, locale)}</header>
     <section class="hero"><div><p class="eyebrow">${escapeHtml(copy.eyebrow)}</p><h1>${escapeHtml(copy.heading)}</h1></div><p class="lead">${escapeHtml(copy.lead)}</p></section>
     ${error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : ''}
     <form method="post" action="/auth/eve/consent" class="consent-form">
@@ -75,6 +82,20 @@ const RU = {
   acknowledgement: 'Я понимаю, какие данные будут запрошены и как выбранные данные использует EVE AI. Я разрешаю доступ только к отмеченным категориям.',
   continue: 'Продолжить в EVE SSO →', cancel: 'Отмена', revokePrefix: 'Доступ можно отозвать в',
   legal: 'EVE AI — стороннее приложение; оно не связано с CCP Games и не одобрено CCP.',
+};
+
+const ZH: typeof RU = {
+  pageTitle: 'EVE SSO 授权', eyebrow: '访问控制', heading: '由你决定副官能看到什么。',
+  lead: '所有私有类别均为可选。可取消任意勾选，或只保留角色身份登录。',
+  identityTitle: '角色登录', identityText: 'CCP 将提供所选角色的 ID 与名称，用于登录与档案关联。应用不会获取你的 EVE 密码。', always: '必需',
+  accessTitle: '选择私有数据', accessLead: '默认仅勾选导航。任何类别都可以不提供；写操作已单独标出。',
+  flowTitle: '数据如何被使用', server: '服务器', esiFlow: '所选数据仅通过官方 ESI 请求。访问与刷新令牌在服务器端加密存储。',
+  aiFlow: '普通请求可能将你的消息、对话上下文、已保存档案与所需工具结果发送给 AI 模型。EVE 令牌绝不会发送给模型。',
+  storageTitle: '存储', storageText: '服务器保存所选 scope、档案与聊天历史。退出登录会移除浏览器会话及其数据。',
+  limitsTitle: '访问限制', limitsText: '未选择某类别时，副官仍可使用公开数据，但依赖该 scope 的功能将不可用。',
+  acknowledgement: '我理解将请求哪些数据，以及 EVE AI 如何使用所选数据。我仅授权访问已勾选的类别。',
+  continue: '继续前往 EVE SSO →', cancel: '取消', revokePrefix: '可在此撤销授权：',
+  legal: 'EVE AI 是第三方应用，与 CCP Games 无隶属关系，也未获 CCP 认可。',
 };
 
 const EN: typeof RU = {

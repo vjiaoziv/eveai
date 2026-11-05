@@ -5,9 +5,11 @@ import { getLinkedCharacter } from '../eve/sso.js';
 import type { WebSession } from './web-session.js';
 import { P9OpportunityService } from '../trading/p9-opportunity-service.js';
 import { P9RealPortfolioService } from '../trading/p9-real-portfolio.js';
-import { P93FifoService } from '../trading/p9-3-fifo-service.js';
 import { P93LedgerService } from '../trading/p9-3-ledger-service.js';
 import type { P9OpportunityState, P9PlanStatus } from '../trading/p9-types.js';
+import { resolveAssetLineage } from '../assets/asset-lineage.js';
+import { realLedgerLineagePredicate } from '../trading/p9-3-lineage.js';
+import { p9LineagePredicate } from '../trading/p9-control-plane-lineage.js';
 
 function sessionContext(session: WebSession) {
   return { userId: session.userId, chatId: session.chatId };
@@ -16,10 +18,19 @@ function sessionContext(session: WebSession) {
 function linkedCharacter(db: Db, session: WebSession, reply: FastifyReply) {
   const char = getLinkedCharacter(db, sessionContext(session));
   if (!char) {
-    reply.status(404).send({ error: '尚未关联 EVE 角色，无法读取真实资产或记录交易。' });
+    reply.status(404).send({ error: 'p9_character_required' });
     return null;
   }
   return char;
+}
+
+function requireLineage(db: Db, session: WebSession, reply: FastifyReply, characterId: number) {
+  try {
+    return resolveAssetLineage(db, characterId, session.userId, session.chatId);
+  } catch {
+    reply.status(403).send({ error: 'character_asset_context_invalid' });
+    return null;
+  }
 }
 
 function text(body: Record<string, unknown>, key: string, fallback?: string): string {
@@ -62,7 +73,9 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
-    return { settings: P9OpportunityService.getSettings(db, char.characterId) };
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    return { settings: P9OpportunityService.getSettings(db, char.characterId, lineage) };
   });
 
   app.put('/api/web/trading/p9/settings', async (request, reply) => {
@@ -70,6 +83,8 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
       const body = asBody(request.body);
       const hubsRaw = body.hubs;
@@ -85,10 +100,10 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
         maxResults: body.maxResults == null ? undefined : integer(body, 'maxResults'),
         autoScanEnabled: body.autoScanEnabled == null ? undefined : Boolean(body.autoScanEnabled),
         autoScanIntervalMinutes: body.autoScanIntervalMinutes == null ? undefined : integer(body, 'autoScanIntervalMinutes'),
-      });
+      }, lineage);
       return { settings };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '配置保存失败。' });
+    } catch {
+      return reply.status(400).send({ error: 'config_save_failed' });
     }
   });
 
@@ -97,6 +112,8 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     const body = request.body && typeof request.body === 'object' && !Array.isArray(request.body)
       ? request.body as Record<string, unknown>
       : {};
@@ -104,7 +121,7 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     const typeIds = Array.isArray(rawTypeIds)
       ? rawTypeIds.map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0).slice(0, 500)
       : [];
-    const result = P9OpportunityService.scan(db, char.characterId, { typeIds });
+    const result = P9OpportunityService.scan(db, char.characterId, { typeIds }, lineage);
     if (result.errors.length > 0) return reply.status(500).send(result);
     return result;
   });
@@ -114,6 +131,8 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     const query = request.query;
     return P9OpportunityService.list(db, char.characterId, {
       state: query.state,
@@ -123,7 +142,7 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
       sort: query.sort,
       limit: query.limit ? Number(query.limit) : undefined,
       offset: query.offset ? Number(query.offset) : undefined,
-    });
+    }, lineage);
   });
 
   app.get<{ Params: { opportunityId: string } }>('/api/web/trading/p9/opportunities/:opportunityId', async (request, reply) => {
@@ -131,13 +150,15 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
-    const opportunity = P9OpportunityService.get(db, char.characterId, request.params.opportunityId);
-    if (!opportunity) return reply.status(404).send({ error: '机会不存在。' });
-    const plan = db.prepare('SELECT * FROM p9_trade_plans WHERE opportunity_id = ?').get(opportunity.opportunityId) as any;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    const opportunity = P9OpportunityService.get(db, char.characterId, request.params.opportunityId, lineage);
+    if (!opportunity) return reply.status(404).send({ error: 'p9_opportunity_not_found' });
+    const plan = P9OpportunityService.getPlanByOpportunity(db, char.characterId, opportunity.opportunityId, lineage);
     return {
       opportunity,
       originalSnapshot: opportunity.originalSnapshot,
-      plan: plan || null,
+      plan,
       executionDisabled: true,
     };
   });
@@ -146,13 +167,15 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
       const body = asBody(request.body);
       const state = text(body, 'state') as P9OpportunityState;
       const reason = typeof body.reason === 'string' ? body.reason : undefined;
-      return { opportunity: P9OpportunityService.transition(db, char.characterId, request.params.opportunityId, state, reason) };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '状态更新失败。' });
+      return { opportunity: P9OpportunityService.transition(db, char.characterId, request.params.opportunityId, state, reason, lineage) };
+    } catch {
+      return reply.status(400).send({ error: 'status_update_failed' });
     }
   });
 
@@ -161,15 +184,17 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
       const body = asBody(request.body);
       const plan = P9OpportunityService.createPlan(db, char.characterId, text(body, 'opportunityId'), {
         exitPlan: typeof body.exitPlan === 'string' ? body.exitPlan : undefined,
         notes: typeof body.notes === 'string' ? body.notes : undefined,
-      });
+      }, lineage);
       return { plan };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '交易方案生成失败。' });
+    } catch {
+      return reply.status(400).send({ error: 'plan_generation_failed' });
     }
   });
 
@@ -178,7 +203,9 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
-    return { plans: P9OpportunityService.listPlans(db, char.characterId, request.query.status) };
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    return { plans: P9OpportunityService.listPlans(db, char.characterId, request.query.status, lineage) };
   });
 
   app.patch<{ Params: { planId: string } }>('/api/web/trading/p9/plans/:planId', async (request, reply) => {
@@ -186,13 +213,15 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
       const body = asBody(request.body);
       const status = text(body, 'status') as P9PlanStatus;
       const note = typeof body.note === 'string' ? body.note : undefined;
-      return { plan: P9OpportunityService.transitionPlan(db, char.characterId, request.params.planId, status, note) };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '交易方案状态更新失败。' });
+      return { plan: P9OpportunityService.transitionPlan(db, char.characterId, request.params.planId, status, note, lineage) };
+    } catch {
+      return reply.status(400).send({ error: 'plan_status_update_failed' });
     }
   });
 
@@ -201,53 +230,28 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
-    const portfolio = P9RealPortfolioService.overview(db, char.characterId);
-    const accounting = P93FifoService.performance(db, char.characterId);
-    const ledgerSummary = P93LedgerService.summary(db, char.characterId);
-    const fifoLots = db.prepare(`
-      SELECT COUNT(*) AS lot_count,
-             SUM(CASE WHEN remaining_quantity > 0 THEN 1 ELSE 0 END) AS active_lot_count
-      FROM real_fifo_lots WHERE character_id = ?
-    `).get(char.characterId) as any;
-    const settings = P9OpportunityService.getSettings(db, char.characterId);
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    const portfolio = P9RealPortfolioService.overview(db, char.characterId, lineage);
+    const ledgerSummary = P93LedgerService.summary(db, char.characterId, lineage);
+    const settings = P9OpportunityService.getSettings(db, char.characterId, lineage);
+    const opportunityOwner = p9LineagePredicate(null, lineage);
     const latestJob = db.prepare(`
-      SELECT * FROM p9_job_runs WHERE character_id = ? AND job_type = 'market_scan'
+      SELECT * FROM p9_job_runs
+      WHERE character_id = ? AND job_type = 'market_scan' AND ${opportunityOwner.sql}
       ORDER BY started_at DESC LIMIT 1
-    `).get(char.characterId) as any;
+    `).get(char.characterId, ...opportunityOwner.params) as any;
     const riskRows = db.prepare(`
       SELECT risk_level, state, COUNT(*) AS count
-      FROM p9_real_opportunities WHERE character_id = ?
+      FROM p9_real_opportunities
+      WHERE character_id = ? AND ${opportunityOwner.sql}
       GROUP BY risk_level, state
-    `).all(char.characterId) as any[];
+    `).all(char.characterId, ...opportunityOwner.params) as any[];
     return {
-      portfolio: {
-        ...portfolio,
-        funding: {
-          ...portfolio.funding,
-          knownInventoryCost: accounting.inventoryCost,
-          unknownInventoryExitValue: null,
-          note: 'REAL 财务指标来自 P9.3 已核实 FIFO；PAPER 不进入本统计。',
-        },
-        inventory: {
-          ...portfolio.inventory,
-          lotCount: Number(fifoLots?.active_lot_count || 0),
-          knownCost: accounting.inventoryCost,
-          unknownLotCount: accounting.unknownCostCount,
-          unknownExitValue: null,
-        },
-        performance: {
-          realizedNetPnl: accounting.realizedPnl,
-          knownRealizedPnl: accounting.knownRealizedPnl,
-          feesPaid: accounting.totalFees,
-          unrealizedPnl: accounting.unrealizedPnl,
-          tradeCount: accounting.tradeCount,
-          profitableTradeRatio: accounting.profitableTradeRatio,
-          averageHoldingDays: accounting.averageHoldingDays,
-        },
-      },
+      portfolio,
       ledgerSummary,
       trades: {
-        count: accounting.tradeCount,
+        count: portfolio.performance.tradeCount,
         verified: ledgerSummary.rows,
       },
       settings,
@@ -268,7 +272,7 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
       : requireMutationSession(db, request, reply);
     if (!session) return;
     return reply.status(410).send({
-      error: '旧 P9 真实交易/库存账本接口已停用。请使用 /api/web/trading/p9/real-ledger。',
+      error: 'p9_legacy_ledger_retired',
       replacement: '/api/web/trading/p9/real-ledger',
     });
   };
@@ -290,22 +294,29 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    const ledgerOwnership = realLedgerLineagePredicate(null, lineage);
+    const opportunityOwner = p9LineagePredicate(null, lineage);
+    const aliasedOpportunityOwner = p9LineagePredicate('o', lineage);
     const flags = db.prepare(`
       SELECT value AS flag, COUNT(*) AS count
-      FROM p9_real_opportunities, json_each(p9_real_opportunities.risk_flags_json)
-      WHERE character_id = ?
+      FROM p9_real_opportunities o, json_each(o.risk_flags_json)
+      WHERE o.character_id = ? AND ${aliasedOpportunityOwner.sql}
       GROUP BY value
       ORDER BY count DESC
-    `).all(char.characterId) as any[];
+    `).all(char.characterId, ...aliasedOpportunityOwner.params) as any[];
     const stale = db.prepare(`
       SELECT state, COUNT(*) AS count FROM p9_real_opportunities
-      WHERE character_id = ? AND (state IN ('STALE', 'EXPIRED') OR data_fresh = 0)
+      WHERE character_id = ? AND ${opportunityOwner.sql}
+        AND (state IN ('STALE', 'EXPIRED') OR data_fresh = 0)
       GROUP BY state
-    `).all(char.characterId) as any[];
+    `).all(char.characterId, ...opportunityOwner.params) as any[];
     const unknownCosts = db.prepare(`
       SELECT COUNT(*) AS lots FROM real_fifo_lots
-      WHERE character_id = ? AND remaining_quantity > 0 AND cost_status <> 'KNOWN'
-    `).get(char.characterId) as any;
+      WHERE character_id = ? AND ${ledgerOwnership.sql}
+        AND remaining_quantity > 0 AND cost_status <> 'KNOWN'
+    `).get(char.characterId, ...ledgerOwnership.params) as any;
     const syncErrors = db.prepare(`
       SELECT dataset, status, error FROM character_sync_state
       WHERE character_id = ? AND status = 'error'
@@ -316,10 +327,10 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
       unknownInventoryLots: Number(unknownCosts?.lots || 0),
       syncErrors,
       controls: {
-        minNetProfit: P9OpportunityService.getSettings(db, char.characterId).minNetProfit,
-        minRoiPct: P9OpportunityService.getSettings(db, char.characterId).minRoiPct,
-        maxCapital: P9OpportunityService.getSettings(db, char.characterId).maxCapital,
-        maxMarketAgeMinutes: P9OpportunityService.getSettings(db, char.characterId).maxMarketAgeMinutes,
+        minNetProfit: P9OpportunityService.getSettings(db, char.characterId, lineage).minNetProfit,
+        minRoiPct: P9OpportunityService.getSettings(db, char.characterId, lineage).minRoiPct,
+        maxCapital: P9OpportunityService.getSettings(db, char.characterId, lineage).maxCapital,
+        maxMarketAgeMinutes: P9OpportunityService.getSettings(db, char.characterId, lineage).maxMarketAgeMinutes,
         realTradingExecutionDisabled: true,
       },
     };
@@ -330,12 +341,15 @@ export function registerP9Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    const owner = p9LineagePredicate(null, lineage);
     return {
       jobs: db.prepare(`
         SELECT * FROM p9_job_runs
-        WHERE character_id IS NULL OR character_id = ?
+        WHERE character_id = ? AND ${owner.sql}
         ORDER BY started_at DESC LIMIT 100
-      `).all(char.characterId),
+      `).all(char.characterId, ...owner.params),
     };
   });
 }

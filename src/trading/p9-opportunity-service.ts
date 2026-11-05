@@ -5,6 +5,7 @@ import { DataCenter } from './data-center.js';
 import { FeeEngine, ALPHA_DEFAULT_SKILLS, FEE_MODEL_VERSION } from './fee-engine.js';
 import { OrderBookSimulator } from './orderbook-simulator.js';
 import type { FeeContext, OrderBookLevel } from './types.js';
+import { p9LineagePredicate, p9LineageValues, type P9ControlPlaneLineage } from './p9-control-plane-lineage.js';
 import {
   canTransitionP9Opportunity,
   canTransitionP9Plan,
@@ -468,8 +469,15 @@ export function defaultP9Settings(characterId: number): P9ScanSettings {
 }
 
 export class P9OpportunityService {
-  public static getSettings(db: Db, characterId: number): P9ScanSettings {
-    const row = db.prepare('SELECT * FROM p9_scan_settings WHERE character_id = ?').get(characterId) as any;
+  public static getSettings(
+    db: Db,
+    characterId: number,
+    lineage?: P9ControlPlaneLineage | null,
+  ): P9ScanSettings {
+    const owner = p9LineagePredicate(null, lineage);
+    const row = db.prepare(`
+      SELECT * FROM p9_scan_settings WHERE character_id = ? AND ${owner.sql}
+    `).get(characterId, ...owner.params) as any;
     if (!row) return defaultP9Settings(characterId);
     return {
       characterId,
@@ -486,8 +494,12 @@ export class P9OpportunityService {
     };
   }
 
-  public static saveSettings(db: Db, input: Partial<P9ScanSettings> & { characterId: number }): P9ScanSettings {
-    const current = this.getSettings(db, input.characterId);
+  public static saveSettings(
+    db: Db,
+    input: Partial<P9ScanSettings> & { characterId: number },
+    lineage?: P9ControlPlaneLineage | null,
+  ): P9ScanSettings {
+    const current = this.getSettings(db, input.characterId, lineage);
     const hubs = input.hubs ?? current.hubs;
     if (!Array.isArray(hubs) || hubs.length === 0 || hubs.length > 20 || hubs.some((hub) => !validHub(hub))) {
       throw new Error('贸易中心配置无效：需要 1-20 个包含 locationId、regionId、name 的地点。');
@@ -527,12 +539,15 @@ export class P9OpportunityService {
       autoScanIntervalMinutes: Math.max(5, Math.min(1440, Number(input.autoScanIntervalMinutes ?? current.autoScanIntervalMinutes))),
       updatedAt: isoNow(),
     };
+    const ownerValues = p9LineageValues(lineage);
     db.prepare(`
       INSERT INTO p9_scan_settings
-        (character_id, hubs_json, strategies_json, min_net_profit, min_roi_pct, max_capital,
+        (character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         hubs_json, strategies_json, min_net_profit, min_roi_pct, max_capital,
          max_market_age_minutes, max_results, auto_scan_enabled, auto_scan_interval_minutes, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(character_id) DO UPDATE SET
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(character_id, owner_user_id, owner_chat_id, binding_epoch) DO UPDATE SET
+        binding_digest = excluded.binding_digest,
         hubs_json = excluded.hubs_json,
         strategies_json = excluded.strategies_json,
         min_net_profit = excluded.min_net_profit,
@@ -545,6 +560,7 @@ export class P9OpportunityService {
         updated_at = excluded.updated_at
     `).run(
       next.characterId,
+      ...ownerValues,
       JSON.stringify(next.hubs),
       JSON.stringify(next.strategies),
       next.minNetProfit,
@@ -559,13 +575,40 @@ export class P9OpportunityService {
     return next;
   }
 
-  private static upsert(db: Db, opportunity: P9Opportunity): void {
-    const existing = db.prepare('SELECT state FROM p9_real_opportunities WHERE opportunity_id = ?').get(opportunity.opportunityId) as any;
+  private static scopeOpportunity(
+    opportunity: P9Opportunity,
+    lineage?: P9ControlPlaneLineage | null,
+  ): P9Opportunity {
+    if (!lineage) return opportunity;
+    const [ownerUserId, ownerChatId, bindingEpoch] = p9LineageValues(lineage);
+    const domain = `${ownerUserId}:${ownerChatId}:${bindingEpoch}`;
+    const logicalKey = opportunity.scanKey;
+    return {
+      ...opportunity,
+      scanKey: `${domain}|${logicalKey}`,
+      opportunityId: 'P9OPP-' + createHash('sha256')
+        .update(`${domain}|${opportunity.characterId}|${logicalKey}`)
+        .digest('hex')
+        .slice(0, 20),
+    };
+  }
+
+  private static upsert(
+    db: Db,
+    opportunity: P9Opportunity,
+    lineage?: P9ControlPlaneLineage | null,
+  ): void {
+    const owner = p9LineagePredicate(null, lineage);
+    const existing = db.prepare(`
+      SELECT state FROM p9_real_opportunities
+      WHERE opportunity_id = ? AND ${owner.sql}
+    `).get(opportunity.opportunityId, ...owner.params) as any;
     const state = existing?.state === 'ARCHIVED' ? 'ARCHIVED' : opportunity.state;
-    const placeholders = Array.from({ length: 54 }, () => '?').join(', ');
+    const placeholders = Array.from({ length: 58 }, () => '?').join(', ');
     const values = [
       opportunity.opportunityId,
       opportunity.characterId,
+      ...p9LineageValues(lineage),
       opportunity.scanKey,
       opportunity.strategy,
       opportunity.typeId,
@@ -621,7 +664,8 @@ export class P9OpportunityService {
     ];
     const sql = `
       INSERT INTO p9_real_opportunities (
-        opportunity_id, character_id, scan_key, strategy, type_id, type_name_en, type_name_zh,
+        opportunity_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+        scan_key, strategy, type_id, type_name_en, type_name_zh,
         buy_location_id, buy_location_name, sell_location_id, sell_location_name,
         buy_region_id, sell_region_id, buy_price, sell_price, suggested_quantity, executable_quantity,
         purchase_amount, sales_revenue, broker_fees, sales_tax, other_fees,
@@ -634,6 +678,7 @@ export class P9OpportunityService {
         calculation_version, original_snapshot_json, state, detected_at, updated_at, expires_at
       ) VALUES (${placeholders})
       ON CONFLICT(character_id, scan_key) DO UPDATE SET
+        binding_digest = excluded.binding_digest,
         type_name_en = excluded.type_name_en,
         type_name_zh = excluded.type_name_zh,
         buy_location_name = excluded.buy_location_name,
@@ -686,26 +731,41 @@ export class P9OpportunityService {
    * SQLite's datetime('now') ("YYYY-MM-DD HH:MM:SS") never matches because of
    * the separator, so normalize before comparing.
    */
-  public static expireDue(db: Db, characterId: number): number {
+  public static expireDue(
+    db: Db,
+    characterId: number,
+    lineage?: P9ControlPlaneLineage | null,
+  ): number {
+    const owner = p9LineagePredicate(null, lineage);
     const result = db.prepare(`
       UPDATE p9_real_opportunities
       SET state = CASE WHEN state IN ('NEW', 'WATCHING', 'ACTIONABLE', 'STALE') THEN 'EXPIRED' ELSE state END,
           updated_at = datetime('now')
-      WHERE character_id = ?
+      WHERE character_id = ? AND ${owner.sql}
         AND datetime(substr(replace(expires_at, 'T', ' '), 1, 19)) < datetime('now')
         AND state NOT IN ('EXPIRED', 'ARCHIVED')
-    `).run(characterId);
+    `).run(characterId, ...owner.params);
     return result.changes;
   }
 
-  public static scan(db: Db, characterId: number, options: { typeIds?: number[] } = {}): { scanned: number; stored: number; jobRunId: string; errors: string[] } {
+  public static scan(
+    db: Db,
+    characterId: number,
+    options: { typeIds?: number[] } = {},
+    lineage?: P9ControlPlaneLineage | null,
+  ): { scanned: number; stored: number; jobRunId: string; errors: string[] } {
     const jobId = 'P9JOB-' + Date.now() + '-' + randomUUID().slice(0, 8);
-    db.prepare(`INSERT INTO p9_job_runs (job_id, job_type, character_id, status) VALUES (?, 'market_scan', ?, 'running')`).run(jobId, characterId);
+    const ownerValues = p9LineageValues(lineage);
+    db.prepare(`
+      INSERT INTO p9_job_runs
+        (job_id, job_type, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest, status)
+      VALUES (?, 'market_scan', ?, ?, ?, ?, ?, 'running')
+    `).run(jobId, characterId, ...ownerValues);
     const errors: string[] = [];
     let stored = 0;
     let scanned = 0;
     try {
-      const settings = this.getSettings(db, characterId);
+      const settings = this.getSettings(db, characterId, lineage);
       const enabledHubs = settings.hubs.filter((hub) => hub.enabled !== false);
       if (enabledHubs.length === 0) throw new Error('没有启用的贸易中心。');
       const requestedTypeIds = [...new Set((options.typeIds || [])
@@ -742,25 +802,29 @@ export class P9OpportunityService {
       const selected = candidates.slice(0, settings.maxResults);
       const tx = db.transaction(() => {
         for (const opportunity of selected) {
-          this.upsert(db, opportunity);
+          this.upsert(db, this.scopeOpportunity(opportunity, lineage), lineage);
           stored += 1;
         }
-        this.expireDue(db, characterId);
+        this.expireDue(db, characterId, lineage);
       });
       tx();
       const summary = { scanned, stored, errors };
+      const owner = p9LineagePredicate(null, lineage);
       db.prepare(`
         UPDATE p9_job_runs
         SET status = 'ok', finished_at = datetime('now'), summary_json = ?
-        WHERE job_id = ?
-      `).run(JSON.stringify(summary), jobId);
+        WHERE job_id = ? AND ${owner.sql}
+      `).run(JSON.stringify(summary), jobId, ...owner.params);
       return { ...summary, jobRunId: jobId };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       errors.push(message);
+      const owner = p9LineagePredicate(null, lineage);
       db.prepare(`
-        UPDATE p9_job_runs SET status = 'error', finished_at = datetime('now'), error = ? WHERE job_id = ?
-      `).run(message, jobId);
+        UPDATE p9_job_runs
+        SET status = 'error', finished_at = datetime('now'), error = ?
+        WHERE job_id = ? AND ${owner.sql}
+      `).run(message, jobId, ...owner.params);
       return { scanned, stored, jobRunId: jobId, errors };
     }
   }
@@ -777,9 +841,11 @@ export class P9OpportunityService {
       limit?: number;
       offset?: number;
     } = {},
+    lineage?: P9ControlPlaneLineage | null,
   ): { rows: P9Opportunity[]; total: number } {
-    const where: string[] = ['character_id = ?'];
-    const params: unknown[] = [characterId];
+    const owner = p9LineagePredicate(null, lineage);
+    const where: string[] = ['character_id = ?', owner.sql];
+    const params: unknown[] = [characterId, ...owner.params];
     if (filters.state) {
       where.push('state = ?');
       params.push(filters.state);
@@ -819,43 +885,80 @@ export class P9OpportunityService {
     return { rows: rows.map(mapOpportunity), total };
   }
 
-  public static get(db: Db, characterId: number, opportunityId: string): P9Opportunity | null {
-    const row = db.prepare('SELECT * FROM p9_real_opportunities WHERE character_id = ? AND opportunity_id = ?').get(characterId, opportunityId) as any;
+  public static get(
+    db: Db,
+    characterId: number,
+    opportunityId: string,
+    lineage?: P9ControlPlaneLineage | null,
+  ): P9Opportunity | null {
+    const owner = p9LineagePredicate(null, lineage);
+    const row = db.prepare(`
+      SELECT * FROM p9_real_opportunities
+      WHERE character_id = ? AND opportunity_id = ? AND ${owner.sql}
+    `).get(characterId, opportunityId, ...owner.params) as any;
     return row ? mapOpportunity(row) : null;
   }
 
-  public static transition(db: Db, characterId: number, opportunityId: string, next: P9OpportunityState, reason?: string): P9Opportunity {
-    const current = this.get(db, characterId, opportunityId);
+  public static transition(
+    db: Db,
+    characterId: number,
+    opportunityId: string,
+    next: P9OpportunityState,
+    reason?: string,
+    lineage?: P9ControlPlaneLineage | null,
+  ): P9Opportunity {
+    const current = this.get(db, characterId, opportunityId, lineage);
     if (!current) throw new Error('机会不存在。');
     if (!canTransitionP9Opportunity(current.state, next)) {
       throw new Error(`机会状态不能从 ${current.state} 转移到 ${next}。`);
     }
-    db.prepare(`UPDATE p9_real_opportunities SET state = ?, updated_at = datetime('now') WHERE opportunity_id = ? AND character_id = ?`)
-      .run(next, opportunityId, characterId);
+    const owner = p9LineagePredicate(null, lineage);
     db.prepare(`
-      INSERT INTO p9_trade_audit_events (character_id, plan_id, action, before_json, after_json, actor)
-      VALUES (?, NULL, 'opportunity_state', ?, ?, 'user')
-    `).run(characterId, JSON.stringify({ state: current.state, reason: reason || null }), JSON.stringify({ state: next }));
-    return this.get(db, characterId, opportunityId)!;
+      UPDATE p9_real_opportunities
+      SET state = ?, updated_at = datetime('now')
+      WHERE opportunity_id = ? AND character_id = ? AND ${owner.sql}
+    `).run(next, opportunityId, characterId, ...owner.params);
+    db.prepare(`
+      INSERT INTO p9_trade_audit_events
+        (character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         plan_id, action, before_json, after_json, actor)
+      VALUES (?, ?, ?, ?, ?, NULL, 'opportunity_state', ?, ?, 'user')
+    `).run(
+      characterId,
+      ...p9LineageValues(lineage),
+      JSON.stringify({ state: current.state, reason: reason || null }),
+      JSON.stringify({ state: next }),
+    );
+    return this.get(db, characterId, opportunityId, lineage)!;
   }
-  public static createPlan(db: Db, characterId: number, opportunityId: string, input?: { exitPlan?: string; notes?: string }): P9TradePlan {
-    const opportunity = this.get(db, characterId, opportunityId);
+  public static createPlan(
+    db: Db,
+    characterId: number,
+    opportunityId: string,
+    input?: { exitPlan?: string; notes?: string },
+    lineage?: P9ControlPlaneLineage | null,
+  ): P9TradePlan {
+    const opportunity = this.get(db, characterId, opportunityId, lineage);
     if (!opportunity) throw new Error('机会不存在。');
     if (opportunity.state === 'EXPIRED' || opportunity.state === 'REJECTED' || opportunity.state === 'ARCHIVED') {
       throw new Error('该机会当前不可生成交易方案。');
     }
-    const existing = db.prepare('SELECT * FROM p9_trade_plans WHERE opportunity_id = ?').get(opportunityId) as any;
+    const owner = p9LineagePredicate(null, lineage);
+    const existing = db.prepare(`
+      SELECT * FROM p9_trade_plans WHERE opportunity_id = ? AND ${owner.sql}
+    `).get(opportunityId, ...owner.params) as any;
     if (existing) return mapPlan(existing);
     const planId = 'P9PLAN-' + Date.now() + '-' + randomUUID().slice(0, 8);
     db.prepare(`
       INSERT INTO p9_trade_plans (
-        plan_id, character_id, opportunity_id, strategy, type_id, buy_location_id, sell_location_id,
+        plan_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+        opportunity_id, strategy, type_id, buy_location_id, sell_location_id,
         quantity, buy_price, sell_price, estimated_buy_cost, estimated_sell_revenue, estimated_fees,
         estimated_fee_net_profit, estimated_comprehensive_profit, comprehensive_status,
         capital_required, risk_flags_json, valid_until, exit_plan, notes, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PLANNED')
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PLANNED')
     `).run(
-      planId, characterId, opportunityId, opportunity.strategy, opportunity.typeId,
+      planId, characterId, ...p9LineageValues(lineage), opportunityId, opportunity.strategy, opportunity.typeId,
       opportunity.buyLocationId, opportunity.sellLocationId, opportunity.suggestedQuantity,
       opportunity.buyPrice, opportunity.sellPrice, opportunity.purchaseAmount, opportunity.salesRevenue,
       round2(opportunity.brokerFees + opportunity.salesTax + opportunity.otherFees),
@@ -865,15 +968,39 @@ export class P9OpportunityService {
       input?.notes || null,
     );
     db.prepare(`
-      INSERT INTO p9_trade_audit_events (character_id, plan_id, action, after_json, actor)
-      VALUES (?, ?, 'plan_created', ?, 'user')
-    `).run(characterId, planId, JSON.stringify({ opportunityId, status: 'PLANNED' }));
-    return mapPlan(db.prepare('SELECT * FROM p9_trade_plans WHERE plan_id = ?').get(planId) as any);
+      INSERT INTO p9_trade_audit_events
+        (character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         plan_id, action, after_json, actor)
+      VALUES (?, ?, ?, ?, ?, ?, 'plan_created', ?, 'user')
+    `).run(characterId, ...p9LineageValues(lineage), planId, JSON.stringify({ opportunityId, status: 'PLANNED' }));
+    return mapPlan(db.prepare(`
+      SELECT * FROM p9_trade_plans WHERE plan_id = ? AND ${owner.sql}
+    `).get(planId, ...owner.params) as any);
   }
 
-  public static listPlans(db: Db, characterId: number, status?: string): P9TradePlan[] {
-    const params: unknown[] = [characterId];
-    let sql = 'SELECT * FROM p9_trade_plans WHERE character_id = ?';
+  public static getPlanByOpportunity(
+    db: Db,
+    characterId: number,
+    opportunityId: string,
+    lineage?: P9ControlPlaneLineage | null,
+  ): P9TradePlan | null {
+    const owner = p9LineagePredicate(null, lineage);
+    const row = db.prepare(`
+      SELECT * FROM p9_trade_plans
+      WHERE character_id = ? AND opportunity_id = ? AND ${owner.sql}
+    `).get(characterId, opportunityId, ...owner.params) as any;
+    return row ? mapPlan(row) : null;
+  }
+
+  public static listPlans(
+    db: Db,
+    characterId: number,
+    status?: string,
+    lineage?: P9ControlPlaneLineage | null,
+  ): P9TradePlan[] {
+    const owner = p9LineagePredicate(null, lineage);
+    const params: unknown[] = [characterId, ...owner.params];
+    let sql = `SELECT * FROM p9_trade_plans WHERE character_id = ? AND ${owner.sql}`;
     if (status) {
       sql += ' AND status = ?';
       params.push(status);
@@ -882,17 +1009,41 @@ export class P9OpportunityService {
     return (db.prepare(sql).all(...params) as any[]).map(mapPlan);
   }
 
-  public static transitionPlan(db: Db, characterId: number, planId: string, next: P9PlanStatus, note?: string): P9TradePlan {
-    const row = db.prepare('SELECT * FROM p9_trade_plans WHERE plan_id = ? AND character_id = ?').get(planId, characterId) as any;
+  public static transitionPlan(
+    db: Db,
+    characterId: number,
+    planId: string,
+    next: P9PlanStatus,
+    note?: string,
+    lineage?: P9ControlPlaneLineage | null,
+  ): P9TradePlan {
+    const owner = p9LineagePredicate(null, lineage);
+    const row = db.prepare(`
+      SELECT * FROM p9_trade_plans
+      WHERE plan_id = ? AND character_id = ? AND ${owner.sql}
+    `).get(planId, characterId, ...owner.params) as any;
     if (!row) throw new Error('交易方案不存在。');
     if (!canTransitionP9Plan(row.status, next)) throw new Error(`交易方案状态不能从 ${row.status} 转移到 ${next}。`);
-    db.prepare(`UPDATE p9_trade_plans SET status = ?, notes = COALESCE(?, notes), updated_at = datetime('now') WHERE plan_id = ?`)
-      .run(next, note || null, planId);
     db.prepare(`
-      INSERT INTO p9_trade_audit_events (character_id, plan_id, action, before_json, after_json, actor)
-      VALUES (?, ?, 'plan_status', ?, ?, 'user')
-    `).run(characterId, planId, JSON.stringify({ status: row.status }), JSON.stringify({ status: next, note: note || null }));
-    return mapPlan(db.prepare('SELECT * FROM p9_trade_plans WHERE plan_id = ?').get(planId) as any);
+      UPDATE p9_trade_plans
+      SET status = ?, notes = COALESCE(?, notes), updated_at = datetime('now')
+      WHERE plan_id = ? AND ${owner.sql}
+    `).run(next, note || null, planId, ...owner.params);
+    db.prepare(`
+      INSERT INTO p9_trade_audit_events
+        (character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         plan_id, action, before_json, after_json, actor)
+      VALUES (?, ?, ?, ?, ?, ?, 'plan_status', ?, ?, 'user')
+    `).run(
+      characterId,
+      ...p9LineageValues(lineage),
+      planId,
+      JSON.stringify({ status: row.status }),
+      JSON.stringify({ status: next, note: note || null }),
+    );
+    return mapPlan(db.prepare(`
+      SELECT * FROM p9_trade_plans WHERE plan_id = ? AND ${owner.sql}
+    `).get(planId, ...owner.params) as any);
   }
 }
 

@@ -1,4 +1,5 @@
 import type { Db } from '../../db/sqlite.js';
+import { assetLineagePredicate, type AssetLineage } from '../../assets/asset-lineage.js';
 import {
   collectTableAliasTargets,
   extractCteNames,
@@ -312,13 +313,35 @@ function extractPlanReferences(detail: string): string[] {
   return [...references];
 }
 
-function createIsolationViews(db: Db, characterTables: ReadonlySet<string>, characterId: number): string[] {
+function createIsolationViews(
+  db: Db,
+  characterTables: ReadonlySet<string>,
+  characterId: number,
+  lineage?: AssetLineage,
+): string[] {
   const created: string[] = [];
+  const sqlLiteral = (value: unknown): string => {
+    const row = db.prepare('SELECT quote(?) AS value').get(value) as { value: string };
+    return row.value;
+  };
   for (const table of characterTables) {
     db.exec(`DROP VIEW IF EXISTS temp.${table}`);
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    const lineageSql = columns.some((column) => column.name === 'owner_user_id')
+      ? lineage
+        ? ` AND ${assetLineagePredicate(null, lineage).sql.replaceAll('?', () => '?')}`
+        : ' AND 0'
+      : '';
+    const lineageLiterals = lineage && lineageSql
+      ? assetLineagePredicate(null, lineage).params.map((value) => sqlLiteral(value))
+      : [];
+    let renderedLineageSql = lineageSql;
+    for (const literal of lineageLiterals) {
+      renderedLineageSql = renderedLineageSql.replace('?', literal);
+    }
     // The body MUST qualify main. explicitly: an unqualified self-reference
     // would resolve back to this temp view and be circular.
-    db.exec(`CREATE TEMP VIEW ${table} AS SELECT * FROM main.${table} WHERE character_id = ${characterId}`);
+    db.exec(`CREATE TEMP VIEW ${table} AS SELECT * FROM main.${table} WHERE character_id = ${characterId}${renderedLineageSql}`);
     created.push(table);
   }
   return created;
@@ -347,7 +370,12 @@ export function analyzeCharacterSqlTables(db: Db, sql: string): CharacterSqlAnal
  * Executes read-only SQL scoped to one character. characterId MUST come from
  * server-side session resolution (getLinkedCharacter), never from tool args.
  */
-export function executeCharacterSql(db: Db, sql: string, characterId: number): CharacterSqlResult {
+export function executeCharacterSql(
+  db: Db,
+  sql: string,
+  characterId: number,
+  lineage?: AssetLineage,
+): CharacterSqlResult {
   if (!Number.isSafeInteger(characterId) || characterId <= 0) {
     return { ok: false, rows: [], count: 0, error: 'Invalid character context' };
   }
@@ -357,7 +385,7 @@ export function executeCharacterSql(db: Db, sql: string, characterId: number): C
     return { ok: false, rows: [], count: 0, error: statement.error };
   }
   const allowed = getAllowedObjects(db);
-  const viewNames = createIsolationViews(db, allowed.characterTables, characterId);
+  const viewNames = createIsolationViews(db, allowed.characterTables, characterId, lineage);
   try {
     const validation = validateCharacterSqlSources(db, statement.sql, allowed);
     if (!validation.ok) {

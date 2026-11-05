@@ -3,13 +3,15 @@ import { describe, expect, it } from 'vitest';
 import { P9_TAB_LABELS } from '../../web/src/components/P9TradingScreen.js';
 
 describe('P9 trading screen navigation contract', () => {
+  // The contract pins WHICH tabs exist, not their rendered wording: labels are
+  // TranslationKeys now so zh/en/ru can all satisfy the same contract.
   it('keeps the overview tab reachable alongside the active P9.3 tabs', () => {
     expect(P9_TAB_LABELS).toMatchObject({
-      overview: '交易总览',
-      accounting: 'REAL 账本',
-      opportunities: '机会中心',
-      plans: '交易方案',
-      settings: '系统设置',
+      overview: 'p93TabOverview',
+      accounting: 'p9RealLedger',
+      opportunities: 'paperTabOpportunities',
+      plans: 'p9Plans',
+      settings: 'p9SystemSettings',
     });
     expect(Object.keys(P9_TAB_LABELS)).toEqual([
       'overview',
@@ -42,11 +44,11 @@ describe('P9 trading screen navigation contract', () => {
 
   it('localizes market AI provider failures instead of showing raw server text', () => {
     const component = readFileSync(new URL('../../web/src/components/market/MarketAiSearch.tsx', import.meta.url), 'utf8');
-    const i18n = readFileSync(new URL('../../web/src/i18n.tsx', import.meta.url), 'utf8');
+    const dictionary = readFileSync(new URL('../../web/src/i18n-dictionary.ts', import.meta.url), 'utf8');
     expect(component).toContain("t('marketAiUnavailable')");
     expect(component).toContain("t('requestTooMany')");
-    expect(i18n.match(/marketAiUnavailable:/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
-    expect(i18n.match(/requestTooMany:/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(dictionary.match(/marketAiUnavailable:/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(dictionary.match(/requestTooMany:/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
   });
 
   it('keeps P9.3 tabs and wide audit tables contained on narrow screens', () => {

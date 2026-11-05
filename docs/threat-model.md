@@ -102,4 +102,4 @@ flowchart LR
 - Persistence: `src/db/`, `src/eve/user-profile-storage.ts`
 - Runtime ownership: `src/runtime/process-lock.ts`
 
-Related operational policy: [docs/SECURITY.md](./docs/SECURITY.md) and [docs/openai-integration.md](./docs/openai-integration.md).
+Related operational policy: [docs/SECURITY.md](./SECURITY.md) and [docs/openai-integration.md](./openai-integration.md).

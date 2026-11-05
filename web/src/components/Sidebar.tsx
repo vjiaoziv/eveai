@@ -41,9 +41,9 @@ export function Sidebar({
   const nav: Array<{ id: AppView; label: string; count?: number }> = [
     { id: 'chat', label: t('chat'), count: conversations.length },
     { id: 'market', label: t('market') },
-    { id: 'p9', label: 'REAL 交易账本' },
-    { id: 'assets', label: '资产库存' },
-    { id: 'trading', label: 'Paper Trading' },
+    { id: 'p9', label: t('navRealLedger') },
+    { id: 'assets', label: t('navAssetInventory') },
+    { id: 'trading', label: t('navPaperTrading') },
     { id: 'map', label: t('perimeter') },
     { id: 'profile', label: t('profile') },
     { id: 'examples', label: t('examples') },

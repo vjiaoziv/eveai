@@ -2,8 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import { FeeEngine, ALPHA_DEFAULT_SKILLS } from './fee-engine.js';
 import { getCharacterDatasetStatuses } from '../eve/character-sync.js';
+import { assetLineagePredicate, type AssetLineage } from '../assets/asset-lineage.js';
 import { activeOrders, assetLocations, locationItems, walletSummary } from '../web/profile-data.js';
 import type { P9InventoryLot } from './p9-types.js';
+import { P93FifoService } from './p9-3-fifo-service.js';
+import { P93LedgerService } from './p9-3-ledger-service.js';
+import { realLedgerLineagePredicate } from './p9-3-lineage.js';
+import { p9LineagePredicate } from './p9-control-plane-lineage.js';
 
 const DEFAULT_FEE_CONTEXT = {
   clone: 'alpha' as const,
@@ -34,11 +39,6 @@ function parseLot(row: any): P9InventoryLot {
   };
 }
 
-function typeName(db: Db, typeId: number): string | null {
-  const row = db.prepare('SELECT name FROM sde_types WHERE type_id = ?').get(typeId) as any;
-  return row?.name || null;
-}
-
 function exitValue(db: Db, typeId: number, locationId: number, quantity: number): { gross: number; net: number; depthLimited: boolean } {
   let remaining = quantity;
   let gross = 0;
@@ -64,14 +64,7 @@ function exitValue(db: Db, typeId: number, locationId: number, quantity: number)
 }
 
 export class P9RealPortfolioService {
-  public static listLots(db: Db, characterId: number): P9InventoryLot[] {
-    return (db.prepare(`
-      SELECT * FROM p9_inventory_lots
-      WHERE character_id = ? AND quantity > 0
-      ORDER BY acquired_at, lot_id
-    `).all(characterId) as any[]).map(parseLot);
-  }
-
+  /** @deprecated Retired legacy writer. Production REAL writes must use P93LedgerService. */
   public static upsertManualLot(
     db: Db,
     characterId: number,
@@ -149,37 +142,33 @@ export class P9RealPortfolioService {
     return parseLot(db.prepare('SELECT * FROM p9_inventory_lots WHERE lot_id = ?').get(lotId) as any);
   }
 
-  public static overview(db: Db, characterId: number) {
+  public static overview(db: Db, characterId: number, lineage: AssetLineage) {
+    const accounting = P93FifoService.performance(db, characterId, lineage);
+    const ledgerSummary = P93LedgerService.summary(db, characterId, lineage);
+    const ledgerOwnership = realLedgerLineagePredicate(null, lineage);
+    const fifoLots = db.prepare(`
+      SELECT COUNT(*) AS lot_count,
+             SUM(CASE WHEN remaining_quantity > 0 THEN 1 ELSE 0 END) AS active_lot_count
+      FROM real_fifo_lots
+      WHERE character_id = ? AND ${ledgerOwnership.sql}
+    `).get(characterId, ...ledgerOwnership.params) as any;
     const wallet = walletSummary(db, characterId);
     const orders = activeOrders(db, characterId, 500, 0);
-    const lots = this.listLots(db, characterId);
-    const knownCost = lots.reduce((sum, lot) => sum + (lot.costPerUnit == null ? 0 : lot.costPerUnit * lot.quantity), 0);
-    const unknownLots = lots.filter((lot) => lot.costPerUnit == null);
-    const unknownExitValue = unknownLots.reduce(
-      (sum, lot) => sum + exitValue(db, lot.typeId, lot.locationId, lot.quantity).net,
-      0,
-    );
-    const realized = db.prepare(`
-      SELECT COALESCE(SUM(realized_pnl), 0) AS value, COUNT(*) AS known_moves
-      FROM p9_inventory_moves WHERE character_id = ? AND realized_pnl IS NOT NULL
-    `).get(characterId) as any;
-    const unknownMoves = db.prepare(`
-      SELECT COUNT(*) AS n FROM p9_inventory_moves
-      WHERE character_id = ? AND pnl_status = 'UNKNOWN_COST'
-    `).get(characterId) as any;
-    const trades = db.prepare(`
-      SELECT COUNT(*) AS count, COALESCE(SUM(fee), 0) AS fees
-      FROM p9_real_trades WHERE character_id = ?
-    `).get(characterId) as any;
+    const sync = getCharacterDatasetStatuses(db, characterId, ['wallet', 'assets', 'orders']);
+    const assetOwnership = assetLineagePredicate(null, lineage);
+    const rawAssetCount = Number((db.prepare(`
+      SELECT COUNT(*) AS n FROM character_assets
+      WHERE character_id = ? AND ${assetOwnership.sql}
+    `).get(characterId, ...assetOwnership.params) as any)?.n || 0);
+    const opportunityOwnership = p9LineagePredicate(null, lineage);
     const opportunities = db.prepare(`
       SELECT COUNT(*) AS total,
              SUM(CASE WHEN state = 'ACTIONABLE' THEN 1 ELSE 0 END) AS actionable,
              SUM(CASE WHEN state = 'WATCHING' THEN 1 ELSE 0 END) AS watching,
              SUM(CASE WHEN state = 'STALE' OR state = 'EXPIRED' THEN 1 ELSE 0 END) AS stale
-      FROM p9_real_opportunities WHERE character_id = ?
-    `).get(characterId) as any;
-    const sync = getCharacterDatasetStatuses(db, characterId, ['wallet', 'assets', 'orders']);
-    const rawAssetCount = Number((db.prepare('SELECT COUNT(*) AS n FROM character_assets WHERE character_id = ?').get(characterId) as any)?.n || 0);
+      FROM p9_real_opportunities
+      WHERE character_id = ? AND ${opportunityOwnership.sql}
+    `).get(characterId, ...opportunityOwnership.params) as any;
 
     return {
       wallet: {
@@ -190,24 +179,37 @@ export class P9RealPortfolioService {
       funding: {
         availableIsk: wallet.balance,
         openOrderEscrow: orders.totals.escrowTotal,
-        knownInventoryCost: round2(knownCost),
-        unknownInventoryExitValue: round2(unknownExitValue),
+        knownInventoryCost: accounting.inventoryCost,
+        unknownInventoryExitValue: null,
         otherUnknown: null,
-        note: 'Paper Trading 资金不计入本字段；未知用途资金保持 UNKNOWN。',
+        note: 'REAL 财务指标来自 P9.3 已核实 FIFO；PAPER 不进入本统计。',
       },
       inventory: {
-        lotCount: lots.length,
-        knownCost: round2(knownCost),
-        unknownLotCount: unknownLots.length,
-        unknownExitValue: round2(unknownExitValue),
+        lotCount: Number(fifoLots?.active_lot_count || 0),
+        knownCost: accounting.inventoryCost,
+        unknownLotCount: accounting.unknownOpenLotCount,
+        unknownExitValue: null,
         rawAssetCount,
       },
       performance: {
-        realizedNetPnl: round2(Number(realized?.value || 0)),
-        realizedMoveCount: Number(realized?.known_moves || 0),
-        unknownCostMoveCount: Number(unknownMoves?.n || 0),
-        feesPaid: round2(Number(trades?.fees || 0)),
-        unrealizedPnl: null,
+        freshness: accounting.freshness,
+        realizedNetPnl: accounting.realizedPnl,
+        knownRealizedPnl: accounting.knownRealizedPnl,
+        realizedMoveCount: accounting.deterministicSellCount,
+        feesPaid: accounting.totalFees,
+        unknownCostMoveCount: accounting.unknownCostCount,
+        unknownConsumptionCount: accounting.unknownConsumptionCount,
+        unknownOpenLotCount: accounting.unknownOpenLotCount,
+        unknownCostSellCount: accounting.unknownCostSellCount,
+        deterministicSellCount: accounting.deterministicSellCount,
+        unrealizedPnl: accounting.unrealizedPnl,
+        tradeCount: accounting.tradeCount,
+        profitableTradeRatio: accounting.profitableTradeRatio,
+        averageHoldingDays: accounting.averageHoldingDays,
+      },
+      ledger: {
+        rows: ledgerSummary.rows,
+        totals: ledgerSummary.totals,
       },
       opportunities: {
         total: Number(opportunities?.total || 0),
@@ -230,26 +232,14 @@ export class P9RealPortfolioService {
     };
   }
 
-  public static inventory(db: Db, characterId: number) {
-    const lots = this.listLots(db, characterId);
-    const lotRows = lots.map((lot) => {
-      const value = exitValue(db, lot.typeId, lot.locationId, lot.quantity);
-      return {
-        ...lot,
-        typeName: typeName(db, lot.typeId),
-        currentReferencePrice: value.gross > 0 ? round2(value.gross / Math.max(1, lot.quantity)) : null,
-        executableExitGross: value.gross,
-        executableExitNet: value.net,
-        depthLimited: value.depthLimited,
-        unrealizedPnl: lot.costPerUnit == null ? null : round2(value.net - lot.costPerUnit * lot.quantity),
-        valuationStatus: lot.costPerUnit == null ? 'UNKNOWN_COST' : 'CALCULATED',
-      };
-    });
-
-    const locations = assetLocations(db, characterId, 200, 0).locations;
+  public static inventory(db: Db, characterId: number, lineage: AssetLineage) {
+    // The legacy p9_inventory_lots/p9_inventory_moves tables have no durable
+    // owner lineage and are retired. This projection deliberately reads only
+    // lineage-scoped ESI asset mirrors; financial cost comes from P93 FIFO.
+    const locations = assetLocations(db, characterId, 200, 0, lineage).locations;
     const raw: Array<{ itemId: number; typeId: number; typeName: string | null; quantity: number; locationId: number }> = [];
     for (const location of locations) {
-      const items = locationItems(db, characterId, location.locationId, 2000, 0).items;
+      const items = locationItems(db, characterId, location.locationId, 2000, 0, lineage).items;
       for (const item of items) {
         raw.push({
           itemId: item.itemId,
@@ -261,28 +251,25 @@ export class P9RealPortfolioService {
       }
     }
     const rawRows = raw.map((item) => {
-      const lot = item.itemId == null
-        ? undefined
-        : lots.find((candidate) => candidate.itemId === item.itemId);
-      const locationId = item.locationId;
-      const value = exitValue(db, item.typeId, locationId, item.quantity);
+      const value = exitValue(db, item.typeId, item.locationId, item.quantity);
       return {
         itemId: item.itemId,
         typeId: item.typeId,
         typeName: item.typeName,
-        locationId,
+        locationId: item.locationId,
         quantity: item.quantity,
-        confirmedCostPerUnit: lot?.costPerUnit ?? null,
-        costStatus: lot?.costStatus || 'UNKNOWN',
-        lotId: lot?.lotId || null,
+        confirmedCostPerUnit: null,
+        costStatus: 'UNKNOWN',
+        lotId: null,
         executableExitGross: value.gross,
         executableExitNet: value.net,
         depthLimited: value.depthLimited,
-        unrealizedPnl: lot?.costPerUnit == null ? null : round2(value.net - lot.costPerUnit * item.quantity),
+        unrealizedPnl: null,
         source: 'esi_character_assets',
       };
     });
 
-    return { lots: lotRows, rawAssets: rawRows, totalRawAssets: rawRows.length };
+    return { lots: [] as P9InventoryLot[], rawAssets: rawRows, totalRawAssets: rawRows.length };
   }
+
 }

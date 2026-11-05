@@ -23,7 +23,7 @@ export type SituationInput = {
   bubble: BubblePayload;
   currentSystemId: number;
   routeAhead: number[];
-  locale: 'ru' | 'en';
+  locale: 'zh' | 'ru' | 'en';
   now: number;
   signal?: AbortSignal;
   /** Spend accounting: the call is billed like any other model call. */
@@ -36,7 +36,15 @@ const MAX_ASSESSMENT_CHARS = 700;
 const TOP_DANGER_SYSTEMS = 6;
 const RECENT_KILLS = 8;
 
-const INSTRUCTIONS: Record<'ru' | 'en', string> = {
+const INSTRUCTIONS: Record<'zh' | 'ru' | 'en', string> = {
+  zh: [
+    '你是 EVE Online 飞行员舰桥上的情报官。雷达刚刚拉响警报。',
+    '根据下面的事实给出态势评估：2-4 句简体中文短句。',
+    '先说明正在发生什么、对这艘船有多危险，再给出一个具体行动',
+    '（留在港内/停船、经由指定星系绕行、继续前进、对准星门等）。',
+    '只使用给出的事实与名称。不得编造：不得虚构飞行员、星系或数字。',
+    '不要逐字重复警报文本。不要问候语，不要 markdown 标题。',
+  ].join('\n'),
   ru: [
     'Ты — офицер разведки на мостике корабля пилота EVE Online. Радар только что поднял тревогу.',
     'По фактам ниже дай оценку обстановки: 2–4 коротких предложения на русском.',

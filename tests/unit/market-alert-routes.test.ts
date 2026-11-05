@@ -104,7 +104,7 @@ describe('market alert routes: auth', () => {
   it('rejects the alert list without a browser session', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/web/market/alerts' });
     expect(response.statusCode).toBe(401);
-    expect(response.json()).toEqual({ error: 'Сессия истекла. Обновите страницу.' });
+    expect(response.json()).toEqual({ error: 'session_expired' });
     expect(response.headers['cache-control']).toBe('no-store');
   });
 
@@ -132,7 +132,7 @@ describe('market alert routes: auth', () => {
       payload: VALID_BODY,
     });
     expect(noCsrf.statusCode).toBe(403);
-    expect(noCsrf.json()).toEqual({ error: 'Проверка безопасности запроса не пройдена.' });
+    expect(noCsrf.json()).toEqual({ error: 'csrf_check_failed' });
 
     const wrongOrigin = await app.inject({
       method: 'POST',
@@ -196,7 +196,7 @@ describe('market alert routes: POST /api/web/market/alerts', () => {
       payload: { ...VALID_BODY, type_id: 999999 },
     });
     expect(unknownType.statusCode).toBe(404);
-    expect(unknownType.json()).toEqual({ error: 'Предмет не найден.' });
+    expect(unknownType.json()).toEqual({ error: 'item_not_found' });
 
     const malformedType = await app.inject({
       method: 'POST',
@@ -216,7 +216,7 @@ describe('market alert routes: POST /api/web/market/alerts', () => {
       payload: { ...VALID_BODY, region_id: 999999 },
     });
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ error: 'Неизвестный регион.' });
+    expect(response.json()).toEqual({ error: 'unknown_region' });
   });
 
   it('returns 400 for a bad side, comparator, or threshold', async () => {
@@ -360,7 +360,7 @@ describe('market alert routes: DELETE /api/web/market/alerts/:alertId', () => {
       headers: mutationHeaders(mine),
     });
     expect(foreign.statusCode).toBe(404);
-    expect(foreign.json()).toEqual({ error: 'Алерт не найден.' });
+    expect(foreign.json()).toEqual({ error: 'alert_not_found' });
     // The foreign alert survived the attempt.
     expect(db.prepare('SELECT status FROM market_price_alerts WHERE alert_id = ?').get(foreignId))
       .toEqual({ status: 'active' });
