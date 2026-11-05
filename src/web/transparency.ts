@@ -100,7 +100,7 @@ export function registerTransparencyRoutes(app: FastifyInstance, db: Db): void {
   app.get(`${TRANSPARENCY_PUBLIC_PATH}/me`, async (request: FastifyRequest, reply: FastifyReply) => {
     const session = readWebSession(db, request);
     if (!session) {
-      return reply.status(401).send({ error: 'Сессия истекла. Обновите страницу.' });
+      return reply.status(401).send({ error: 'session_expired' });
     }
     const report = buildUsageReport(db, { userId: session.userId });
     return {

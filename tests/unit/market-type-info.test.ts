@@ -176,4 +176,31 @@ describe('getMarketTypeInfo', () => {
     expect(details.some((detail) => detail.includes('idx_sde_types_group_id'))).toBe(true);
     expect(details.some((detail) => detail.startsWith('SCAN sde_types'))).toBe(false);
   });
+
+  it('resolves zh from localized data_json and falls back to the flat name column', () => {
+    seedCard();
+    db.prepare("UPDATE sde_types SET data_json = json_patch(data_json, ?) WHERE type_id = ?")
+      .run(JSON.stringify({ name: { en: 'Rifter', zh: '裂谷级' } }), RIFTER);
+    db.prepare("UPDATE sde_groups SET data_json = ? WHERE group_id = 25")
+      .run(JSON.stringify({ name: { en: 'Frigate', zh: '护卫舰' } }));
+    db.prepare("UPDATE sde_categories SET data_json = ? WHERE category_id = 6")
+      .run(JSON.stringify({ name: { en: 'Ship', zh: '舰船' } }));
+    db.prepare("UPDATE sde_market_groups SET data_json = ? WHERE market_group_id = 61")
+      .run(JSON.stringify({ name: { en: 'Standard Frigates', zh: '标准护卫舰' } }));
+    db.prepare("UPDATE sde_meta_groups SET data_json = ? WHERE meta_group_id = 1")
+      .run(JSON.stringify({ name: { en: 'Tech I', zh: 'T1' } }));
+
+    const zh = getMarketTypeInfo(db, RIFTER, 'zh')!;
+    expect(zh.name).toBe('裂谷级');
+    expect(zh.group_name).toBe('护卫舰');
+    expect(zh.category_name).toBe('舰船');
+    expect(zh.market_group_name).toBe('标准护卫舰');
+    expect(zh.meta_group_name).toBe('T1');
+
+    // 没有 zh 数据的行回退到平面列，而不是 undefined。
+    expect(getMarketTypeInfo(db, RIFTER_FLEET, 'zh')!.name).toBe('Rifter Fleet Issue');
+    // en/ru 行为不变：zh 缺失时 localize 回退 en。
+    expect(getMarketTypeInfo(db, RIFTER, 'en')!.name).toBe('Rifter');
+    expect(getMarketTypeInfo(db, RIFTER, 'ru')!.name).toBe('Rifter');
+  });
 });

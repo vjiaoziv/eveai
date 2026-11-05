@@ -191,7 +191,7 @@ describe('perimeter thread', () => {
     return {
       rule: 'camp_next_hop',
       severity: 'danger',
-      text: { ru: 'Кемп в Uedama', en: 'Camp in Uedama' },
+      text: { zh: 'Uedama 有堵门', ru: 'Кемп в Uedama', en: 'Camp in Uedama' },
       systemId: 30000002,
       killmailId: 4242,
       repeats: 2,
@@ -238,14 +238,17 @@ describe('perimeter thread', () => {
 
   it('writes the locale the viewer asked for', () => {
     const threadId = getOrCreatePerimeterThread(db, -2_000_000_000, 1, null);
-    const message = appendAdvisory(db, threadId, advisory(), 'en');
-    expect(message.content).toBe('Camp in Uedama');
+    const en = appendAdvisory(db, threadId, advisory(), 'en');
+    expect(en.content).toBe('Camp in Uedama');
+    // V8: the zh locale must persist the Chinese advisory copy.
+    const zh = appendAdvisory(db, threadId, advisory(), 'zh');
+    expect(zh.content).toBe('Uedama 有堵门');
   });
 
   it('returns history oldest first', () => {
     const threadId = getOrCreatePerimeterThread(db, -2_000_000_000, 1, null);
-    appendAdvisory(db, threadId, advisory({ text: { ru: 'первое', en: 'first' } }), 'ru');
-    appendAdvisory(db, threadId, advisory({ text: { ru: 'второе', en: 'second' } }), 'ru');
+    appendAdvisory(db, threadId, advisory({ text: { zh: '第一条', ru: 'первое', en: 'first' } }), 'ru');
+    appendAdvisory(db, threadId, advisory({ text: { zh: '第二条', ru: 'второе', en: 'second' } }), 'ru');
 
     const history = readPerimeterHistory(db, threadId);
     expect(history.map((message) => message.content)).toEqual(['первое', 'второе']);

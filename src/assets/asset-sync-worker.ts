@@ -13,10 +13,24 @@ import { RealAssetSyncService } from './asset-sync-service.js';
 let cronJob: Cron | null = null;
 let running = false;
 
-async function tick(db: Db): Promise<void> {
+export async function runAssetSyncWorkerTick(db: Db): Promise<void> {
   if (running || !config.assetSync.enabled) return;
   running = true;
   try {
+    try {
+      const reclaimed = RealAssetSyncService.reclaimStaleJobs(db);
+      if (reclaimed > 0) {
+        console.warn('[asset-sync] reclaimed %d stale RUNNING job(s)', reclaimed);
+      }
+    } catch (error) {
+      // A transient database error must be visible; the next scheduled tick
+      // retries reclaim before any due-character selection.
+      console.error(
+        '[asset-sync] stale-job reclaim failed: %s',
+        error instanceof Error ? error.message : String(error),
+      );
+      return;
+    }
     const due = db.prepare(`
       SELECT l.character_id, MIN(l.user_id) AS user_id, MIN(l.chat_id) AS chat_id
       FROM eve_character_links l
@@ -67,7 +81,7 @@ export function startAssetSyncWorker(db: Db): void {
   }
   console.log('[asset-sync] Starting real-asset sync worker');
   cronJob = new Cron('*/5 * * * *', { protect: true }, () => {
-    void tick(db);
+    void runAssetSyncWorkerTick(db);
   });
 }
 

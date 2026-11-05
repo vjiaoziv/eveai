@@ -237,6 +237,106 @@ describe('real asset sync (P9.2.1)', () => {
     expect(RealAssetSyncService.latestJob(db as Db, CHARACTER_ID)!.status).toBe('FAILED');
   });
 
+  it('P9.3.3.8: verifies the actual persisted snapshot item set before COMPLETED', async () => {
+    linkCharacter();
+    mockAssetsResponse([baseAssets()]);
+    const first = await RealAssetSyncService.syncCharacter(db as Db, CHARACTER_ID, CTX, 'manual');
+
+    clearEsiCache();
+    mockAssetsResponse([[{ item_id: 9, type_id: 34, location_id: 60003760, location_type: 'station', location_flag: 'Hangar', quantity: 1, is_singleton: false }]]);
+    db.exec(`
+      CREATE TRIGGER p9338_drop_snapshot_item_after_insert
+      AFTER INSERT ON real_asset_snapshot_items
+      WHEN NEW.item_id = 9
+      BEGIN
+        DELETE FROM real_asset_snapshot_items WHERE snapshot_id = NEW.snapshot_id AND item_id = NEW.item_id;
+      END;
+    `);
+
+    await expect(RealAssetSyncService.syncCharacter(db as Db, CHARACTER_ID, CTX, 'manual'))
+      .rejects.toThrow(/持久化回读校验失败/);
+
+    const latest = db.prepare(
+      "SELECT snapshot_id, status FROM real_asset_snapshots WHERE character_id = ? AND is_latest = 1",
+    ).get(CHARACTER_ID) as { snapshot_id: string; status: string };
+    expect(latest).toEqual({ snapshot_id: first.snapshotId, status: 'COMPLETED' });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM character_assets WHERE character_id = ?').get(CHARACTER_ID)).toEqual({ n: 4 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM real_asset_snapshots WHERE character_id = ?').get(CHARACTER_ID)).toEqual({ n: 1 });
+    expect(RealAssetSyncService.latestJob(db as Db, CHARACTER_ID)!.status).toBe('FAILED');
+  });
+
+  it('P9.3.3.8: rejects duplicate ESI item ids and preserves the previous complete set', async () => {
+    linkCharacter();
+    mockAssetsResponse([baseAssets()]);
+    const first = await RealAssetSyncService.syncCharacter(db as Db, CHARACTER_ID, CTX, 'manual');
+
+    clearEsiCache();
+    const duplicate = baseAssets()[0];
+    mockAssetsResponse([[duplicate, { ...duplicate, quantity: 99 }]]);
+    await expect(RealAssetSyncService.syncCharacter(db as Db, CHARACTER_ID, CTX, 'manual'))
+      .rejects.toThrow(/item_id .*重复/);
+
+    expect(db.prepare("SELECT snapshot_id, status FROM real_asset_snapshots WHERE character_id = ? AND is_latest = 1")
+      .get(CHARACTER_ID)).toEqual({ snapshot_id: first.snapshotId, status: 'COMPLETED' });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM real_asset_snapshots WHERE character_id = ?').get(CHARACTER_ID))
+      .toEqual({ n: 1 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM character_assets WHERE character_id = ?').get(CHARACTER_ID))
+      .toEqual({ n: 4 });
+    expect(RealAssetSyncService.latestJob(db as Db, CHARACTER_ID)!.status).toBe('FAILED');
+  });
+
+  it('P9.3.3.8: invalidates dedupe when canonical hash algorithm or version changes', async () => {
+    linkCharacter();
+    mockAssetsResponse([baseAssets()]);
+    const first = await RealAssetSyncService.syncCharacter(db as Db, CHARACTER_ID, CTX, 'manual');
+
+    db.prepare('UPDATE real_asset_snapshots SET canonical_version = canonical_version + 1 WHERE snapshot_id = ?')
+      .run(first.snapshotId);
+    clearEsiCache();
+    mockAssetsResponse([baseAssets()]);
+    const versionChanged = await RealAssetSyncService.syncCharacter(db as Db, CHARACTER_ID, CTX, 'manual');
+    expect(versionChanged.deduped).toBe(false);
+    expect(versionChanged.snapshotId).not.toBe(first.snapshotId);
+
+    db.prepare("UPDATE real_asset_snapshots SET hash_algorithm = 'sha512' WHERE snapshot_id = ?")
+      .run(versionChanged.snapshotId);
+    clearEsiCache();
+    mockAssetsResponse([baseAssets()]);
+    const algorithmChanged = await RealAssetSyncService.syncCharacter(db as Db, CHARACTER_ID, CTX, 'manual');
+    expect(algorithmChanged.deduped).toBe(false);
+    expect(algorithmChanged.snapshotId).not.toBe(versionChanged.snapshotId);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM real_asset_snapshots WHERE character_id = ?').get(CHARACTER_ID))
+      .toEqual({ n: 3 });
+  });
+
+  it('P9.3.3.8: treats persisted null and false blueprint flags as different asset facts', async () => {
+    linkCharacter();
+    const unknownBlueprint: AssetFixture = [{
+      item_id: 9100,
+      type_id: 34,
+      location_id: 60003760,
+      location_type: 'station',
+      location_flag: 'Hangar',
+      quantity: 1,
+      is_singleton: false,
+    }];
+    mockAssetsResponse([unknownBlueprint]);
+    const first = await RealAssetSyncService.syncCharacter(db as Db, CHARACTER_ID, CTX, 'manual');
+    expect(db.prepare(
+      'SELECT is_blueprint_copy FROM real_asset_snapshot_items WHERE snapshot_id = ? AND item_id = 9100',
+    ).get(first.snapshotId)).toEqual({ is_blueprint_copy: null });
+
+    clearEsiCache();
+    mockAssetsResponse([[{ ...unknownBlueprint[0], is_blueprint_copy: false }]]);
+    const knownFalse = await RealAssetSyncService.syncCharacter(db as Db, CHARACTER_ID, CTX, 'manual');
+    expect(knownFalse.deduped).toBe(false);
+    expect(db.prepare(
+      'SELECT is_blueprint_copy FROM real_asset_snapshot_items WHERE snapshot_id = ? AND item_id = 9100',
+    ).get(knownFalse.snapshotId)).toEqual({ is_blueprint_copy: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM real_asset_snapshots WHERE character_id = ?').get(CHARACTER_ID))
+      .toEqual({ n: 2 });
+  });
+
   it('records observed quantity/location changes between complete snapshots', async () => {
     linkCharacter();
     mockAssetsResponse([baseAssets()]);
@@ -244,7 +344,7 @@ describe('real asset sync (P9.2.1)', () => {
 
     const changed: AssetFixture = [
       { item_id: 1, type_id: 34, location_id: 60003760, location_type: 'station', location_flag: 'Hangar', quantity: 250, is_singleton: false },
-      { item_id: 2, type_id: 587, location_id: 30000142, location_type: 'system', location_flag: 'Hangar', quantity: 5, is_singleton: true },
+      { item_id: 2, type_id: 587, location_id: 30000142, location_type: 'solar_system', location_flag: 'Hangar', quantity: 5, is_singleton: true },
       { item_id: 4, type_id: 587, location_id: 60003760, location_type: 'station', location_flag: 'Hangar', quantity: 1, is_singleton: true },
       { item_id: 3, type_id: 34, location_id: 4, location_type: 'item', location_flag: 'Cargo', quantity: 42, is_singleton: false },
       { item_id: 7, type_id: 34, location_id: 60003760, location_type: 'station', location_flag: 'Hangar', quantity: 1, is_singleton: false },
@@ -296,7 +396,7 @@ describe('real asset sync (P9.2.1)', () => {
       const charMatch = url.match(/\/characters\/(\d+)\/assets\//);
       const characterId = charMatch ? Number(charMatch[1]) : 0;
       const payload = characterId === OTHER_CHARACTER_ID
-        ? [{ item_id: 50, type_id: 34, location_id: 30000142, location_type: 'system', location_flag: 'Cargo', quantity: 7, is_singleton: false }]
+        ? [{ item_id: 50, type_id: 34, location_id: 30000142, location_type: 'solar_system', location_flag: 'Cargo', quantity: 7, is_singleton: false }]
         : baseAssets();
       return jsonResponse(payload, { 'X-Pages': '1' });
     });

@@ -19,7 +19,7 @@ export function requireSession(
 ): WebSession | null {
   const session = readWebSession(db, request);
   if (session) return session;
-  void reply.status(401).send({ error: 'Сессия истекла. Обновите страницу.' });
+  void reply.status(401).send({ error: 'session_expired' });
   return null;
 }
 
@@ -31,6 +31,6 @@ export function requireMutationSession(
   const session = requireSession(db, request, reply);
   if (!session) return null;
   if (verifyWebMutation(request, session)) return session;
-  void reply.status(403).send({ error: 'Проверка безопасности запроса не пройдена.' });
+  void reply.status(403).send({ error: 'csrf_check_failed' });
   return null;
 }

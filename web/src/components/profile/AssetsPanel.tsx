@@ -110,7 +110,7 @@ function LocationRow({ location, expanded, onToggle }: {
           {place ? <small>{place}</small> : null}
         </span>
         <span className="asset-location__stat">{formatQuantity(location.itemCount, locale)}</span>
-        <span className="asset-location__stat">{`${formatQuantity(Math.round(location.totalVolume), locale)} м³`}</span>
+        <span className="asset-location__stat">{`${formatQuantity(Math.round(location.totalVolume), locale)} m³`}</span>
         <span className="asset-location__value">
           {location.estimatedValue === null ? '—' : <span className="isk">{`${formatIsk(location.estimatedValue, locale)} ISK`}</span>}
           {location.valuation === 'partial' ? <small className="asset-location__flag">{t('profileValuationPartial')}</small> : null}
@@ -180,7 +180,7 @@ function LocationItems({ locationId }: { locationId: number }) {
               </td>
               <td>{item.groupName ?? '—'}</td>
               <td className="num">{formatQuantity(item.quantity, locale)}</td>
-              <td className="num">{item.totalVolume === null ? '—' : `${formatQuantity(Math.round(item.totalVolume), locale)} м³`}</td>
+              <td className="num">{item.totalVolume === null ? '—' : `${formatQuantity(Math.round(item.totalVolume), locale)} m³`}</td>
               <td className="num">{item.unitPrice === null ? '—' : formatIsk(item.unitPrice, locale)}</td>
               <td className="num">{item.totalValue === null ? '—' : formatIsk(item.totalValue, locale)}</td>
             </tr>

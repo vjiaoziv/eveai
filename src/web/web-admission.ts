@@ -44,7 +44,7 @@ export function admitWebEvent(
       WHERE event_kind = ? AND user_id = ? AND created_at_ms >= ?
     `, input.eventKind, input.userId, windowStart);
     if (userRecent >= config.web.maxRequestsPerUserWindow) {
-      return rejection(429, 'Слишком много запросов. Попробуйте позже.', config.web.requestWindowSeconds);
+      return rejection(429, 'rate_limited', config.web.requestWindowSeconds);
     }
   }
 
@@ -60,7 +60,7 @@ export function admitWebEvent(
     globalRecent >= config.web.maxRequestsGlobalWindow
     || globalDay >= config.web.maxRequestsGlobalDay
   ) {
-    return rejection(503, 'Сервис достиг безопасного лимита нагрузки. Попробуйте позже.', 60);
+    return rejection(503, 'service_at_capacity', 60);
   }
 
   if (input.costUnits > 0) {
@@ -69,7 +69,7 @@ export function admitWebEvent(
       WHERE cost_units > 0 AND user_id = ? AND created_at_ms >= ?
     `, input.userId, windowStart);
     if (userCost + input.costUnits > config.web.maxCostUnitsPerUserWindow) {
-      return rejection(429, 'Исчерпан лимит вычислений. Попробуйте позже.', 60);
+      return rejection(429, 'compute_limit_exceeded', 60);
     }
     const globalCost = sum(db, `
       SELECT COALESCE(SUM(cost_units), 0) AS total FROM web_admission_events
@@ -83,7 +83,7 @@ export function admitWebEvent(
       globalCost + input.costUnits > config.web.maxCostUnitsGlobalWindow
       || dailyCost + input.costUnits > config.web.maxCostUnitsGlobalDay
     ) {
-      return rejection(503, 'Сервис достиг безопасного лимита вычислений. Попробуйте позже.', 60);
+      return rejection(503, 'compute_capacity_exceeded', 60);
     }
   }
 
@@ -92,7 +92,7 @@ export function admitWebEvent(
     WHERE event_kind = ? AND ip_key = ? AND created_at_ms >= ?
   `, input.eventKind, input.ipKey, windowStart);
   if (ipRecent >= config.web.maxRequestsGlobalWindow) {
-    return rejection(429, 'Слишком много запросов. Попробуйте позже.', config.web.requestWindowSeconds);
+    return rejection(429, 'rate_limited', config.web.requestWindowSeconds);
   }
 
   db.prepare(`

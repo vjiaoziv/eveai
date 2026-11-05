@@ -7,8 +7,11 @@ import { P93FifoService } from '../../src/trading/p9-3-fifo-service.js';
 import { P93LedgerService } from '../../src/trading/p9-3-ledger-service.js';
 import { P93ReconciliationService } from '../../src/trading/p9-3-reconciliation-service.js';
 import type { P93RecordInput } from '../../src/trading/p9-3-types.js';
+import { testAssetLineage } from '../helpers/asset-lineage.js';
+import type { RealLedgerLineage } from '../../src/trading/p9-3-lineage.js';
 
 const CHARACTER = 930001;
+const LINEAGE = testAssetLineage(CHARACTER);
 let db: Db;
 let sequence = 5000;
 
@@ -26,10 +29,26 @@ function input(overrides: Partial<P93RecordInput> & { ledgerKey: string; directi
   };
 }
 
-function verifyRecord(recordId: string, sourceRef = recordId): void {
-  const record = P93LedgerService.get(db, CHARACTER, recordId);
+function seedOwnedBinding(): void {
+  const chatId = LINEAGE.ownerChatId;
+  if (chatId === null) throw new Error('test lineage requires a chat lane');
+  db.prepare('INSERT OR IGNORE INTO users (user_id, display_name, active_character_id) VALUES (?, ?, ?)')
+    .run(LINEAGE.ownerUserId, 'Real Accounting Audit', CHARACTER);
+  db.prepare('INSERT OR IGNORE INTO telegram_sessions (chat_id, username, active_character_id) VALUES (?, ?, ?)')
+    .run(chatId, 'real-accounting-audit', CHARACTER);
+  db.prepare(`
+    INSERT INTO eve_accounts
+      (character_id, character_name, access_token, refresh_token, expires_at, scopes_json, user_id)
+    VALUES (?, 'Real Accounting Audit', 'real-accounting-token', 'real-accounting-refresh', datetime('now', '+1 hour'), ?, ?)
+  `).run(CHARACTER, JSON.stringify(['esi-wallet.read_character_wallet.v1', 'esi-assets.read_assets.v1']), LINEAGE.ownerUserId);
+  db.prepare('INSERT INTO eve_character_links (chat_id, character_id, user_id) VALUES (?, ?, ?)')
+    .run(chatId, CHARACTER, LINEAGE.ownerUserId);
+}
+
+function verifyRecord(recordId: string, sourceRef = recordId, lineage?: RealLedgerLineage | null): void {
+  const record = P93LedgerService.get(db, CHARACTER, recordId, lineage);
   if (!record) throw new Error('test record missing');
-  if (record.recordState === 'DRAFT') P93LedgerService.submitDraft(db, CHARACTER, recordId);
+  if (record.recordState === 'DRAFT') P93LedgerService.submitDraft(db, CHARACTER, recordId, 'user', lineage);
   const transactionId = sequence++;
   const evidence = P93LedgerService.addEvidence(db, CHARACTER, {
     evidenceType: 'ESI_WALLET_LOG',
@@ -48,9 +67,9 @@ function verifyRecord(recordId: string, sourceRef = recordId): void {
       locationId: record.locationId,
       tradeTime: record.tradeTime,
     },
-  }, 'ESI_SYNC');
-  P93LedgerService.linkEvidence(db, CHARACTER, recordId, evidence.evidenceId, 'PRIMARY', 'HIGH');
-  P93LedgerService.verify(db, CHARACTER, recordId);
+  }, 'ESI_SYNC', lineage);
+  P93LedgerService.linkEvidence(db, CHARACTER, recordId, evidence.evidenceId, 'PRIMARY', 'HIGH', undefined, 'USER', 'user', lineage);
+  P93LedgerService.verify(db, CHARACTER, recordId, 'user', undefined, 'USER', lineage);
 }
 
 beforeEach(() => {
@@ -142,7 +161,9 @@ describe('P9.3 real accounting ledger', () => {
 
     expect(performance.realizedPnl).toBeNull();
     expect(performance.unknownCostCount).toBeGreaterThanOrEqual(2);
-    expect(performance.inventoryCost).toBeNull();
+    // Unknown SOLD cost invalidates realized P&L. With no open lots left,
+    // current inventory cost is independently known to be zero.
+    expect(performance.inventoryCost).toBe(0);
     const unknownSource = db.prepare("SELECT COUNT(*) AS n FROM real_fifo_consumptions WHERE lot_id = 'UNKNOWN_SOURCE'").get() as any;
     expect(unknownSource.n).toBe(1);
   });
@@ -177,22 +198,24 @@ describe('P9.3 real accounting ledger', () => {
   });
 
   it('reconciles FIFO inventory with real asset snapshots and never converts asset changes into trades', () => {
-    const buy = P93LedgerService.recordManual(db, CHARACTER, input({ ledgerKey: 'recon-buy', direction: 'BUY', quantity: 10, unitPrice: 10 }));
-    verifyRecord(buy.recordId);
-    P93FifoService.recalculate(db, CHARACTER);
+    seedOwnedBinding();
+    const buy = P93LedgerService.recordManual(db, CHARACTER, input({ ledgerKey: 'recon-buy', direction: 'BUY', quantity: 10, unitPrice: 10 }), 'user', LINEAGE);
+    verifyRecord(buy.recordId, buy.recordId, LINEAGE);
+    P93FifoService.recalculate(db, CHARACTER, LINEAGE);
 
     db.prepare(`
       INSERT INTO real_asset_snapshots
-        (snapshot_id, character_id, started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash)
-      VALUES ('SNAP-RECON-1', ?, datetime('now'), datetime('now'), 'COMPLETED', 1, 1, 1, 10, 'hash')
-    `).run(CHARACTER);
+        (snapshot_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash)
+      VALUES ('SNAP-RECON-1', ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 'COMPLETED', 1, 1, 1, 10, 'hash')
+    `).run(CHARACTER, LINEAGE.ownerUserId, LINEAGE.ownerChatId, LINEAGE.bindingEpoch, LINEAGE.bindingDigest);
     db.prepare(`
       INSERT INTO real_asset_snapshot_items
         (snapshot_id, item_id, type_id, quantity, location_id, raw_json)
       VALUES ('SNAP-RECON-1', 1, 34, 10, 60003760, '{}')
     `).run();
 
-    const result = P93ReconciliationService.run(db, CHARACTER) as any;
+    const result = P93ReconciliationService.run(db, CHARACTER, LINEAGE) as any;
     expect(result.items[0].status).toBe('MATCHED');
     expect(result.run.status).toBe('MATCHED');
     expect(db.prepare('SELECT COUNT(*) AS n FROM real_trade_records WHERE character_id = ?').get(CHARACTER)).toEqual({ n: 1 });
@@ -202,7 +225,7 @@ describe('P9.3 real accounting ledger', () => {
         (snapshot_id, item_id, type_id, quantity, location_id, raw_json)
       VALUES ('SNAP-RECON-1', 2, 6675, 3, 60003760, '{}')
     `).run();
-    const second = P93ReconciliationService.run(db, CHARACTER) as any;
+    const second = P93ReconciliationService.run(db, CHARACTER, LINEAGE) as any;
     expect(second.items.some((row: any) => row.status === 'UNKNOWN_SOURCE' && row.type_id === 6675)).toBe(true);
     expect(db.prepare('SELECT COUNT(*) AS n FROM real_trade_records WHERE character_id = ?').get(CHARACTER)).toEqual({ n: 1 });
   });

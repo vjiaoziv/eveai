@@ -8,8 +8,11 @@ import { P93FifoService } from '../../src/trading/p9-3-fifo-service.js';
 import { P93LedgerService } from '../../src/trading/p9-3-ledger-service.js';
 import { P93ReconciliationService } from '../../src/trading/p9-3-reconciliation-service.js';
 import type { P93EvidenceInput, P93RecordInput } from '../../src/trading/p9-3-types.js';
+import { testAssetLineage } from '../helpers/asset-lineage.js';
+import type { RealLedgerLineage } from '../../src/trading/p9-3-lineage.js';
 
 const CHARACTER = 930002;
+const LINEAGE = testAssetLineage(CHARACTER);
 let db: Db;
 let evidenceSequence = 1000;
 
@@ -27,6 +30,22 @@ function input(overrides: Partial<P93RecordInput> & { ledgerKey: string }): P93R
     feeStatus: 'COMPLETE',
     ...overrides,
   };
+}
+
+function seedOwnedBinding(): void {
+  const chatId = LINEAGE.ownerChatId;
+  if (chatId === null) throw new Error('test lineage requires a chat lane');
+  db.prepare('INSERT OR IGNORE INTO users (user_id, display_name, active_character_id) VALUES (?, ?, ?)')
+    .run(LINEAGE.ownerUserId, 'Hardening Audit', CHARACTER);
+  db.prepare('INSERT OR IGNORE INTO telegram_sessions (chat_id, username, active_character_id) VALUES (?, ?, ?)')
+    .run(chatId, 'hardening-audit', CHARACTER);
+  db.prepare(`
+    INSERT INTO eve_accounts
+      (character_id, character_name, access_token, refresh_token, expires_at, scopes_json, user_id)
+    VALUES (?, 'Hardening Audit', 'hardening-token', 'hardening-refresh', datetime('now', '+1 hour'), ?, ?)
+  `).run(CHARACTER, JSON.stringify(['esi-wallet.read_character_wallet.v1', 'esi-assets.read_assets.v1']), LINEAGE.ownerUserId);
+  db.prepare('INSERT INTO eve_character_links (chat_id, character_id, user_id) VALUES (?, ?, ?)')
+    .run(chatId, CHARACTER, LINEAGE.ownerUserId);
 }
 
 function evidence(
@@ -47,10 +66,10 @@ function evidence(
   return item;
 }
 
-function verifyRecord(recordId: string, overrides: Partial<P93EvidenceInput> = {}): void {
-  const record = P93LedgerService.get(db, CHARACTER, recordId);
+function verifyRecord(recordId: string, overrides: Partial<P93EvidenceInput> = {}, lineage?: RealLedgerLineage | null): void {
+  const record = P93LedgerService.get(db, CHARACTER, recordId, lineage);
   if (!record) throw new Error('test record missing');
-  if (record.recordState === 'DRAFT') P93LedgerService.submitDraft(db, CHARACTER, recordId, 'user:test');
+  if (record.recordState === 'DRAFT') P93LedgerService.submitDraft(db, CHARACTER, recordId, 'user:test', lineage);
   const transactionId = evidenceSequence++;
   const isTransfer = record.tradeKind === 'INVENTORY_TRANSFER';
   const item = isTransfer
@@ -89,9 +108,9 @@ function verifyRecord(recordId: string, overrides: Partial<P93EvidenceInput> = {
         tradeTime: record.tradeTime,
       },
       ...overrides,
-    }, 'ESI_SYNC');
-  P93LedgerService.linkEvidence(db, CHARACTER, recordId, item.evidenceId, 'PRIMARY', 'HIGH', undefined, 'USER', 'user:test');
-  P93LedgerService.verify(db, CHARACTER, recordId, 'user:test');
+    }, 'ESI_SYNC', lineage);
+  P93LedgerService.linkEvidence(db, CHARACTER, recordId, item.evidenceId, 'PRIMARY', 'HIGH', undefined, 'USER', 'user:test', lineage);
+  P93LedgerService.verify(db, CHARACTER, recordId, 'user:test', undefined, 'USER', lineage);
 }
 
 function verifyAdjustment(recordId: string): void {
@@ -586,21 +605,23 @@ describe('P9.3.1 accounting hardening', () => {
   });
 
   it('marks reconciliation as required when duplicate source references create open cases', () => {
-    const first = P93LedgerService.recordManual(db, CHARACTER, input({ ledgerKey: 'dup-1', sourceRef: 'same-source' }), 'user:test');
-    const second = P93LedgerService.recordManual(db, CHARACTER, input({ ledgerKey: 'dup-2', sourceRef: 'same-source' }), 'user:test');
-    verifyRecord(first.recordId);
-    verifyRecord(second.recordId);
-    P93FifoService.recalculate(db, CHARACTER);
+    seedOwnedBinding();
+    const first = P93LedgerService.recordManual(db, CHARACTER, input({ ledgerKey: 'dup-1', sourceRef: 'same-source' }), 'user:test', LINEAGE);
+    const second = P93LedgerService.recordManual(db, CHARACTER, input({ ledgerKey: 'dup-2', sourceRef: 'same-source' }), 'user:test', LINEAGE);
+    verifyRecord(first.recordId, {}, LINEAGE);
+    verifyRecord(second.recordId, {}, LINEAGE);
+    P93FifoService.recalculate(db, CHARACTER, LINEAGE);
     db.prepare(`
       INSERT INTO real_asset_snapshots
-        (snapshot_id, character_id, started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash)
-      VALUES ('RECON-DUP', ?, datetime('now'), datetime('now'), 'COMPLETED', 1, 1, 1, 2, 'hash')
-    `).run(CHARACTER);
+        (snapshot_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash)
+      VALUES ('RECON-DUP', ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 'COMPLETED', 1, 1, 1, 2, 'hash')
+    `).run(CHARACTER, LINEAGE.ownerUserId, LINEAGE.ownerChatId, LINEAGE.bindingEpoch, LINEAGE.bindingDigest);
     db.prepare(`
       INSERT INTO real_asset_snapshot_items (snapshot_id, item_id, type_id, quantity, location_id, raw_json)
       VALUES ('RECON-DUP', 1, 34, 2, 60003760, '{}')
     `).run();
-    const result = P93ReconciliationService.run(db, CHARACTER) as any;
+    const result = P93ReconciliationService.run(db, CHARACTER, LINEAGE) as any;
     expect(result.items.every((row: any) => row.status === 'MATCHED')).toBe(true);
     expect(result.cases.some((row: any) => row.case_kind === 'DUPLICATE_SOURCE_REFERENCE')).toBe(true);
     expect(result.run.status).toBe('RECONCILIATION_REQUIRED');
@@ -612,18 +633,20 @@ describe('P9.3.1 accounting hardening', () => {
     P93FifoService.recalculate(db, CHARACTER);
     db.prepare(`
       INSERT INTO real_asset_snapshots
-        (snapshot_id, character_id, started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash)
-      VALUES ('SNAP-OLD', ?, '2026-01-02T00:00:00Z', '2026-01-02T00:00:01Z', 'COMPLETED', 1, 1, 1, 1, 'old')
-    `).run(CHARACTER);
+        (snapshot_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash)
+      VALUES ('SNAP-OLD', ?, ?, ?, ?, ?, '2026-01-02T00:00:00Z', '2026-01-02T00:00:01Z', 'COMPLETED', 1, 1, 1, 1, 'old')
+    `).run(CHARACTER, LINEAGE.ownerUserId, LINEAGE.ownerChatId, LINEAGE.bindingEpoch, LINEAGE.bindingDigest);
     db.prepare(`
       INSERT INTO real_asset_snapshot_items (snapshot_id, item_id, type_id, quantity, location_id, raw_json)
       VALUES ('SNAP-OLD', 1, 34, 1, 60003760, '{}')
     `).run();
     db.prepare(`
       INSERT INTO real_asset_valuations
-        (valuation_id, character_id, snapshot_id, hub_location_id, hub_region_id, market_snapshot_at, fee_model_version, status, created_at, completed_at, items_valued, items_unknown)
-      VALUES ('VAL-OLD', ?, 'SNAP-OLD', 60003760, 10000002, '2026-01-02T00:00:00Z', 'test', 'COMPLETED', '2026-01-02T00:00:02Z', '2026-01-02T00:00:03Z', 1, 0)
-    `).run(CHARACTER);
+        (valuation_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         snapshot_id, hub_location_id, hub_region_id, market_snapshot_at, fee_model_version, status, created_at, completed_at, items_valued, items_unknown)
+      VALUES ('VAL-OLD', ?, ?, ?, ?, ?, 'SNAP-OLD', 60003760, 10000002, '2026-01-02T00:00:00Z', 'test', 'COMPLETED', '2026-01-02T00:00:02Z', '2026-01-02T00:00:03Z', 1, 0)
+    `).run(CHARACTER, LINEAGE.ownerUserId, LINEAGE.ownerChatId, LINEAGE.bindingEpoch, LINEAGE.bindingDigest);
     db.prepare(`
       INSERT INTO real_asset_valuation_items
         (valuation_id, item_id, type_id, quantity, market_reference_value, bid_liquidation_net, ask_replacement_gross, ask_replacement_net)
@@ -631,14 +654,15 @@ describe('P9.3.1 accounting hardening', () => {
     `).run();
     db.prepare(`
       INSERT INTO real_asset_snapshots
-        (snapshot_id, character_id, started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash)
-      VALUES ('SNAP-NEW', ?, '2026-01-03T00:00:00Z', '2026-01-03T00:00:01Z', 'COMPLETED', 1, 1, 1, 1, 'new')
-    `).run(CHARACTER);
+        (snapshot_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash)
+      VALUES ('SNAP-NEW', ?, ?, ?, ?, ?, '2026-01-03T00:00:00Z', '2026-01-03T00:00:01Z', 'COMPLETED', 1, 1, 1, 1, 'new')
+    `).run(CHARACTER, LINEAGE.ownerUserId, LINEAGE.ownerChatId, LINEAGE.bindingEpoch, LINEAGE.bindingDigest);
     db.prepare(`
       INSERT INTO real_asset_snapshot_items (snapshot_id, item_id, type_id, quantity, location_id, raw_json)
       VALUES ('SNAP-NEW', 2, 34, 1, 60003760, '{}')
     `).run();
-    const result = P93FifoService.unrealized(db, CHARACTER) as any;
+    const result = P93FifoService.unrealized(db, CHARACTER, LINEAGE) as any;
     expect(result.snapshotId).toBe('SNAP-NEW');
     expect(result.valuationId).toBeNull();
     expect(result.perspectives.marketReference.status).toBe('N/A_NO_VALUATION');
@@ -778,16 +802,18 @@ describe('P9.3.1 accounting hardening', () => {
   });
 
   it('refuses reconciliation when verified trades are newer than the asset snapshot', () => {
+    seedOwnedBinding();
     const buy = P93LedgerService.recordManual(db, CHARACTER, input({
       ledgerKey: 'recon-time-buy', quantity: 10,
-    }), 'user:test');
-    verifyRecord(buy.recordId);
-    P93FifoService.recalculate(db, CHARACTER);
+    }), 'user:test', LINEAGE);
+    verifyRecord(buy.recordId, {}, LINEAGE);
+    P93FifoService.recalculate(db, CHARACTER, LINEAGE);
     db.prepare(`
       INSERT INTO real_asset_snapshots
-        (snapshot_id, character_id, started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash)
-      VALUES ('SNAP-TIME-BASE', ?, '2026-01-02T00:00:00Z', '2026-01-02T00:00:01Z', 'COMPLETED', 1, 1, 1, 10, 'base')
-    `).run(CHARACTER);
+        (snapshot_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         started_at, completed_at, status, total_items, total_unique_types, total_locations, total_quantity, data_hash)
+      VALUES ('SNAP-TIME-BASE', ?, ?, ?, ?, ?, '2026-01-02T00:00:00Z', '2026-01-02T00:00:01Z', 'COMPLETED', 1, 1, 1, 10, 'base')
+    `).run(CHARACTER, LINEAGE.ownerUserId, LINEAGE.ownerChatId, LINEAGE.bindingEpoch, LINEAGE.bindingDigest);
     db.prepare(`
       INSERT INTO real_asset_snapshot_items (snapshot_id, item_id, type_id, quantity, location_id, raw_json)
       VALUES ('SNAP-TIME-BASE', 1, 34, 10, 60003760, '{}')
@@ -795,11 +821,11 @@ describe('P9.3.1 accounting hardening', () => {
     const sell = P93LedgerService.recordManual(db, CHARACTER, input({
       ledgerKey: 'recon-time-later-sell', direction: 'SELL', quantity: 4, unitPrice: 15,
       tradeTime: '2026-01-03T00:00:00.000Z',
-    }), 'user:test');
-    verifyRecord(sell.recordId);
-    P93FifoService.recalculate(db, CHARACTER);
+    }), 'user:test', LINEAGE);
+    verifyRecord(sell.recordId, {}, LINEAGE);
+    P93FifoService.recalculate(db, CHARACTER, LINEAGE);
 
-    const result = P93ReconciliationService.run(db, CHARACTER) as any;
+    const result = P93ReconciliationService.run(db, CHARACTER, LINEAGE) as any;
     expect(result.run.status).toBe('RECONCILIATION_REQUIRED');
     expect(result.items).toEqual([]);
     expect(result.run.summary.timeBasis).toBe('SNAPSHOT_INVENTORY_TIME_MISMATCH');
@@ -849,9 +875,10 @@ describe('P9.3.1 accounting hardening', () => {
   it('paginates reconciliation output with bounded query values and isolates runs by character', () => {
     db.prepare(`
       INSERT INTO real_reconciliation_runs
-        (run_id, character_id, status, created_at, completed_at, summary_json)
-      VALUES ('RECON-PAGE', ?, 'MATCHED', datetime('now'), datetime('now'), '{}')
-    `).run(CHARACTER);
+        (run_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         status, created_at, completed_at, summary_json)
+      VALUES ('RECON-PAGE', ?, ?, ?, ?, ?, 'MATCHED', datetime('now'), datetime('now'), '{}')
+    `).run(CHARACTER, LINEAGE.ownerUserId, LINEAGE.ownerChatId, LINEAGE.bindingEpoch, LINEAGE.bindingDigest);
     const insertItem = db.prepare(`
       INSERT INTO real_reconciliation_items
         (run_id, reconcile_key, type_id, location_id, ledger_quantity, asset_quantity,
@@ -869,7 +896,7 @@ describe('P9.3.1 accounting hardening', () => {
       `).run(CHARACTER);
     })();
 
-    const defaultPage = P93ReconciliationService.get(db, CHARACTER, 'RECON-PAGE') as any;
+    const defaultPage = P93ReconciliationService.get(db, CHARACTER, LINEAGE, 'RECON-PAGE') as any;
     expect(defaultPage.items).toHaveLength(200);
     expect(defaultPage.cases).toHaveLength(1);
     expect(defaultPage.pagination).toEqual({
@@ -879,18 +906,18 @@ describe('P9.3.1 accounting hardening', () => {
       caseTotal: 1,
     });
 
-    const secondPage = P93ReconciliationService.get(db, CHARACTER, 'RECON-PAGE', { limit: '2', offset: '2' }) as any;
+    const secondPage = P93ReconciliationService.get(db, CHARACTER, LINEAGE, 'RECON-PAGE', { limit: '2', offset: '2' }) as any;
     expect(secondPage.items.map((row: any) => row.reconcile_key)).toEqual(['key-0002', 'key-0003']);
     expect(secondPage.pagination).toMatchObject({ limit: 2, offset: 2, itemTotal: 505, caseTotal: 1 });
 
-    const invalid = P93ReconciliationService.get(db, CHARACTER, 'RECON-PAGE', {
+    const invalid = P93ReconciliationService.get(db, CHARACTER, LINEAGE, 'RECON-PAGE', {
       limit: '-5', offset: 'Infinity',
     }) as any;
     expect(invalid.pagination).toMatchObject({ limit: 200, offset: 0 });
-    expect(P93ReconciliationService.get(db, CHARACTER, 'RECON-PAGE', { limit: '9999' }) as any)
+    expect(P93ReconciliationService.get(db, CHARACTER, LINEAGE, 'RECON-PAGE', { limit: '9999' }) as any)
       .toMatchObject({ pagination: { limit: 500 } });
-    expect((P93ReconciliationService.get(db, CHARACTER, 'RECON-PAGE', { limit: '9999' }) as any).items).toHaveLength(500);
-    expect(P93ReconciliationService.get(db, CHARACTER + 1, 'RECON-PAGE')).toBeNull();
+    expect((P93ReconciliationService.get(db, CHARACTER, LINEAGE, 'RECON-PAGE', { limit: '9999' }) as any).items).toHaveLength(500);
+    expect(P93ReconciliationService.get(db, CHARACTER + 1, LINEAGE, 'RECON-PAGE')).toBeNull();
   });
 
   it('fails closed instead of silently ignoring FEE_ADJUSTMENT records', () => {

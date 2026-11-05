@@ -101,7 +101,7 @@ describe('auth routes', () => {
     registerAuthRoutes(app, db);
     const res = await app.inject({ method: 'GET', url: '/auth/eve/callback' });
     expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body).error).toContain('Missing authorization code');
+    expect(JSON.parse(res.body).error).toContain('missing_authorization_code');
     await app.close();
   });
 
@@ -110,7 +110,7 @@ describe('auth routes', () => {
     registerAuthRoutes(app, db);
     const res = await app.inject({ method: 'GET', url: '/auth/eve/callback?code=abc' });
     expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body).error).toContain('Missing state');
+    expect(JSON.parse(res.body).error).toContain('missing_state_parameter');
     await app.close();
   });
 
@@ -201,7 +201,7 @@ describe('auth routes', () => {
     registerAuthRoutes(app, db);
     const res = await app.inject({ method: 'GET', url: '/auth/eve/callback?code=abc&state=bogus' });
     expect(res.statusCode).toBe(403);
-    expect(JSON.parse(res.body).error).toContain('Invalid or expired state parameter');
+    expect(JSON.parse(res.body).error).toContain('invalid_or_expired_state');
     await app.close();
   });
 
@@ -235,7 +235,7 @@ describe('auth routes', () => {
 
     const res = await app.inject({ method: 'GET', url: '/auth/eve/callback?code=abc&state=state-0' });
     expect(res.statusCode).toBe(403);
-    expect(JSON.parse(res.body).error).toContain('Invalid or expired state parameter');
+    expect(JSON.parse(res.body).error).toContain('invalid_or_expired_state');
     await app.close();
   });
 
@@ -269,7 +269,7 @@ describe('auth routes', () => {
       url: `/auth/eve/callback?code=abc&state=${encodeURIComponent(state)}`,
     });
     expect(response.statusCode).toBe(403);
-    expect(response.json().error).toContain('unexpected scope');
+    expect(response.json().error).toContain('unexpected_granted_scope');
     expect(db.prepare('SELECT 1 FROM eve_accounts WHERE character_id = 95465498').get()).toBeUndefined();
     await app.close();
   });

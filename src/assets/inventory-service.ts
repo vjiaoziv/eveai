@@ -1,5 +1,6 @@
 import type { Db } from '../db/sqlite.js';
 import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
+import { assetLineagePredicate, type AssetLineage } from './asset-lineage.js';
 
 /**
  * P9.2.3 inventory classification, filtering and local tags.
@@ -72,6 +73,7 @@ export const BUCKET_SQL_CASE = `
 
 export type InventoryQuery = {
   characterId: number;
+  lineage: AssetLineage;
   regionId?: number;
   solarSystemId?: number;
   locationId?: number;
@@ -122,8 +124,9 @@ export class RealInventoryService {
   static list(db: Db, query: InventoryQuery): { rows: InventoryRow[]; total: number; limit: number; offset: number } {
     const limit = clampPositiveInteger(query.limit, 100, 500);
     const offset = clampNonNegativeInteger(query.offset);
-    const where: string[] = ['a.character_id = ?'];
-    const params: unknown[] = [query.characterId];
+    const ownership = assetLineagePredicate('a', query.lineage);
+    const where: string[] = ['a.character_id = ?', ownership.sql];
+    const params: unknown[] = [query.characterId, ...ownership.params];
 
     if (query.regionId) {
       where.push('loc.region_id = ?');
@@ -188,23 +191,40 @@ export class RealInventoryService {
              loc.region_name,
              loc.resolution_status,
              EXISTS (SELECT 1 FROM market_orders mo WHERE mo.type_id = a.type_id AND mo.volume_remain > 0) AS has_market,
-             (SELECT tag FROM real_asset_tags tg WHERE tg.character_id = a.character_id AND tg.item_id = a.item_id) AS tag,
+             (SELECT tag FROM real_asset_tags tg
+               WHERE tg.character_id = a.character_id AND tg.item_id = a.item_id
+                 AND tg.owner_user_id = a.owner_user_id
+                 AND tg.owner_chat_id IS a.owner_chat_id
+                 AND tg.binding_epoch = a.binding_epoch
+                 AND tg.binding_digest = a.binding_digest) AS tag,
              (SELECT vi.market_reference_value FROM real_asset_valuation_items vi
                WHERE vi.valuation_id = (
                  SELECT v.valuation_id FROM real_asset_valuations v
                  WHERE v.character_id = a.character_id AND v.status = 'COMPLETED'
+                   AND v.owner_user_id = a.owner_user_id
+                   AND v.owner_chat_id IS a.owner_chat_id
+                   AND v.binding_epoch = a.binding_epoch
+                   AND v.binding_digest = a.binding_digest
                  ORDER BY v.created_at DESC LIMIT 1
                ) AND vi.item_id = a.item_id) AS market_reference_value,
              (SELECT vi.bid_liquidation_net FROM real_asset_valuation_items vi
                WHERE vi.valuation_id = (
                  SELECT v.valuation_id FROM real_asset_valuations v
                  WHERE v.character_id = a.character_id AND v.status = 'COMPLETED'
+                   AND v.owner_user_id = a.owner_user_id
+                   AND v.owner_chat_id IS a.owner_chat_id
+                   AND v.binding_epoch = a.binding_epoch
+                   AND v.binding_digest = a.binding_digest
                  ORDER BY v.created_at DESC LIMIT 1
                ) AND vi.item_id = a.item_id) AS bid_liquidation_net,
              (SELECT vi.statuses_json FROM real_asset_valuation_items vi
                WHERE vi.valuation_id = (
                  SELECT v.valuation_id FROM real_asset_valuations v
                  WHERE v.character_id = a.character_id AND v.status = 'COMPLETED'
+                   AND v.owner_user_id = a.owner_user_id
+                   AND v.owner_chat_id IS a.owner_chat_id
+                   AND v.binding_epoch = a.binding_epoch
+                   AND v.binding_digest = a.binding_digest
                  ORDER BY v.created_at DESC LIMIT 1
                ) AND vi.item_id = a.item_id) AS valuation_statuses_json
       FROM character_assets a
@@ -225,11 +245,12 @@ export class RealInventoryService {
     };
   }
 
-  static detail(db: Db, characterId: number, itemId: number): (InventoryRow & {
+  static detail(db: Db, characterId: number, itemId: number, lineage: AssetLineage): (InventoryRow & {
     changeHistory: unknown[];
     snapshotHistory: unknown[];
     latestValuation: Record<string, unknown> | null;
   }) | null {
+    const ownership = assetLineagePredicate('a', lineage);
     const base = db.prepare(`
       SELECT a.item_id, a.type_id, a.quantity, a.location_id, a.location_type, a.location_flag,
              a.is_blueprint_copy,
@@ -244,23 +265,40 @@ export class RealInventoryService {
              loc.region_name,
              loc.resolution_status,
              EXISTS (SELECT 1 FROM market_orders mo WHERE mo.type_id = a.type_id AND mo.volume_remain > 0) AS has_market,
-             (SELECT tag FROM real_asset_tags tg WHERE tg.character_id = a.character_id AND tg.item_id = a.item_id) AS tag,
+             (SELECT tag FROM real_asset_tags tg
+               WHERE tg.character_id = a.character_id AND tg.item_id = a.item_id
+                 AND tg.owner_user_id = a.owner_user_id
+                 AND tg.owner_chat_id IS a.owner_chat_id
+                 AND tg.binding_epoch = a.binding_epoch
+                 AND tg.binding_digest = a.binding_digest) AS tag,
              (SELECT vi.market_reference_value FROM real_asset_valuation_items vi
                WHERE vi.valuation_id = (
                  SELECT v.valuation_id FROM real_asset_valuations v
                  WHERE v.character_id = a.character_id AND v.status = 'COMPLETED'
+                   AND v.owner_user_id = a.owner_user_id
+                   AND v.owner_chat_id IS a.owner_chat_id
+                   AND v.binding_epoch = a.binding_epoch
+                   AND v.binding_digest = a.binding_digest
                  ORDER BY v.created_at DESC LIMIT 1
                ) AND vi.item_id = a.item_id) AS market_reference_value,
              (SELECT vi.bid_liquidation_net FROM real_asset_valuation_items vi
                WHERE vi.valuation_id = (
                  SELECT v.valuation_id FROM real_asset_valuations v
                  WHERE v.character_id = a.character_id AND v.status = 'COMPLETED'
+                   AND v.owner_user_id = a.owner_user_id
+                   AND v.owner_chat_id IS a.owner_chat_id
+                   AND v.binding_epoch = a.binding_epoch
+                   AND v.binding_digest = a.binding_digest
                  ORDER BY v.created_at DESC LIMIT 1
                ) AND vi.item_id = a.item_id) AS bid_liquidation_net,
              (SELECT vi.statuses_json FROM real_asset_valuation_items vi
                WHERE vi.valuation_id = (
                  SELECT v.valuation_id FROM real_asset_valuations v
                  WHERE v.character_id = a.character_id AND v.status = 'COMPLETED'
+                   AND v.owner_user_id = a.owner_user_id
+                   AND v.owner_chat_id IS a.owner_chat_id
+                   AND v.binding_epoch = a.binding_epoch
+                   AND v.binding_digest = a.binding_digest
                  ORDER BY v.created_at DESC LIMIT 1
                ) AND vi.item_id = a.item_id) AS valuation_statuses_json
       FROM character_assets a
@@ -268,34 +306,37 @@ export class RealInventoryService {
       LEFT JOIN sde_groups g ON g.group_id = t.group_id
       LEFT JOIN sde_categories c ON c.category_id = g.category_id
       LEFT JOIN real_asset_locations loc ON loc.location_id = a.location_id
-      WHERE a.character_id = ? AND a.item_id = ?
-    `).get(characterId, itemId) as any;
+      WHERE a.character_id = ? AND a.item_id = ? AND ${ownership.sql}
+    `).get(characterId, itemId, ...ownership.params) as any;
     if (!base) return null;
 
+    const changeOwnership = assetLineagePredicate(null, lineage);
     const changeHistory = db.prepare(`
       SELECT change_id, change_type, prev_quantity, new_quantity,
              prev_location_id, new_location_id, source_class, confidence,
              from_snapshot_id, to_snapshot_id, detected_at
       FROM real_asset_changes
-      WHERE character_id = ? AND item_id = ?
+      WHERE character_id = ? AND item_id = ? AND ${changeOwnership.sql}
       ORDER BY detected_at DESC LIMIT 100
-    `).all(characterId, itemId);
+    `).all(characterId, itemId, ...changeOwnership.params);
 
+    const snapshotOwnership = assetLineagePredicate('s', lineage);
     const snapshotHistory = db.prepare(`
       SELECT si.snapshot_id, s.completed_at, s.status, si.quantity, si.location_id, si.parent_item_id
       FROM real_asset_snapshot_items si
       JOIN real_asset_snapshots s ON s.snapshot_id = si.snapshot_id
-      WHERE s.character_id = ? AND si.item_id = ?
+      WHERE s.character_id = ? AND si.item_id = ? AND ${snapshotOwnership.sql}
       ORDER BY s.completed_at DESC LIMIT 50
-    `).all(characterId, itemId);
+    `).all(characterId, itemId, ...snapshotOwnership.params);
 
+    const valuationOwnership = assetLineagePredicate(null, lineage);
     const valuationHeader = db.prepare(`
       SELECT valuation_id, snapshot_id, hub_location_id, hub_region_id,
              market_snapshot_at, fee_model_version, created_at, completed_at
       FROM real_asset_valuations
-      WHERE character_id = ? AND status = 'COMPLETED'
+      WHERE character_id = ? AND status = 'COMPLETED' AND ${valuationOwnership.sql}
       ORDER BY created_at DESC LIMIT 1
-    `).get(characterId) as any;
+    `).get(characterId, ...valuationOwnership.params) as any;
     const valuationItem = valuationHeader
       ? db.prepare(`
           SELECT market_reference_value, bid_liquidation_gross, bid_liquidation_net,
@@ -323,48 +364,63 @@ export class RealInventoryService {
     return { ...mapRow(base), changeHistory, snapshotHistory, latestValuation };
   }
 
-  static getTag(db: Db, characterId: number, itemId: number): AssetTag | null {
+  static getTag(db: Db, characterId: number, itemId: number, lineage: AssetLineage): AssetTag | null {
+    const ownership = assetLineagePredicate(null, lineage);
     const row = db.prepare(
-      'SELECT tag FROM real_asset_tags WHERE character_id = ? AND item_id = ?',
-    ).get(characterId, itemId) as { tag: string } | undefined;
+      `SELECT tag FROM real_asset_tags WHERE character_id = ? AND item_id = ? AND ${ownership.sql}`,
+    ).get(characterId, itemId, ...ownership.params) as { tag: string } | undefined;
     return (row?.tag as AssetTag) ?? null;
   }
 
   /** Local-only label: never reaches EVE. Rejects items outside the current set. */
-  static setTag(db: Db, characterId: number, itemId: number, tag: string): AssetTag {
+  static setTag(db: Db, characterId: number, itemId: number, tag: string, lineage: AssetLineage): AssetTag {
     if (!ASSET_TAG_VALUES.includes(tag as AssetTag)) {
       throw new Error(`无效标签：${tag}。允许值：${ASSET_TAG_VALUES.join(', ')}`);
     }
+    const ownership = assetLineagePredicate(null, lineage);
     const owned = db.prepare(
-      'SELECT 1 FROM character_assets WHERE character_id = ? AND item_id = ?',
-    ).get(characterId, itemId);
+      `SELECT 1 FROM character_assets WHERE character_id = ? AND item_id = ? AND ${ownership.sql}`,
+    ).get(characterId, itemId, ...ownership.params);
     if (!owned) throw new Error('该物品不在当前角色的最新资产快照中，无法打标签。');
     db.prepare(`
-      INSERT INTO real_asset_tags (character_id, item_id, tag, updated_at)
-      VALUES (?, ?, ?, datetime('now'))
-      ON CONFLICT(character_id, item_id) DO UPDATE SET
+      INSERT INTO real_asset_tags
+        (character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         item_id, tag, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(character_id, owner_user_id, owner_chat_id, binding_epoch, item_id) DO UPDATE SET
+        binding_digest = excluded.binding_digest,
         tag = excluded.tag, updated_at = excluded.updated_at
-    `).run(characterId, itemId, tag);
+    `).run(
+      characterId,
+      lineage.ownerUserId,
+      lineage.ownerChatId,
+      lineage.bindingEpoch,
+      lineage.bindingDigest,
+      itemId,
+      tag,
+    );
     return tag as AssetTag;
   }
 
-  static clearTag(db: Db, characterId: number, itemId: number): void {
-    db.prepare('DELETE FROM real_asset_tags WHERE character_id = ? AND item_id = ?')
-      .run(characterId, itemId);
+  static clearTag(db: Db, characterId: number, itemId: number, lineage: AssetLineage): void {
+    const ownership = assetLineagePredicate(null, lineage);
+    db.prepare(`DELETE FROM real_asset_tags WHERE character_id = ? AND item_id = ? AND ${ownership.sql}`)
+      .run(characterId, itemId, ...ownership.params);
   }
 
   /** Category summary for the overview page (deterministic, no valuation). */
-  static bucketSummary(db: Db, characterId: number): Array<{ bucket: InventoryBucket; labelZh: string; items: number; quantity: number }> {
+  static bucketSummary(db: Db, characterId: number, lineage: AssetLineage): Array<{ bucket: InventoryBucket; labelZh: string; items: number; quantity: number }> {
+    const ownership = assetLineagePredicate('a', lineage);
     const rows = db.prepare(`
       SELECT ${BUCKET_SQL_CASE} AS bucket, COUNT(*) AS items, COALESCE(SUM(a.quantity), 0) AS quantity
       FROM character_assets a
       LEFT JOIN sde_types t ON t.type_id = a.type_id
       LEFT JOIN sde_groups g ON g.group_id = t.group_id
       LEFT JOIN sde_categories c ON c.category_id = g.category_id
-      WHERE a.character_id = ?
+      WHERE a.character_id = ? AND ${ownership.sql}
       GROUP BY bucket
       ORDER BY items DESC
-    `).all(characterId) as Array<{ bucket: InventoryBucket; items: number; quantity: number }>;
+    `).all(characterId, ...ownership.params) as Array<{ bucket: InventoryBucket; items: number; quantity: number }>;
     return rows.map((row) => ({ ...row, labelZh: BUCKET_LABELS_ZH[row.bucket] ?? row.bucket }));
   }
 }

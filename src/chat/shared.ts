@@ -324,13 +324,13 @@ export async function runAgentTurn(
   threadId: string,
   ctx: UserContext,
   text: string,
-  options: { userMessagePersisted?: boolean; backgroundProfileRefresh?: boolean } = {},
+  options: { userMessagePersisted?: boolean; backgroundProfileRefresh?: boolean; locale?: string } = {},
 ): Promise<string> {
   if (!options.userMessagePersisted) {
     db.prepare('INSERT INTO messages (thread_id, role, content) VALUES (?, ?, ?)').run(threadId, 'user', text);
   }
   if (options.backgroundProfileRefresh !== false) void maybeRefreshUserProfile(db, ctx);
-  const agentResult = await handleAgentMessage(db, threadId, ctx, text);
+  const agentResult = await handleAgentMessage(db, threadId, ctx, text, options.locale);
   return finalizeThreadMessage(db, threadId, agentResult.text);
 }
 

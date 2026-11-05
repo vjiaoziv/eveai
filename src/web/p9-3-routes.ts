@@ -7,6 +7,8 @@ import { P93AuditService } from '../trading/p9-3-audit-service.js';
 import { P93FifoService } from '../trading/p9-3-fifo-service.js';
 import { P93EsiEvidenceService } from '../trading/p9-3-evidence-service.js';
 import { P93LedgerService } from '../trading/p9-3-ledger-service.js';
+import { resolveAssetLineage, type AssetLineage } from '../assets/asset-lineage.js';
+import { realLedgerLineagePredicate } from '../trading/p9-3-lineage.js';
 import { P93ReconciliationService } from '../trading/p9-3-reconciliation-service.js';
 import type { P93EvidenceInput, P93RecordInput, P93VerificationStatus } from '../trading/p9-3-types.js';
 
@@ -17,10 +19,24 @@ function sessionContext(session: WebSession) {
 function linkedCharacter(db: Db, session: WebSession, reply: FastifyReply) {
   const char = getLinkedCharacter(db, sessionContext(session));
   if (!char) {
-    reply.status(404).send({ error: '尚未关联 EVE 角色，无法访问 REAL 交易账本。' });
+    reply.status(404).send({ error: 'p9_real_ledger_character_required' });
     return null;
   }
   return char;
+}
+
+function requireLineage(
+  db: Db,
+  session: WebSession,
+  reply: FastifyReply,
+  characterId: number,
+): AssetLineage | null {
+  try {
+    return resolveAssetLineage(db, characterId, session.userId, session.chatId);
+  } catch {
+    reply.status(403).send({ error: 'character_asset_context_invalid' });
+    return null;
+  }
 }
 
 function asBody(value: unknown): Record<string, unknown> {
@@ -109,13 +125,15 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     return {
       mode: 'REAL',
       paperIsolation: { enabled: true, paperRecordsAccepted: false, aiMutationAllowed: false, esiReadOnly: true },
-      summary: P93LedgerService.summary(db, char.characterId),
-      performance: P93FifoService.performance(db, char.characterId),
-      latestCalculation: P93AuditService.calculationRuns(db, char.characterId, 1)[0] ?? null,
-      latestReconciliation: P93ReconciliationService.latest(db, char.characterId),
+      summary: P93LedgerService.summary(db, char.characterId, lineage),
+      performance: P93FifoService.performance(db, char.characterId, lineage),
+      latestCalculation: P93AuditService.calculationRuns(db, char.characterId, 1, lineage)[0] ?? null,
+      latestReconciliation: P93ReconciliationService.latest(db, char.characterId, lineage),
     };
   });
 
@@ -124,6 +142,8 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     const query = request.query as Record<string, string | undefined>;
     return P93LedgerService.list(db, char.characterId, {
       state: query.state,
@@ -133,7 +153,7 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
       typeId: query.typeId ? Number(query.typeId) : undefined,
       limit: query.limit ? Number(query.limit) : undefined,
       offset: query.offset ? Number(query.offset) : undefined,
-    });
+    }, lineage);
   });
 
   app.get<{ Params: { recordId: string } }>(`${base}/records/:recordId`, async (request, reply) => {
@@ -141,16 +161,23 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
-    const record = P93LedgerService.get(db, char.characterId, request.params.recordId);
-    if (!record) return reply.status(404).send({ error: '交易记录不存在。' });
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    const record = P93LedgerService.get(db, char.characterId, request.params.recordId, lineage);
+    if (!record) return reply.status(404).send({ error: 'p9_record_not_found' });
     const evidence = db.prepare(`
       SELECT e.*, l.relation, l.confidence, l.notes AS link_notes
       FROM real_trade_evidence_links l
       JOIN real_trade_evidence e ON e.evidence_id = l.evidence_id
       WHERE l.record_id = ? AND e.character_id = ?
+        AND ${realLedgerLineagePredicate('e', lineage).sql}
       ORDER BY l.relation, e.captured_at
-    `).all(request.params.recordId, char.characterId);
-    return { record, evidence, events: P93AuditService.events(db, char.characterId, request.params.recordId, 100) };
+    `).all(
+      request.params.recordId,
+      char.characterId,
+      ...realLedgerLineagePredicate('e', lineage).params,
+    );
+    return { record, evidence, events: P93AuditService.events(db, char.characterId, request.params.recordId, 100, lineage) };
   });
 
   app.post(`${base}/records`, async (request, reply) => {
@@ -158,11 +185,13 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
-      const record = P93LedgerService.recordManual(db, char.characterId, recordInput(asBody(request.body)), `user:${session.userId}`);
+      const record = P93LedgerService.recordManual(db, char.characterId, recordInput(asBody(request.body)), `user:${session.userId}`, lineage);
       return { record };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : 'REAL 交易登记失败。' });
+    } catch {
+      return reply.status(400).send({ error: 'real_trade_registration_failed' });
     }
   });
 
@@ -171,12 +200,14 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
       const body = asBody(request.body);
-      const record = P93LedgerService.updateDraft(db, char.characterId, request.params.recordId, body as Partial<P93RecordInput>, `user:${session.userId}`);
+      const record = P93LedgerService.updateDraft(db, char.characterId, request.params.recordId, body as Partial<P93RecordInput>, `user:${session.userId}`, lineage);
       return { record };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '草稿更新失败。' });
+    } catch {
+      return reply.status(400).send({ error: 'draft_update_failed' });
     }
   });
 
@@ -186,20 +217,22 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
       if (!session) return;
       const char = linkedCharacter(db, session, reply);
       if (!char) return;
+      const lineage = requireLineage(db, session, reply, char.characterId);
+      if (!lineage) return;
       try {
         const body = asBody(request.body ?? {});
         const actor = `user:${session.userId}`;
         const reason = optionalText(body, 'reason');
         const record = action === 'submit'
-          ? P93LedgerService.submitDraft(db, char.characterId, request.params.recordId, actor)
+          ? P93LedgerService.submitDraft(db, char.characterId, request.params.recordId, actor, lineage)
           : action === 'verify'
-            ? P93LedgerService.verify(db, char.characterId, request.params.recordId, actor, reason)
+            ? P93LedgerService.verify(db, char.characterId, request.params.recordId, actor, reason, 'USER', lineage)
             : action === 'reject'
-              ? P93LedgerService.setVerification(db, char.characterId, request.params.recordId, 'REJECTED', actor, reason)
-              : P93LedgerService.reverse(db, char.characterId, request.params.recordId, actor, reason ?? '');
+              ? P93LedgerService.setVerification(db, char.characterId, request.params.recordId, 'REJECTED', actor, reason, lineage)
+              : P93LedgerService.reverse(db, char.characterId, request.params.recordId, actor, reason ?? '', lineage);
         return { record };
-      } catch (error) {
-        return reply.status(400).send({ error: error instanceof Error ? error.message : '交易状态处理失败。' });
+      } catch {
+        return reply.status(400).send({ error: 'trade_status_processing_failed' });
       }
     });
   }
@@ -209,6 +242,8 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
       const body = asBody(request.body);
       const record = P93LedgerService.correction(
@@ -218,10 +253,11 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
         recordInput(asBody(body.record)),
         `user:${session.userId}`,
         requiredText(body, 'reason'),
+        lineage,
       );
       return { record };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '交易更正失败。' });
+    } catch {
+      return reply.status(400).send({ error: 'trade_correction_failed' });
     }
   });
 
@@ -230,12 +266,15 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    const owner = realLedgerLineagePredicate(null, lineage);
     return {
       evidence: db.prepare(`
         SELECT * FROM real_trade_evidence
-        WHERE character_id = ?
+        WHERE character_id = ? AND ${owner.sql}
         ORDER BY captured_at DESC, created_at DESC LIMIT 500
-      `).all(char.characterId),
+      `).all(char.characterId, ...owner.params),
     };
   });
 
@@ -244,10 +283,12 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
-      return { evidence: P93LedgerService.addEvidence(db, char.characterId, evidenceInput(asBody(request.body))) };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '证据登记失败。' });
+      return { evidence: P93LedgerService.addEvidence(db, char.characterId, evidenceInput(asBody(request.body)), 'USER', lineage) };
+    } catch {
+      return reply.status(400).send({ error: 'evidence_registration_failed' });
     }
   });
 
@@ -256,6 +297,8 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
       const body = asBody(request.body);
       const evidence = P93LedgerService.setEvidenceStatus(
@@ -265,10 +308,11 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
         requiredText(body, 'status') as P93VerificationStatus,
         `user:${session.userId}`,
         optionalText(body, 'reason'),
+        lineage,
       );
       return { evidence };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '证据状态处理失败。' });
+    } catch {
+      return reply.status(400).send({ error: 'evidence_status_processing_failed' });
     }
   });
 
@@ -277,6 +321,8 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
       const body = asBody(request.body);
       P93LedgerService.linkEvidence(
@@ -287,10 +333,13 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
         requiredText(body, 'relation') as 'PRIMARY' | 'CORROBORATING' | 'CONFLICTING' | 'ADJUSTMENT',
         optionalText(body, 'confidence') as 'HIGH' | 'MEDIUM' | 'LOW' | undefined,
         optionalText(body, 'notes'),
+        'USER',
+        `user:${session.userId}`,
+        lineage,
       );
       return { ok: true };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '证据关联失败。' });
+    } catch {
+      return reply.status(400).send({ error: 'evidence_linking_failed' });
     }
   });
 
@@ -299,9 +348,21 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    const owner = realLedgerLineagePredicate(null, lineage);
     return {
-      lots: db.prepare('SELECT * FROM real_fifo_lots WHERE character_id = ? ORDER BY type_id, location_id, acquired_at, lot_id').all(char.characterId),
-      consumptions: db.prepare('SELECT * FROM real_fifo_consumptions WHERE character_id = ? ORDER BY created_at DESC LIMIT 500').all(char.characterId),
+      freshness: P93FifoService.performance(db, char.characterId, lineage).freshness,
+      lots: db.prepare(`
+        SELECT * FROM real_fifo_lots
+        WHERE character_id = ? AND ${owner.sql}
+        ORDER BY type_id, location_id, acquired_at, lot_id
+      `).all(char.characterId, ...owner.params),
+      consumptions: db.prepare(`
+        SELECT * FROM real_fifo_consumptions
+        WHERE character_id = ? AND ${owner.sql}
+        ORDER BY created_at DESC LIMIT 500
+      `).all(char.characterId, ...owner.params),
     };
   });
 
@@ -310,14 +371,32 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
-      const result = await P93EsiEvidenceService.syncWalletTransactions(db, char.characterId, {
-        userId: session.userId,
-        chatId: session.chatId,
-      });
+      const result = await P93EsiEvidenceService.syncWalletTransactions(
+        db,
+        char.characterId,
+        { userId: session.userId, chatId: session.chatId, characterId: char.characterId },
+        lineage,
+      );
+      if (!result.ok || result.status !== 'ok') {
+        const status = result.errorCode === 'WALLET_SCOPE_MISSING'
+          || result.errorCode === 'IDENTITY_UNAVAILABLE'
+          || result.errorCode === 'IDENTITY_CHANGED'
+          ? 403
+          : result.errorCode === 'ESI_REQUEST_FAILED'
+            ? 502
+            : 422;
+        return reply.status(status).send({
+          ...result,
+          ok: false,
+          error: 'wallet_evidence_sync_incomplete',
+        });
+      }
       return result;
-    } catch (error) {
-      return reply.status(502).send({ error: error instanceof Error ? error.message : 'ESI 钱包成交证据同步失败。' });
+    } catch {
+      return reply.status(502).send({ error: 'wallet_evidence_sync_failed' });
     }
   });
 
@@ -326,10 +405,12 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
-      return { calculation: P93FifoService.recalculate(db, char.characterId) };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : 'FIFO 历史重算失败。' });
+      return { calculation: P93FifoService.recalculate(db, char.characterId, lineage) };
+    } catch {
+      return reply.status(400).send({ error: 'fifo_recompute_failed' });
     }
   });
 
@@ -338,7 +419,12 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
-    return { performance: P93FifoService.performance(db, char.characterId), unrealized: P93FifoService.unrealized(db, char.characterId) };
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    return {
+      performance: P93FifoService.performance(db, char.characterId, lineage),
+      unrealized: P93FifoService.unrealized(db, char.characterId, lineage),
+    };
   });
 
   app.get<{ Querystring: { limit?: string; offset?: string } }>(`${base}/reconciliation`, async (request, reply) => {
@@ -346,8 +432,10 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     return {
-      reconciliation: P93ReconciliationService.latest(db, char.characterId, {
+      reconciliation: P93ReconciliationService.latest(db, char.characterId, lineage, {
         limit: request.query.limit,
         offset: request.query.offset,
       }),
@@ -359,10 +447,12 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     try {
-      return { reconciliation: P93ReconciliationService.run(db, char.characterId) };
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : '资产对账失败。' });
+      return { reconciliation: P93ReconciliationService.run(db, char.characterId, lineage) };
+    } catch {
+      return reply.status(400).send({ error: 'asset_reconciliation_failed' });
     }
   });
 
@@ -371,11 +461,13 @@ export function registerP93Routes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = linkedCharacter(db, session, reply);
     if (!char) return;
+    const lineage = requireLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
     return {
-      events: P93AuditService.events(db, char.characterId, undefined, 500),
-      calculationRuns: P93AuditService.calculationRuns(db, char.characterId),
-      reconciliationRuns: P93AuditService.reconciliationRuns(db, char.characterId),
-      integrity: P93AuditService.integrityCheck(db, char.characterId),
+      events: P93AuditService.events(db, char.characterId, undefined, 500, lineage),
+      calculationRuns: P93AuditService.calculationRuns(db, char.characterId, 50, lineage),
+      reconciliationRuns: P93AuditService.reconciliationRuns(db, char.characterId, lineage),
+      integrity: P93AuditService.integrityCheck(db, char.characterId, lineage),
     };
   });
 }

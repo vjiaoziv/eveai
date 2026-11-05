@@ -359,7 +359,7 @@ describe('perimeter advisor', () => {
     const danger = {
       rule: 'camp_next_hop' as const,
       severity: 'danger' as const,
-      text: { ru: '', en: '' },
+      text: { zh: '', ru: '', en: '' },
       systemId: 1,
       killmailId: null,
       repeats: 0,

@@ -4,10 +4,12 @@ import { runMigrations } from '../../src/db/migrations.js';
 import { RealValuationService } from '../../src/assets/valuation-service.js';
 import { FEE_MODEL_VERSION } from '../../src/trading/fee-engine.js';
 import type { Db } from '../../src/db/sqlite.js';
+import { testAssetLineage } from '../helpers/asset-lineage.js';
 
 const CHARACTER_ID = 90000021;
 const JITA_STATION = 60003760;
 const JITA_REGION = 10000002;
+const LINEAGE = testAssetLineage(CHARACTER_ID);
 
 let db: Database.Database;
 
@@ -33,9 +35,11 @@ function seed(): void {
 
     INSERT INTO real_asset_snapshots
       (snapshot_id, character_id, job_id, started_at, completed_at, status,
-       total_items, total_unique_types, total_locations, total_quantity, data_hash, source, is_latest)
+       total_items, total_unique_types, total_locations, total_quantity, data_hash, source, is_latest,
+       owner_user_id, owner_chat_id, binding_epoch, binding_digest)
     VALUES ('SNAP-VAL-1', ${CHARACTER_ID}, NULL, datetime('now'), datetime('now'),
-            'COMPLETED', 6, 5, 2, 266, 'hash1', 'esi_character_assets', 1);
+            'COMPLETED', 6, 5, 2, 266, 'hash1', 'esi_character_assets', 1,
+            ${LINEAGE.ownerUserId}, ${LINEAGE.ownerChatId}, ${LINEAGE.bindingEpoch}, '${LINEAGE.bindingDigest}');
 
     INSERT INTO real_asset_snapshot_items
       (snapshot_id, item_id, type_id, quantity, location_id, location_type, location_flag,
@@ -80,7 +84,7 @@ afterEach(() => {
 
 describe('multi-perspective asset valuation (P9.2.4)', () => {
   it('values depth-walked liquidation and replacement with fees, never summing perspectives', () => {
-    const run = RealValuationService.run(db as Db, CHARACTER_ID);
+    const run = RealValuationService.run(db as Db, CHARACTER_ID, LINEAGE);
     expect(run.status).toBe('COMPLETED');
     expect(run.itemsTotal).toBe(6);
 
@@ -141,22 +145,22 @@ describe('multi-perspective asset valuation (P9.2.4)', () => {
   });
 
   it('persists the run with fee model and snapshot provenance and keeps history', () => {
-    const first = RealValuationService.run(db as Db, CHARACTER_ID);
-    const second = RealValuationService.run(db as Db, CHARACTER_ID);
+    const first = RealValuationService.run(db as Db, CHARACTER_ID, LINEAGE);
+    const second = RealValuationService.run(db as Db, CHARACTER_ID, LINEAGE);
 
-    const runs = RealValuationService.listRuns(db as Db, CHARACTER_ID);
+    const runs = RealValuationService.listRuns(db as Db, CHARACTER_ID, LINEAGE);
     expect(runs).toHaveLength(2);
     expect(runs[0].valuation_id).toBe(second.valuationId);
     expect(runs[0].fee_model_version).toBe(FEE_MODEL_VERSION);
     expect(runs[0].market_snapshot_at).toBeTruthy();
     expect(runs[0].status).toBe('COMPLETED');
 
-    const detail = RealValuationService.getRun(db as Db, CHARACTER_ID, first.valuationId)!;
+    const detail = RealValuationService.getRun(db as Db, CHARACTER_ID, first.valuationId, LINEAGE)!;
     expect(detail.items).toHaveLength(6);
     expect(detail.items[0].statuses).toContain('VALUED');
     expect(detail.items[0].flags).toBeInstanceOf(Array);
 
-    const totals = RealValuationService.latestTotals(db as Db, CHARACTER_ID)!;
+    const totals = RealValuationService.latestTotals(db as Db, CHARACTER_ID, LINEAGE)!;
     expect(totals.valuationId).toBe(second.valuationId);
     expect(totals.costBasis).toBeNull();
     expect(totals.costBasisStatus).toBe('UNKNOWN_PENDING_P9_3');
@@ -165,8 +169,8 @@ describe('multi-perspective asset valuation (P9.2.4)', () => {
 
   it('rejects valuation without a complete snapshot and records the failure', () => {
     db.prepare("UPDATE real_asset_snapshots SET status = 'FAILED' WHERE snapshot_id = 'SNAP-VAL-1'").run();
-    expect(() => RealValuationService.run(db as Db, CHARACTER_ID)).toThrow(/完整资产快照/);
+    expect(() => RealValuationService.run(db as Db, CHARACTER_ID, LINEAGE)).toThrow(/完整资产快照/);
     // A FAILED header row is not created when no snapshot exists at all.
-    expect(RealValuationService.listRuns(db as Db, CHARACTER_ID)).toHaveLength(0);
+    expect(RealValuationService.listRuns(db as Db, CHARACTER_ID, LINEAGE)).toHaveLength(0);
   });
 });

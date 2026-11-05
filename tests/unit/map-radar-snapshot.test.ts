@@ -31,7 +31,7 @@ function bubble(): BubblePayload {
 }
 
 const advisory = (n: number): Advisory => ({
-  rule: 'threat_rise', severity: 'warn', text: { ru: `тревога ${n}`, en: `alarm ${n}` },
+  rule: 'threat_rise', severity: 'warn', text: { zh: `告警 ${n}`, ru: `тревога ${n}`, en: `alarm ${n}` },
   systemId: 2, killmailId: null, repeats: 0, stateKey: `k${n}`, at: new Date(NOW).toISOString(),
 });
 

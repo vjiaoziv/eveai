@@ -6,6 +6,7 @@ import { OrderBookSimulator } from './orderbook-simulator.js';
 import { PortfolioManager, DEFAULT_RISK_LIMITS, type PortfolioRiskLimits } from './portfolio-manager.js';
 import { DraftSystem } from './draft-system.js';
 import { PaperTradingSystem } from './paper-trading.js';
+import type { AssetLineage } from '../assets/asset-lineage.js';
 import type { 
   FeeContext, 
   OpportunityRating, 
@@ -311,6 +312,7 @@ export class TradingPipeline {
       maxCargoM3?: number;
       requestedQty?: number;
       characterId?: number;
+      assetLineage?: AssetLineage;
       feeContext?: FeeContext;
       riskLimits?: PortfolioRiskLimits;
     },
@@ -406,14 +408,24 @@ export class TradingPipeline {
     // Stage 6: Portfolio Risk Check (if characterId provided)
     let portfolioVeto: string | undefined;
     if (candidate.characterId) {
-      const breakdown = PortfolioManager.getCapitalBreakdown(db, candidate.characterId, limits);
+      const breakdown = PortfolioManager.getCapitalBreakdown(
+        db,
+        candidate.characterId,
+        limits,
+        candidate.assetLineage,
+      );
       const riskCheck = PortfolioManager.validateTradeRisk(
         breakdown,
         trade.netCost,
         candidate.strategy,
         unitM3 * actualQty,
         limits,
-        { db, typeId: candidate.typeId, categoryId: meta.category_id || undefined }
+        {
+          db,
+          typeId: candidate.typeId,
+          categoryId: meta.category_id || undefined,
+          assetLineage: candidate.assetLineage,
+        }
       );
       if (!riskCheck.allowed) {
         portfolioVeto = riskCheck.reason;

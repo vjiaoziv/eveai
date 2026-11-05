@@ -61,11 +61,11 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const q = typeof request.query.q === 'string' ? request.query.q.trim() : '';
     if (q.length < SEARCH_MIN_QUERY_LENGTH) {
-      return reply.status(400).send({ error: 'Поисковый запрос должен содержать минимум 2 символа.' });
+      return reply.status(400).send({ error: 'search_query_too_short' });
     }
     const limit = parseOptionalBoundedInteger(request.query.limit, 1, SEARCH_MAX_LIMIT);
     if (limit === null) {
-      return reply.status(400).send({ error: `Лимит должен быть целым числом от 1 до ${SEARCH_MAX_LIMIT}.` });
+      return reply.status(400).send({ error: 'invalid_limit' });
     }
     return { ok: true, results: searchMarketTypes(db, q, limit ?? SEARCH_DEFAULT_LIMIT) };
   });
@@ -75,7 +75,7 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const parent = parseOptionalBoundedInteger(request.query.parent, 1, Number.MAX_SAFE_INTEGER);
     if (parent === null) {
-      return reply.status(400).send({ error: 'Некорректная маркет-группа.' });
+      return reply.status(400).send({ error: 'invalid_market_group' });
     }
     markStaticSde(reply);
     return { ok: true, groups: getMarketGroupTree(db, parent ?? null) };
@@ -85,11 +85,11 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const groupId = parsePositiveInteger(request.params.groupId);
     if (!groupId) {
-      return reply.status(400).send({ error: 'Некорректная маркет-группа.' });
+      return reply.status(400).send({ error: 'invalid_market_group' });
     }
     const limit = parseOptionalBoundedInteger(request.query.limit, 1, GROUP_TYPES_MAX_LIMIT);
     if (limit === null) {
-      return reply.status(400).send({ error: `Лимит должен быть целым числом от 1 до ${GROUP_TYPES_MAX_LIMIT}.` });
+      return reply.status(400).send({ error: 'invalid_limit' });
     }
     markStaticSde(reply);
     return { ok: true, types: getMarketGroupTypes(db, groupId, limit ?? GROUP_TYPES_DEFAULT_LIMIT) };
@@ -100,13 +100,13 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const typeId = parsePositiveInteger(request.params.typeId);
     if (!typeId) {
-      return reply.status(400).send({ error: 'Некорректный идентификатор товара.' });
+      return reply.status(400).send({ error: 'invalid_type_id' });
     }
     const regionId = parseRequiredRegionId(request.query.region_id, reply);
     if (regionId === null) return;
     const overview = getTypeOverview(db, typeId, regionId);
     if (!overview) {
-      return reply.status(404).send({ error: 'Товар не найден в локальной базе.' });
+      return reply.status(404).send({ error: 'type_not_found_in_local_db' });
     }
     return { ok: true, overview };
   });
@@ -116,22 +116,22 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const typeId = parsePositiveInteger(request.params.typeId);
     if (!typeId) {
-      return reply.status(400).send({ error: 'Некорректный идентификатор товара.' });
+      return reply.status(400).send({ error: 'invalid_type_id' });
     }
     const regionId = parseRequiredRegionId(request.query.region_id, reply);
     if (regionId === null) return;
     const sideRaw = request.query.side;
     if (sideRaw !== 'sell' && sideRaw !== 'buy') {
-      return reply.status(400).send({ error: "Параметр side должен быть 'sell' или 'buy'." });
+      return reply.status(400).send({ error: 'invalid_side_param' });
     }
     const side: MarketOrderSide = sideRaw;
     const limit = parseOptionalBoundedInteger(request.query.limit, 1, ORDERS_MAX_LIMIT);
     if (limit === null) {
-      return reply.status(400).send({ error: `Лимит должен быть целым числом от 1 до ${ORDERS_MAX_LIMIT}.` });
+      return reply.status(400).send({ error: 'invalid_limit' });
     }
     const offset = parseOptionalBoundedInteger(request.query.offset, 0, Number.MAX_SAFE_INTEGER);
     if (offset === null) {
-      return reply.status(400).send({ error: 'Смещение (offset) должно быть неотрицательным целым числом.' });
+      return reply.status(400).send({ error: 'invalid_offset' });
     }
     return {
       ok: true,
@@ -150,15 +150,15 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const typeId = parsePositiveInteger(request.params.typeId);
     if (!typeId) {
-      return reply.status(400).send({ error: 'Некорректный идентификатор товара.' });
+      return reply.status(400).send({ error: 'invalid_type_id' });
     }
     const langRaw = request.query.lang;
-    if (langRaw !== undefined && langRaw !== 'en' && langRaw !== 'ru') {
-      return reply.status(400).send({ error: "Параметр lang должен быть 'en' или 'ru'." });
+    if (langRaw !== undefined && langRaw !== 'en' && langRaw !== 'ru' && langRaw !== 'zh') {
+      return reply.status(400).send({ error: 'invalid_lang_param' });
     }
     const info = getMarketTypeInfo(db, typeId, langRaw ?? 'en');
     if (!info) {
-      return reply.status(404).send({ error: 'Товар не найден в локальной базе.' });
+      return reply.status(404).send({ error: 'type_not_found_in_local_db' });
     }
     markStaticSde(reply);
     return { ok: true, info };
@@ -169,7 +169,7 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const typeId = parsePositiveInteger(request.params.typeId);
     if (!typeId) {
-      return reply.status(400).send({ error: 'Некорректный идентификатор товара.' });
+      return reply.status(400).send({ error: 'invalid_type_id' });
     }
     return { ok: true, regions: getRegionalComparison(db, typeId) };
   });
@@ -179,7 +179,7 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const typeId = parsePositiveInteger(request.params.typeId);
     if (!typeId) {
-      return reply.status(400).send({ error: 'Некорректный идентификатор товара.' });
+      return reply.status(400).send({ error: 'invalid_type_id' });
     }
     const regionId = parseRequiredRegionId(request.query.region_id, reply);
     if (regionId === null) return;
@@ -187,7 +187,7 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     const daysRaw = request.query.days;
     if (daysRaw !== undefined && daysRaw !== '') {
       if (!/^\d+$/.test(daysRaw) || !HISTORY_ALLOWED_DAYS.has(Number(daysRaw))) {
-        return reply.status(400).send({ error: 'Параметр days должен быть одним из: 30, 90, 365, 0 (вся история).' });
+        return reply.status(400).send({ error: 'invalid_days_param' });
       }
       days = Number(daysRaw);
     }
@@ -197,11 +197,11 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     // error budget.
     const typeExists = db.prepare('SELECT 1 FROM sde_types WHERE type_id = ?').get(typeId);
     if (!typeExists) {
-      return reply.status(404).send({ error: 'Предмет не найден.' });
+      return reply.status(404).send({ error: 'item_not_found' });
     }
     const regionExists = db.prepare('SELECT 1 FROM sde_regions WHERE region_id = ?').get(regionId);
     if (!regionExists) {
-      return reply.status(400).send({ error: 'Неизвестный регион.' });
+      return reply.status(400).send({ error: 'unknown_region' });
     }
     const history = await getTypeHistory(db, regionId, typeId, { days: days === 0 ? null : days });
     return { ok: true, history };
@@ -218,12 +218,12 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const body = request.body;
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
-      return reply.status(400).send({ error: 'Некорректное тело запроса.' });
+      return reply.status(400).send({ error: 'invalid_request_body' });
     }
     const { type_id: typeIdRaw, region_id: regionIdRaw } = body as Record<string, unknown>;
     const typeId = parseBodyPositiveInteger(typeIdRaw);
     if (!typeId) {
-      return reply.status(400).send({ error: 'Некорректный идентификатор товара.' });
+      return reply.status(400).send({ error: 'invalid_type_id' });
     }
     // region_id is always stored as a concrete value: the (user_id, type_id,
     // region_id) primary key treats NULL as distinct, so a nullable region
@@ -232,13 +232,13 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (regionIdRaw !== undefined && regionIdRaw !== null && regionIdRaw !== '') {
       const parsed = parseBodyPositiveInteger(regionIdRaw);
       if (!parsed) {
-        return reply.status(400).send({ error: 'Некорректный регион.' });
+        return reply.status(400).send({ error: 'invalid_region' });
       }
       regionId = parsed;
     }
     const typeExists = db.prepare('SELECT 1 FROM sde_types WHERE type_id = ?').get(typeId);
     if (!typeExists) {
-      return reply.status(404).send({ error: 'Товар не найден в локальной базе.' });
+      return reply.status(404).send({ error: 'type_not_found_in_local_db' });
     }
     // Validate the region like the history route does: the market-history worker
     // adds every watchlist pair to its hourly sync schedule and never prunes it,
@@ -246,7 +246,7 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     // the shared ESI error budget for every user.
     const regionExists = db.prepare('SELECT 1 FROM sde_regions WHERE region_id = ?').get(regionId);
     if (!regionExists) {
-      return reply.status(400).send({ error: 'Неизвестный регион.' });
+      return reply.status(400).send({ error: 'unknown_region' });
     }
 
     const existing = readWatchlistItem(db, session.userId, typeId, regionId);
@@ -256,7 +256,7 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     const { count } = db.prepare('SELECT COUNT(*) AS count FROM market_watchlist WHERE user_id = ?')
       .get(session.userId) as { count: number };
     if (count >= WATCHLIST_MAX_ITEMS) {
-      return reply.status(409).send({ error: `Список наблюдения заполнен (максимум ${WATCHLIST_MAX_ITEMS} позиций).` });
+      return reply.status(409).send({ error: 'watchlist_full' });
     }
     db.prepare(`
       INSERT INTO market_watchlist (user_id, type_id, region_id)
@@ -272,14 +272,14 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const typeId = parsePositiveInteger(request.params.typeId);
     if (!typeId) {
-      return reply.status(400).send({ error: 'Некорректный идентификатор товара.' });
+      return reply.status(400).send({ error: 'invalid_type_id' });
     }
     let regionId = config.market.defaultRegionId;
     const regionRaw = request.query.region_id;
     if (regionRaw !== undefined && regionRaw !== '') {
       const parsed = parsePositiveInteger(regionRaw);
       if (!parsed) {
-        return reply.status(400).send({ error: 'Некорректный регион.' });
+        return reply.status(400).send({ error: 'invalid_region' });
       }
       regionId = parsed;
     }
@@ -287,7 +287,7 @@ export function registerMarketRoutes(app: FastifyInstance, db: Db): void {
       'DELETE FROM market_watchlist WHERE user_id = ? AND type_id = ? AND region_id = ?',
     ).run(session.userId, typeId, regionId);
     if (result.changes === 0) {
-      return reply.status(404).send({ error: 'Позиция не найдена в списке наблюдения.' });
+      return reply.status(404).send({ error: 'watchlist_item_not_found' });
     }
     return { ok: true };
   });
@@ -319,7 +319,7 @@ type LimitQuery = { limit?: string };
 type RegionQuery = { region_id?: string };
 type OrdersQuery = { region_id?: string; side?: string; offset?: string; limit?: string };
 type HistoryQuery = { region_id?: string; days?: string };
-type InfoQuery = { lang?: 'en' | 'ru' };
+type InfoQuery = { lang?: 'en' | 'ru' | 'zh' };
 type GroupParams = { groupId: string };
 type TypeParams = { typeId: string };
 
@@ -391,12 +391,12 @@ function parseOptionalBoundedInteger(value: string | undefined, min: number, max
 /** Required region_id query parameter; sends the 400 itself and returns null. */
 function parseRequiredRegionId(value: string | undefined, reply: FastifyReply): number | null {
   if (value === undefined || value === '') {
-    void reply.status(400).send({ error: 'Параметр region_id обязателен.' });
+    void reply.status(400).send({ error: 'region_id_required' });
     return null;
   }
   const parsed = parsePositiveInteger(value);
   if (!parsed) {
-    void reply.status(400).send({ error: 'Некорректный регион.' });
+    void reply.status(400).send({ error: 'invalid_region' });
     return null;
   }
   return parsed;

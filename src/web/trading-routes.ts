@@ -11,9 +11,24 @@ import { PaperTradingSystem } from '../trading/paper-trading.js';
 import { PerformanceAnalytics } from '../trading/performance-analytics.js';
 import { PaperTradingRuntimeValidation } from '../trading/runtime-validation.js';
 import { getLinkedCharacter } from '../eve/sso.js';
+import { resolveAssetLineage, type AssetLineage } from '../assets/asset-lineage.js';
 import type { WebSession } from './web-session.js';
 import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
 function sessionContext(session: WebSession) { return { userId: session.userId, chatId: session.chatId }; }
+
+function requireTradingAssetLineage(
+  db: Db,
+  session: WebSession,
+  reply: { status(code: number): { send(payload: unknown): unknown } },
+  characterId: number,
+): AssetLineage | null {
+  try {
+    return resolveAssetLineage(db, characterId, session.userId, session.chatId);
+  } catch {
+    reply.status(403).send({ error: 'character_asset_context_invalid' });
+    return null;
+  }
+}
 
 export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
   // 1. Capital Breakdown & Risk Limits
@@ -22,9 +37,13 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
     if (!char) {
-      return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+      return reply.status(404).send({ error: 'trading_character_required' });
     }
-    const breakdown = PortfolioManager.getCapitalBreakdown(db, char.characterId);
+    const lineage = requireTradingAssetLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    const breakdown = PortfolioManager.getCapitalBreakdown(
+      db, char.characterId, undefined, lineage,
+    );
     return { capital: breakdown };
   });
 
@@ -68,10 +87,10 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireSession(db, request, reply);
     if (!session) return;
     const typeId = clampPositiveInteger(request.params.typeId, 0, Number.MAX_SAFE_INTEGER);
-    if (!typeId) return reply.status(400).send({ error: 'typeId 必须是正整数' });
+    if (!typeId) return reply.status(400).send({ error: 'trading_invalid_type_id' });
     const analysis = ManufacturingArbitrageStrategy.analyzeReprocessing(db, typeId);
     if (!analysis) {
-      return reply.status(404).send({ error: '该物品无法再处理或缺少矿物数据' });
+      return reply.status(404).send({ error: 'trading_item_not_processable' });
     }
     return { analysis };
   });
@@ -81,11 +100,11 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireSession(db, request, reply);
     if (!session) return;
     const typeId = clampPositiveInteger(request.params.typeId, 0, Number.MAX_SAFE_INTEGER);
-    if (!typeId) return reply.status(400).send({ error: 'typeId 必须是正整数' });
+    if (!typeId) return reply.status(400).send({ error: 'trading_invalid_type_id' });
     const regionId = clampPositiveInteger(request.query.regionId, 10000002, Number.MAX_SAFE_INTEGER);
     const trend = TrendAnalysisStrategy.analyzeTrend(db, typeId, regionId);
     if (!trend) {
-      return reply.status(404).send({ error: '暂无该物品的历史价格点' });
+      return reply.status(404).send({ error: 'trading_no_price_history' });
     }
     return { trend };
   });
@@ -104,9 +123,13 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
-    if (!char) return reply.status(404).send({ error: '尚未关联角色' });
+    if (!char) return reply.status(404).send({ error: 'trading_no_character_linked' });
 
-    const bd = PortfolioManager.getCapitalBreakdown(db, char.characterId);
+    const lineage = requireTradingAssetLineage(db, session, reply, char.characterId);
+    if (!lineage) return;
+    const bd = PortfolioManager.getCapitalBreakdown(
+      db, char.characterId, undefined, lineage,
+    );
     const opps = RegionalHaulingStrategy.scan(db, {
       route: STANDARD_HIGHSEC_ROUTES[0],
       mode: 'instant_fill',
@@ -118,14 +141,14 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     // Enforce 10-stage pipeline: only A or approved B can generate drafts
     const validOpps = opps.filter(o => o.opportunityRating !== 'D' && !o.riskVetoReason);
     if (validOpps.length === 0) {
-      return reply.status(409).send({ error: '当前无通过统一决策管线风控评估的高等级套利机会' });
+      return reply.status(409).send({ error: 'trading_no_high_grade_opportunity' });
     }
 
     try {
       const draft = DraftSystem.createDraft(db, char.characterId, validOpps[0], 24);
       return { draft, opportunity: validOpps[0] };
-    } catch (err: any) {
-      return reply.status(409).send({ error: err.message });
+    } catch {
+      return reply.status(409).send({ error: 'trading_draft_conflict' });
     }
   });
 
@@ -133,13 +156,13 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
-    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    if (!char) return reply.status(404).send({ error: 'trading_character_required' });
     try {
       const ok = DraftSystem.updateStatus(db, request.params.draftId, 'approved', undefined, char.characterId);
-      if (!ok) return reply.status(404).send({ error: '草案不存在' });
+      if (!ok) return reply.status(404).send({ error: 'trading_draft_not_found' });
       return { success: true };
-    } catch (err: any) {
-      return reply.status(403).send({ error: err.message });
+    } catch {
+      return reply.status(403).send({ error: 'trading_draft_action_failed' });
     }
   });
 
@@ -147,9 +170,9 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
-    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    if (!char) return reply.status(404).send({ error: 'trading_character_required' });
     const ok = DraftSystem.updateStatus(db, request.params.draftId, 'rejected', undefined, char.characterId);
-    if (!ok) return reply.status(404).send({ error: '草案不存在' });
+    if (!ok) return reply.status(404).send({ error: 'trading_draft_not_found' });
     return { success: true };
   });
 
@@ -160,7 +183,7 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
-    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    if (!char) return reply.status(404).send({ error: 'trading_character_required' });
     const b = request.body;
     try {
       const ok = DraftSystem.recordManualExecution(db, {
@@ -172,10 +195,10 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
         notes: b.notes,
         characterId: char.characterId,
       });
-      if (!ok) return reply.status(404).send({ error: '草案不存在' });
+      if (!ok) return reply.status(404).send({ error: 'trading_draft_not_found' });
       return { success: true };
-    } catch (err: any) {
-      return reply.status(403).send({ error: err.message });
+    } catch {
+      return reply.status(403).send({ error: 'trading_draft_action_failed' });
     }
   });
 
@@ -203,7 +226,7 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireSession(db, request, reply);
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
-    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    if (!char) return reply.status(404).send({ error: 'trading_character_required' });
     if (!PaperTradingSystem.getAccount(db, char.characterId)) {
       return reply.status(200).send({
         initialized: false,
@@ -277,7 +300,7 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     if (request.query.orderId) {
       const owned = db.prepare('SELECT 1 FROM paper_trading_orders WHERE order_id = ? AND character_id = ?')
         .get(request.query.orderId, char.characterId);
-      if (!owned) return reply.status(404).send({ error: '订单不存在' });
+      if (!owned) return reply.status(404).send({ error: 'trading_order_not_found' });
       return {
         fills: db.prepare(`
           SELECT f.* FROM paper_fills f
@@ -303,7 +326,7 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireSession(db, request, reply);
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
-    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    if (!char) return reply.status(404).send({ error: 'trading_character_required' });
     if (!PaperTradingSystem.getAccount(db, char.characterId)) {
       return { initialized: false, message: 'Paper Trading 尚未初始化；读取接口不会创建模拟账户。', performance: null };
     }
@@ -314,7 +337,7 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireSession(db, request, reply);
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
-    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    if (!char) return reply.status(404).send({ error: 'trading_character_required' });
     if (!PaperTradingSystem.getAccount(db, char.characterId)) {
       return { initialized: false, message: 'Paper Trading 尚未初始化；读取接口不会创建模拟账户。', validation: null };
     }
@@ -325,7 +348,7 @@ export function registerTradingRoutes(app: FastifyInstance, db: Db): void {
     const session = requireSession(db, request, reply);
     if (!session) return;
     const char = getLinkedCharacter(db, sessionContext(session));
-    if (!char) return reply.status(404).send({ error: '尚未关联 EVE 角色' });
+    if (!char) return reply.status(404).send({ error: 'trading_character_required' });
     if (!PaperTradingSystem.getAccount(db, char.characterId)) {
       return { initialized: false, message: 'Paper Trading 尚未初始化；读取接口不会创建模拟账户。', risk: null };
     }

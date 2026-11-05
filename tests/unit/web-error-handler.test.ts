@@ -34,6 +34,6 @@ describe('web error handler', () => {
     expect(response.statusCode).toBe(500);
     expect(response.body).not.toContain('SQLITE');
     expect(response.body).not.toContain('sqlite.ts');
-    expect(response.json()).toEqual({ error: 'Внутренняя ошибка сервера.' });
+    expect(response.json()).toEqual({ error: 'internal_server_error' });
   });
 });

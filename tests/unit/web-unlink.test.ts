@@ -226,7 +226,7 @@ describe('browser character unlink', () => {
       headers: mutationHeaders(intruder),
     });
     expect(foreign.statusCode).toBe(404);
-    expect(foreign.json()).toEqual({ error: 'Персонаж не найден.' });
+    expect(foreign.json()).toEqual({ error: 'character_not_found' });
 
     const unknown = await app.inject({
       method: 'POST',

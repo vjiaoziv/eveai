@@ -641,7 +641,7 @@ describe('Perimeter live radar, end to end over real SSE', () => {
     // And the pilot jumps to B before that build finishes.
     script.systemId = B;
     try {
-      await advanceUntil(() => of(tab, 'location').length === 2, 'jump location');
+      await advanceUntil(() => of(tab, 'location').some((frame) => (frame.data.location as { solarSystemId: number }).solarSystemId === B), 'jump location');
     } catch (error) {
       const diagnostics = {
         error: (error as Error).message,

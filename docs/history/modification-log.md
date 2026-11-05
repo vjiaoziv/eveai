@@ -1,4 +1,4 @@
-﻿# EVE AI Agent 源码与架构修改记录 (MODIFICATION_LOG.md)
+# EVE AI Agent 源码与架构修改记录 (MODIFICATION_LOG.md)
 
 本日志详尽记录自上游主干克隆以来，在部署分支 `deploy/eve-ai-agent` 上执行的所有配置、依赖修复与中文化修改。
 
@@ -105,14 +105,14 @@
   - `eve-agent drafts` / `draft-auto` / `draft-approve`：自动化生成、查看与审批订单草案。
 ### 8. 2026-11-02：完成 EVEAI 交易系统第二轮独立代码与实盘风控审计
 - **审计交付文件**：
-  - `FIRST_TRADE_RECALCULATION.md`：首笔套利草案 `TR-2026-000001` 全流程数学穿透复核。揭露虚假价差（Phantom Spread）缺陷：杜迪克西 700k 买单仅剩 2 件，实盘执行导致 -85.63% 巨额亏损（亏损 860 万 ISK）。
-  - `FEE_ENGINE_AUDIT.md`：`src/trading/fee-engine.ts` 逐行审查。查出基础销售税硬编码为 8.0%（CCP 现行基准为 7.5%）、漏算 100 ISK 最低经纪人费与 Upwell 建筑 SCC 附加费。
-  - `PORTFOLIO_RISK_AUDIT.md`：`src/trading/portfolio-manager.ts` 资金风控审查。查出在途已审批草案未扣减投资资金的并发漏洞、品类 30% 上限未生效、单品 15% 上限未累计已有持仓以及代码段重复等缺陷。
-  - `MARKET_DATA_AUDIT.md`：`src/trading/data-center.ts` 与 `orderbook-simulator.ts` 审计。查出策略层完全旁路订单簿深度仿真器、两地快照时间戳存在 13.5 小时严重漂移等问题。
-  - `BACKTEST_VALIDATION.md`：`src/trading/backtesting/engine.ts` 回测审查。查出未来数据泄漏（当日最低买、次日均价卖）与最理想成交假设，将全部六大策略定级为【实验性策略】。
-  - `SECURITY_PERMISSION_AUDIT.md`：系统安全审查。确认 ESI Token 密文加密（AES-256-GCM + HKDF）安全，Agent tools 100% 只读，无游戏内写入交易能力。
-  - `DEFECT_AND_REMEDIATION_LIST.md`：汇总 12 项缺陷（7 项 P0 致命级、4 项 P1 严重级、1 项 P2 改进级）及代码级修复方案。
-  - `SECOND_AUDIT_REPORT.md`：第二轮独立审计综合评估报告，裁决该交易系统【未达实盘标准，严禁投入真实游戏资金】。
+  - `docs/audit/pre-P8/FIRST_TRADE_RECALCULATION.md`：首笔套利草案 `TR-2026-000001` 全流程数学穿透复核。揭露虚假价差（Phantom Spread）缺陷：杜迪克西 700k 买单仅剩 2 件，实盘执行导致 -85.63% 巨额亏损（亏损 860 万 ISK）。
+  - `docs/audit/pre-P8/FEE_ENGINE_AUDIT.md`：`src/trading/fee-engine.ts` 逐行审查。查出基础销售税硬编码为 8.0%（CCP 现行基准为 7.5%）、漏算 100 ISK 最低经纪人费与 Upwell 建筑 SCC 附加费。
+  - `docs/audit/pre-P8/PORTFOLIO_RISK_AUDIT.md`：`src/trading/portfolio-manager.ts` 资金风控审查。查出在途已审批草案未扣减投资资金的并发漏洞、品类 30% 上限未生效、单品 15% 上限未累计已有持仓以及代码段重复等缺陷。
+  - `docs/audit/pre-P8/MARKET_DATA_AUDIT.md`：`src/trading/data-center.ts` 与 `orderbook-simulator.ts` 审计。查出策略层完全旁路订单簿深度仿真器、两地快照时间戳存在 13.5 小时严重漂移等问题。
+  - `docs/audit/pre-P8/BACKTEST_VALIDATION.md`：`src/trading/backtesting/engine.ts` 回测审查。查出未来数据泄漏（当日最低买、次日均价卖）与最理想成交假设，将全部六大策略定级为【实验性策略】。
+  - `docs/audit/pre-P8/SECURITY_PERMISSION_AUDIT.md`：系统安全审查。确认 ESI Token 密文加密（AES-256-GCM + HKDF）安全，Agent tools 100% 只读，无游戏内写入交易能力。
+  - `docs/audit/pre-P8/DEFECT_AND_REMEDIATION_LIST.md`：汇总 12 项缺陷（7 项 P0 致命级、4 项 P1 严重级、1 项 P2 改进级）及代码级修复方案。
+  - `docs/audit/pre-P8/SECOND_AUDIT_REPORT.md`：第二轮独立审计综合评估报告，裁决该交易系统【未达实盘标准，严禁投入真实游戏资金】。
 
 ### 9. 2026-11-02：完成 EVEAI P8 阶段交易决策可信度重建与缺陷修复
 - **架构重构与核心修复**：
@@ -126,7 +126,7 @@
   - 17 项交易与风控专项测试 100% 通过（`trading-fee-simulator.test.ts`, `trading-system-full.test.ts`, `trading-pipeline.test.ts`）。
   - `tsc --noEmit` 0 错误，前端生产打包成功。
 - **交付文档**：
-  - 生成 `P8_REPAIR_PLAN.md`, `P8_IMPLEMENTATION_REPORT.md`, `P8_MARKET_DATA_VALIDATION.md`, `P8_ORDERBOOK_SIMULATION.md`, `P8_FEE_ENGINE_VALIDATION.md`, `P8_PORTFOLIO_RISK_VALIDATION.md`, `P8_BACKTEST_VALIDATION.md`, `P8_OPPORTUNITY_RATING.md`, `P8_PAPER_TRADING_GUIDE.md`, `P8_SECURITY_VALIDATION.md`, `P8_TEST_REPORT.md`, `P8_KNOWN_LIMITATIONS.md` 共 12 份交付文档。
+  - 生成 `docs/audit/P8/P8_REPAIR_PLAN.md`, `docs/audit/P8/P8_IMPLEMENTATION_REPORT.md`, `docs/audit/P8/P8_MARKET_DATA_VALIDATION.md`, `docs/audit/P8/P8_ORDERBOOK_SIMULATION.md`, `docs/audit/P8/P8_FEE_ENGINE_VALIDATION.md`, `docs/audit/P8/P8_PORTFOLIO_RISK_VALIDATION.md`, `docs/audit/P8/P8_BACKTEST_VALIDATION.md`, `docs/audit/P8/P8_OPPORTUNITY_RATING.md`, `docs/audit/P8/P8_PAPER_TRADING_GUIDE.md`, `docs/audit/P8/P8_SECURITY_VALIDATION.md`, `docs/audit/P8/P8_TEST_REPORT.md`, `docs/audit/P8/P8_KNOWN_LIMITATIONS.md` 共 12 份交付文档。
 
 ### 10. 2026-11-02：全面同步更新 EVE AI Agent 技能定义文件 (eve-agent SKILL.md)
 - **更新目标**：
@@ -152,7 +152,7 @@
   - 新增 `tests/unit/p8-5-integration.test.ts`，覆盖案例 A（多档深度优化截断）、案例 B（issued 不同但快照同步）、案例 C（issued 相同但快照陈旧）、案例 D（回测无未来数据泄漏）、案例 E（多档库存真实估值与 BPC 隔离）、案例 F（全链路撤销草案锁死）。
   - 4 套专项测试共 23 项单测 100% 通过；TypeScript 0 错误；Vite 前端构建成功。
 - **交付文档**：
-  - 生成 `P8_5_INDEPENDENT_AUDIT.md`, `P8_5_MARKET_TIMESTAMP_AUDIT.md`, `P8_5_ORDERBOOK_LOGIC_AUDIT.md`, `P8_5_BACKTEST_CAUSALITY_AUDIT.md`, `P8_5_FEE_ENGINE_AUDIT.md`, `P8_5_INVENTORY_VALUATION_AUDIT.md`, `P8_5_DRAFT_STATE_SECURITY_AUDIT.md`, `P8_5_INTEGRATION_TEST_REPORT.md`, `P8_5_REMEDIATION_LOG.md`, `P8_5_FINAL_ACCEPTANCE_REPORT.md` 共 10 份交付文档。
+  - 生成 `docs/audit/P8.5/P8_5_INDEPENDENT_AUDIT.md`, `docs/audit/P8.5/P8_5_MARKET_TIMESTAMP_AUDIT.md`, `docs/audit/P8.5/P8_5_ORDERBOOK_LOGIC_AUDIT.md`, `docs/audit/P8.5/P8_5_BACKTEST_CAUSALITY_AUDIT.md`, `docs/audit/P8.5/P8_5_FEE_ENGINE_AUDIT.md`, `docs/audit/P8.5/P8_5_INVENTORY_VALUATION_AUDIT.md`, `docs/audit/P8.5/P8_5_DRAFT_STATE_SECURITY_AUDIT.md`, `docs/audit/P8.5/P8_5_INTEGRATION_TEST_REPORT.md`, `docs/audit/P8.5/P8_5_REMEDIATION_LOG.md`, `docs/audit/P8.5/P8_5_FINAL_ACCEPTANCE_REPORT.md` 共 10 份交付文档。
 
 ### 12. 2026-11-02：完成 EVEAI P8.5.1 模拟盘准入检查与 Paper Trading 部署
 - **全项目测试核验**：
@@ -165,7 +165,7 @@
   - 回测模型明确区分为 `daily_signal_backtest`，将均价成交标为事后假设，禁用未包含逐笔数据的订单簿回测模式。
   - 资产估值区分高流动性变现净值、低流动性资产与非标特殊资产（BPC 拷贝件市场变现值计 0）。
 - **交付文档**：
-  - 生成 `P8_5_1_READINESS_AUDIT.md`, `P8_5_1_FULL_TEST_REPORT.md`, `P8_5_1_BACKTEST_MODEL_AUDIT.md`, `P8_5_1_PERFORMANCE_METRICS_AUDIT.md`, `P8_5_1_ASSET_VALUATION_AUDIT.md`, `P8_5_1_DRAFT_AUDIT_ACCESS_AUDIT.md`, `P8_5_1_PAPER_TRADING_ARCHITECTURE.md`, `P8_5_1_PAPER_TRADING_TEST_REPORT.md`, `P8_5_1_DATA_RELIABILITY_REPORT.md`, `P8_5_1_DEPLOYMENT_GUIDE.md`, `P8_5_1_KNOWN_LIMITATIONS.md`, `P8_5_1_FINAL_ACCEPTANCE_REPORT.md` 共 12 份报告。
+  - 生成 `docs/audit/P8.5.1/P8_5_1_READINESS_AUDIT.md`, `docs/audit/P8.5.1/P8_5_1_FULL_TEST_REPORT.md`, `docs/audit/P8.5.1/P8_5_1_BACKTEST_MODEL_AUDIT.md`, `docs/audit/P8.5.1/P8_5_1_PERFORMANCE_METRICS_AUDIT.md`, `docs/audit/P8.5.1/P8_5_1_ASSET_VALUATION_AUDIT.md`, `docs/audit/P8.5.1/P8_5_1_DRAFT_AUDIT_ACCESS_AUDIT.md`, `docs/audit/P8.5.1/P8_5_1_PAPER_TRADING_ARCHITECTURE.md`, `docs/audit/P8.5.1/P8_5_1_PAPER_TRADING_TEST_REPORT.md`, `docs/audit/P8.5.1/P8_5_1_DATA_RELIABILITY_REPORT.md`, `docs/audit/P8.5.1/P8_5_1_DEPLOYMENT_GUIDE.md`, `docs/audit/P8.5.1/P8_5_1_KNOWN_LIMITATIONS.md`, `docs/audit/P8.5.1/P8_5_1_FINAL_ACCEPTANCE_REPORT.md` 共 12 份报告。
   - 正式授予系统 **`PAPER_TRADING_READY`** 准入资质，开启 30 天模拟盘观察期。
 
 ### 13. 2026-11-02：完成 EVEAI P8.5.2 深度漏洞审计、系统强化与压力测试
@@ -178,7 +178,7 @@
   - 交易系统专项测试扩充至 6 套测试文件，**37 项关键单测全部 100% 通过**（耗时 1.45s）。
   - TypeScript 0 错误，前端生产构建打包完全成功。
 - **交付文档**：
-  - 生成 `P8_5_2_CODE_AUDIT.md`, `P8_5_2_TRADING_PIPELINE_AUDIT.md`, `P8_5_2_ORDERBOOK_AUDIT.md`, `P8_5_2_FUND_AND_ORDER_STATE_AUDIT.md`, `P8_5_2_FEE_ENGINE_AUDIT.md`, `P8_5_2_PORTFOLIO_AUDIT.md`, `P8_5_2_BACKTEST_AUDIT.md`, `P8_5_2_STRATEGY_AUDIT.md`, `P8_5_2_DATA_RELIABILITY_AUDIT.md`, `P8_5_2_SECURITY_AUDIT.md`, `P8_5_2_FULL_TEST_REPORT.md`, `P8_5_2_FINAL_ACCEPTANCE_REPORT.md` 共 12 份专项报告。
+  - 生成 `docs/audit/P8.5.2/P8_5_2_CODE_AUDIT.md`, `docs/audit/P8.5.2/P8_5_2_TRADING_PIPELINE_AUDIT.md`, `docs/audit/P8.5.2/P8_5_2_ORDERBOOK_AUDIT.md`, `docs/audit/P8.5.2/P8_5_2_FUND_AND_ORDER_STATE_AUDIT.md`, `docs/audit/P8.5.2/P8_5_2_FEE_ENGINE_AUDIT.md`, `docs/audit/P8.5.2/P8_5_2_PORTFOLIO_AUDIT.md`, `docs/audit/P8.5.2/P8_5_2_BACKTEST_AUDIT.md`, `docs/audit/P8.5.2/P8_5_2_STRATEGY_AUDIT.md`, `docs/audit/P8.5.2/P8_5_2_DATA_RELIABILITY_AUDIT.md`, `docs/audit/P8.5.2/P8_5_2_SECURITY_AUDIT.md`, `docs/audit/P8.5.2/P8_5_2_FULL_TEST_REPORT.md`, `docs/audit/P8.5.2/P8_5_2_FINAL_ACCEPTANCE_REPORT.md` 共 12 份专项报告。
 
 ### 14. 2026-11-02：完成 EVEAI P8.5.3 独立验证、会计审计与对抗测试
 - **深层安全与凭证防伪机制**：
@@ -190,7 +190,7 @@
   - 7 套交易专项测试共 42 项单测 100% 通过（耗时 1.34s）；全项目测试通过 1,945 项，4 项历史非交易用例穿透审计完毕。
   - TypeScript 0 错误，前端生产构建打包完全成功。
 - **交付文档**：
-  - 生成 `P8_5_3_BASELINE_AND_FULL_TEST_REPORT.md`, `P8_5_3_PIPELINE_CREDENTIAL_AUDIT.md`, `P8_5_3_IDEMPOTENCY_CONCURRENCY_AUDIT.md`, `P8_5_3_DOUBLE_ENTRY_ACCOUNTING_AUDIT.md`, `P8_5_3_ORDER_STATE_MACHINE_AUDIT.md`, `P8_5_3_ORDERBOOK_ADVERSARIAL_AUDIT.md`, `P8_5_3_ESI_READONLY_SECURITY_AUDIT.md`, `P8_5_3_DATABASE_RECOVERY_AUDIT.md`, `P8_5_3_REGRESSION_TEST_REPORT.md`, `P8_5_3_DEFECT_REMEDIATION_LOG.md`, `P8_5_3_GIT_CHANGE_SUMMARY.md`, `P8_5_3_FINAL_ACCEPTANCE_REPORT.md` 共 12 份专项报告。
+  - 生成 `docs/audit/P8.5.3/P8_5_3_BASELINE_AND_FULL_TEST_REPORT.md`, `docs/audit/P8.5.3/P8_5_3_PIPELINE_CREDENTIAL_AUDIT.md`, `docs/audit/P8.5.3/P8_5_3_IDEMPOTENCY_CONCURRENCY_AUDIT.md`, `docs/audit/P8.5.3/P8_5_3_DOUBLE_ENTRY_ACCOUNTING_AUDIT.md`, `docs/audit/P8.5.3/P8_5_3_ORDER_STATE_MACHINE_AUDIT.md`, `docs/audit/P8.5.3/P8_5_3_ORDERBOOK_ADVERSARIAL_AUDIT.md`, `docs/audit/P8.5.3/P8_5_3_ESI_READONLY_SECURITY_AUDIT.md`, `docs/audit/P8.5.3/P8_5_3_DATABASE_RECOVERY_AUDIT.md`, `docs/audit/P8.5.3/P8_5_3_REGRESSION_TEST_REPORT.md`, `docs/audit/P8.5.3/P8_5_3_DEFECT_REMEDIATION_LOG.md`, `docs/audit/P8.5.3/P8_5_3_GIT_CHANGE_SUMMARY.md`, `docs/audit/P8.5.3/P8_5_3_FINAL_ACCEPTANCE_REPORT.md` 共 12 份专项报告。
 
 ### 15. 2026-11-02：完成 EVEAI P8.5.4 交易授权凭证密码学加固、复式记账重构与对抗测试
 - **凭证密码学加固与防重放**:
@@ -244,3 +244,33 @@
   - 全量测试连续 3 次通过：每次 211 文件、2009 项。
   - TypeScript、Build、Lint 全部通过；Build 字体警告清零。
   - 在 `docs/audit/P8.5.6/` 交付 12 份审计报告，最终状态为 `PAPER_TRADING_READY`（仅限本地 Paper Trading）。
+
+### 18. 2026-11-04：根目录历史审计报告归档
+- **变更范围**：
+  - 使用 `git mv` 将根目录 58 份 P8/P8.5 历史审计报告归档到 `docs/audit/P8/`、`docs/audit/P8.5/`、`docs/audit/P8.5.1/`、`docs/audit/P8.5.2/`、`docs/audit/P8.5.3/`。
+  - 保留全部原文件名和文件内容，Git 重命名识别为 100%。
+  - 新增 `docs/audit/README.md` 作为审计历史索引，并更新 `docs/index.md` 与 `docs/repo-map.md`。
+  - 同步更新本日志中的 58 个旧根目录报告路径；未修改任何报告正文。
+- **验证结果**：
+  - 根目录 Markdown 文件由 98 个降至 40 个，根目录不再存在 `P8_*.md`；五个归档目录分别包含 12、10、12、12、12 份报告。
+  - `npm run audit:public` 通过。
+  - 现有 244 个测试文件、2200 项测试通过；`vitest` 排除未跟踪的 P9.3.3.3 审计测试后全部通过，`npm run lint` 通过。
+  - 全量 `npm run check` 当前被未跟踪的 `tests/unit/p9-3.3.3-asset-race.test.ts` 中 2 个 P9.3.3.3 失败断言阻断；该文件不属于本次文档归档改动。
+- **未处理项**：
+  - `data/backups/` 中约 11GB 历史数据库备份保持原样，后续应作为独立清理任务按保留策略处理。
+
+### 19. 2026-11-04：根目录 Markdown 二次分类整理
+- **变更范围**：
+  - 根目录仅保留 8 个标准项目入口：`README.md`、`AGENTS.md`、`ARCHITECTURE.md`、`CHANGELOG.md`、`CODE_OF_CONDUCT.md`、`CONTRIBUTING.md`、`SECURITY.md`、`SUPPORT.md`。
+  - 10 份长期交易文档移入 `docs/trading/`，并新增该目录的阅读索引 `docs/trading/README.md`。
+  - 将已落后于当前环境变量清单的 `CONFIGURATION_GUIDE.md` 移至 `docs/history/legacy-configuration-guide.md` 作为历史参考；当前配置入口以 `.env.example`、`docs/deployment.md` 和 `docs/openai-integration.md` 为准。将 `eveai-threat-model.md` 移至 `docs/threat-model.md`。
+  - 将 `TRADING_IMPLEMENTATION_PLAN.md` 移至 `docs/exec-plans/completed/trading-system-implementation.md`，将 `LOOT_MANAGER_ROADMAP.md` 移至 `docs/exec-plans/active/loot-manager-roadmap.md`，将 `MODIFICATION_LOG.md` 移至 `docs/history/modification-log.md`。
+  - 将 17 份 P8 之前的审计、能力清单、安装与旧部署材料移入 `docs/audit/pre-P8/`，保留原文件名并新增 `README.md` 说明阅读顺序。
+  - 更新 `docs/index.md`、`docs/repo-map.md`、`docs/audit/README.md`、执行计划索引、威胁模型链接及本日志中的历史报告路径；未修改历史报告和长期交易文档正文。
+- **验证结果**：
+  - 根目录 Markdown 文件由 40 个降至 8 个；`docs/trading/` 包含 10 份交易文档及 1 份索引，`docs/audit/pre-P8/` 包含 17 份归档报告及 1 份索引。
+  - `npm run audit:public` 通过。
+  - TypeScript 与前端类型检查通过；排除未跟踪的 `tests/unit/p9-3.3.3-asset-race.test.ts` 后，244 个测试文件、2200 项测试全部通过；`npm run lint` 通过。
+  - 全量 `npm run check` 仍被该未跟踪 P9.3.3.3 测试中的 3 个失败断言阻断，与本次文档归档无关。
+- **保留事项**：
+  - `data/backups/` 中约 11GB 历史数据库备份仍未处理，应作为独立清理任务按保留策略审查。

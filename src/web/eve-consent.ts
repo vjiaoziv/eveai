@@ -11,8 +11,10 @@ export const EVE_CONSENT_VERSION = '2026-07-15.1';
 
 type ConsentCopy = {
   ruTitle: string;
+  zhTitle: string;
   enTitle: string;
   ruDescription: string;
+  zhDescription: string;
   enDescription: string;
   sensitive?: boolean;
 };
@@ -21,36 +23,48 @@ const GROUP_COPY: Record<EveAccessGroupId, ConsentCopy> = {
   navigation: {
     ruTitle: 'Навигация и текущий корабль',
     enTitle: 'Navigation and current ship',
+    zhTitle: '导航与当前舰船',
+    zhDescription: '位置、在线状态、舰船类型与建筑搜索。',
     ruDescription: 'Местоположение, онлайн-статус, тип корабля и поиск структур.',
     enDescription: 'Location, online status, ship type, and structure search.',
   },
   character: {
     ruTitle: 'Персонаж и подготовка',
     enTitle: 'Character and progression',
+    zhTitle: '角色与成长',
+    zhDescription: '技能与队列、克隆体、植入体、联系人、忠诚点、声望、头衔、勋章、跳跃疲劳、通知、研究代理人、装配、个人击杀邮件、公司角色与舰队数据。',
     ruDescription: 'Навыки и очередь, клоны, импланты, контакты, LP, стендинги, титулы, медали, усталость прыжков, уведомления, исследования агентов, фитинги, личные киллмейлы, роли корпорации и данные флота.',
     enDescription: 'Skills and queue, clones, implants, contacts, loyalty points, standings, titles, medals, jump fatigue, notifications, research agents, fittings, personal killmails, corporation roles, and fleet data.',
   },
   economy: {
     ruTitle: 'Активы и экономика',
     enTitle: 'Assets and economy',
+    zhTitle: '资产与经济',
+    zhDescription: '个人资产、钱包、订单、建筑市场、工业任务、蓝图、采矿台账与合同。',
     ruDescription: 'Личные активы, кошелёк, ордера, рынки структур, производственные задания, чертежи, журнал добычи и контракты.',
     enDescription: 'Personal assets, wallet, orders, structure markets, industry jobs, blueprints, mining ledger, and contracts.',
   },
   communications: {
     ruTitle: 'Почта и календарь',
     enTitle: 'Mail and calendar',
+    zhTitle: '邮件与日历',
+    zhDescription: '读取游戏内邮件与日历事件。不包含发送。',
     ruDescription: 'Чтение внутриигровой почты и событий календаря. Отправка сюда не входит.',
     enDescription: 'Read in-game mail and calendar events. Sending is not included.',
   },
   corporation: {
     ruTitle: 'Данные корпорации',
     enTitle: 'Corporation data',
+    zhTitle: '公司数据',
+    zhDescription: '成员资格、建筑与星基、蓝图、联系人、货柜日志、合同、部门、设施、勋章、声望、头衔、海关办公室、钱包、资产、工业、采矿、订单、击杀邮件、阵营战统计与成员追踪。',
     ruDescription: 'Членство, структуры и POS, чертежи, контакты, журналы контейнеров, контракты, дивизионы, объекты, медали, стендинги, титулы, таможни, кошельки, активы, производство, добыча, ордера, киллмейлы, FW-статистика и отслеживание участников.',
     enDescription: 'Membership, structures and starbases, blueprints, contacts, container logs, contracts, divisions, facilities, medals, standings, titles, customs offices, wallets, assets, industry, mining, orders, killmails, FW statistics, and member tracking.',
   },
   actions: {
     ruTitle: 'Действия от имени персонажа',
     enTitle: 'Actions on behalf of the character',
+    zhTitle: '以角色名义执行操作',
+    zhDescription: '在客户端添加航路点与打开窗口、管理并发送邮件、修改舰队、保存装配、管理行星。',
     ruDescription: 'Добавление маршрута и открытие окон в клиенте, управление и отправка почты, изменение флота, сохранение фитингов и управление планетами.',
     enDescription: 'Add client waypoints and open UI windows, manage and send mail, modify fleets, save fittings, and manage planets.',
     sensitive: true,
@@ -60,7 +74,7 @@ const GROUP_COPY: Record<EveAccessGroupId, ConsentCopy> = {
 export const EVE_ACCESS_GROUP_COPY = GROUP_COPY;
 
 export type ParsedEveConsent = {
-  language: 'ru' | 'en';
+  language: 'zh' | 'ru' | 'en';
   groupIds: EveAccessGroupId[];
   scopes: string[];
 };
@@ -69,7 +83,7 @@ export function parseEveConsentForm(body: unknown): ParsedEveConsent | null {
   if (!body || typeof body !== 'object') return null;
   const values = body as Record<string, unknown>;
   if (values.accepted !== 'yes') return null;
-  const language = values.language === 'en' ? 'en' : values.language === 'ru' ? 'ru' : null;
+  const language = values.language === 'zh' ? 'zh' : values.language === 'en' ? 'en' : values.language === 'ru' ? 'ru' : null;
   if (!language) return null;
 
   const rawGroups = Array.isArray(values.access) ? values.access : values.access ? [values.access] : [];

@@ -1,6 +1,7 @@
 import type { Db } from '../db/sqlite.js';
 import { DataCenter } from './data-center.js';
 import { OrderBookSimulator } from './orderbook-simulator.js';
+import { assetLineagePredicate, type AssetLineage } from '../assets/asset-lineage.js';
 
 export interface PortfolioRiskLimits {
   cashReservePct: number;       // default 0.20 (20%)
@@ -46,6 +47,7 @@ export class PortfolioManager {
     db: Db,
     characterId: number,
     limits: PortfolioRiskLimits = DEFAULT_RISK_LIMITS,
+    lineage?: AssetLineage,
   ): CapitalBreakdown {
     // 1. Read wallet balance
     const walletRow = db.prepare('SELECT balance FROM character_wallet WHERE character_id = ?').get(characterId) as any;
@@ -68,13 +70,15 @@ export class PortfolioManager {
     const inFlightCommittedIsk = Number(inFlightRow?.committed_isk || 0);
 
     // 4. Read all inventory items
+    const ownership = lineage ? assetLineagePredicate('a', lineage) : null;
+    const ownershipSql = ownership ? ` AND ${ownership.sql}` : '';
     const assetRows = db.prepare(`
       SELECT a.item_id, a.type_id, a.quantity, a.location_id, a.is_blueprint_copy,
              COALESCE(json_extract(t.data_json, '$.basePrice'), 0) as base_price
       FROM character_assets a
       LEFT JOIN sde_types t ON a.type_id = t.type_id
-      WHERE a.character_id = ?
-    `).all(characterId) as any[];
+      WHERE a.character_id = ?${ownershipSql}
+    `).all(characterId, ...(ownership?.params ?? [])) as any[];
 
     let liquidInventoryValue = 0;
     let illiquidInventoryValue = 0;
@@ -142,6 +146,7 @@ export class PortfolioManager {
       db?: Db;
       typeId?: number;
       categoryId?: number;
+      assetLineage?: AssetLineage;
     },
   ): { allowed: boolean; reason?: string } {
     // 1. Available capital check
@@ -174,12 +179,16 @@ export class PortfolioManager {
     // 4. Cumulative Single Item Exposure check (15%)
     let existingItemHoldingIsk = 0;
     if (context?.db && context?.typeId) {
+      const ownership = context.assetLineage
+        ? assetLineagePredicate(null, context.assetLineage)
+        : null;
+      const ownershipSql = ownership ? ` AND ${ownership.sql}` : '';
       // Existing inventory value
       const inventoryRow = context.db.prepare(`
         SELECT COALESCE(SUM(quantity), 0) as total_qty
         FROM character_assets
-        WHERE character_id = ? AND type_id = ? AND is_blueprint_copy != 1
-      `).get(breakdown.characterId, context.typeId) as any;
+        WHERE character_id = ? AND type_id = ? AND is_blueprint_copy != 1${ownershipSql}
+      `).get(breakdown.characterId, context.typeId, ...(ownership?.params ?? [])) as any;
       const existingQty = Number(inventoryRow?.total_qty || 0);
 
       // In-flight draft capital for same item
@@ -205,13 +214,17 @@ export class PortfolioManager {
 
     // 5. Cumulative Category Exposure check (30%)
     if (context?.db && context?.categoryId) {
+      const ownership = context.assetLineage
+        ? assetLineagePredicate('a', context.assetLineage)
+        : null;
+      const ownershipSql = ownership ? ` AND ${ownership.sql}` : '';
       const categoryRow = context.db.prepare(`
         SELECT COALESCE(SUM(a.quantity * COALESCE(json_extract(t.data_json, '$.basePrice'), 1000)), 0) as cat_val
         FROM character_assets a
         JOIN sde_types t ON a.type_id = t.type_id
         JOIN sde_groups g ON t.group_id = g.group_id
-        WHERE a.character_id = ? AND g.category_id = ? AND a.is_blueprint_copy != 1
-      `).get(breakdown.characterId, context.categoryId) as any;
+        WHERE a.character_id = ? AND g.category_id = ? AND a.is_blueprint_copy != 1${ownershipSql}
+      `).get(breakdown.characterId, context.categoryId, ...(ownership?.params ?? [])) as any;
       const existingCategoryVal = Number(categoryRow?.cat_val || 0);
 
       if (existingCategoryVal + proposedCost > breakdown.categoryCapIsk) {

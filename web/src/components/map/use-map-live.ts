@@ -20,7 +20,7 @@ export type LiveAdvisory = {
   advisory: {
     rule: string;
     severity: 'info' | 'warn' | 'danger';
-    text: { ru: string; en: string };
+    text: { zh: string; ru: string; en: string };
     systemId: number | null;
     killmailId: number | null;
     repeats: number;

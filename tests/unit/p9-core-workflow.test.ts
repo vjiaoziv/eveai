@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../../src/db/migrations.js';
 import { P9OpportunityService } from '../../src/trading/p9-opportunity-service.js';
 import { P9RealPortfolioService } from '../../src/trading/p9-real-portfolio.js';
+import { testAssetLineage } from '../helpers/asset-lineage.js';
 import { P9RealTradeService } from '../../src/trading/p9-real-trades.js';
 
 function seed(db: Database.Database): void {
@@ -228,13 +229,23 @@ describe('P9 real-market minimum closed loop', () => {
 
   it('keeps real and paper data isolated and reports UNKNOWN instead of zero', () => {
     const db = createDb();
-    P9RealPortfolioService.upsertManualLot(db, 9003, {
-      typeId: 34,
-      locationId: 60003760,
-      quantity: 10,
-      costPerUnit: null,
-    });
-    const overview = P9RealPortfolioService.overview(db, 9003);
+    const lineage = testAssetLineage(9003);
+    db.prepare(`
+      INSERT INTO real_fifo_lots
+        (lot_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         type_id, location_id, source_record_id, original_quantity, remaining_quantity,
+         base_cost, capitalized_fees, unit_cost, remaining_cost, cost_status,
+         acquired_at, calculation_version)
+      VALUES ('P93-UNKNOWN-OPEN-LOT', ?, ?, ?, ?, ?, 34, 60003760, 'P93-UNKNOWN-SOURCE',
+              10, 10, 0, 0, NULL, NULL, 'UNKNOWN', '2026-11-01T00:00:00.000Z', 'P9.3-FIFO-v1')
+    `).run(
+      9003,
+      lineage.ownerUserId,
+      lineage.ownerChatId,
+      lineage.bindingEpoch,
+      lineage.bindingDigest,
+    );
+    const overview = P9RealPortfolioService.overview(db, 9003, lineage);
     expect(overview.inventory.unknownLotCount).toBe(1);
     expect(overview.performance.realizedNetPnl).toBe(0);
     expect(overview.funding.otherUnknown).toBeNull();

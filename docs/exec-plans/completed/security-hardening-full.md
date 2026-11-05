@@ -6,7 +6,7 @@ Completed: 2026-03-27
 
 ## Goal
 
-Implement the full remediation pass from [eveai-threat-model.md](../../eveai-threat-model.md) for the highest-priority repository-grounded risks:
+Implement the full remediation pass from [eveai-threat-model.md](../../threat-model.md) for the highest-priority repository-grounded risks:
 
 - multi-user authorization drift between `user_id` and legacy `chat_id`
 - public-bot resource exhaustion

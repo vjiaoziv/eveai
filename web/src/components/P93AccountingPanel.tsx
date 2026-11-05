@@ -1,54 +1,62 @@
 import type { ReactNode } from 'react';
 import { useCallback, useEffect, useState } from 'react';
 import { webApi } from '../api';
+import { useI18n, type TranslationKey } from '../i18n';
+import { readStoredLocale } from '../i18n-dictionary';
+import { formatP93Number, freshnessPresentation } from '../p93-freshness';
 
 type Page = 'overview' | 'records' | 'costs' | 'pnl' | 'reconcile' | 'evidence' | 'audit';
 type AnyRow = Record<string, any>;
 
 const RECONCILE_PAGE_SIZE = 200;
 
-const pageLabels: Record<Page, string> = {
-  overview: '交易总览',
-  records: '交易记录',
-  costs: '库存成本',
-  pnl: '盈亏分析',
-  reconcile: '资产对账',
-  evidence: '证据中心',
-  audit: '审计中心',
-};
+type Translate = (key: TranslationKey, params?: Record<string, string>) => string;
 
-const num = (value: unknown, digits = 2): string => typeof value === 'number' && Number.isFinite(value)
-  ? value.toLocaleString('zh-CN', { maximumFractionDigits: digits })
-  : 'N/A';
+const pageLabels = (t: Translate): Record<Page, string> => ({
+  overview: t('p93TabOverview'),
+  records: t('p93TabRecords'),
+  costs: t('p93TabCosts'),
+  pnl: t('p93TabPnl'),
+  reconcile: t('p93TabReconcile'),
+  evidence: t('p93TabEvidence'),
+  audit: t('p93TabAudit'),
+});
+
+const num = formatP93Number;
 const dateTime = (value: unknown): string => {
   if (typeof value !== 'string' || !value) return 'N/A';
   const date = new Date(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN') : value;
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleString(
+        readStoredLocale() === 'zh' ? 'zh-CN' : readStoredLocale() === 'ru' ? 'ru-RU' : 'en-US',
+      )
+    : value;
 };
-const localInputToIso = (value: string, label: string): string => {
+const localInputToIso = (value: string, label: string, t: Translate): string => {
   const raw = value.trim();
-  if (!raw) throw new Error(`${label}必填。`);
+  if (!raw) throw new Error(t('validationRequired', { value: label }));
   const date = new Date(raw);
-  if (!Number.isFinite(date.getTime())) throw new Error(`${label}格式无效。`);
+  if (!Number.isFinite(date.getTime())) throw new Error(t('validationInvalidFormat', { value: label }));
   return date.toISOString();
 };
-const finiteNumber = (value: string, label: string): number => {
+const finiteNumber = (value: string, label: string, t: Translate): number => {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) throw new Error(`${label}必须是有限数值。`);
+  if (!Number.isFinite(parsed)) throw new Error(t('validationFiniteNumber', { value: label }));
   return parsed;
 };
-const nonNegativeNumber = (value: string, label: string): number => {
-  const parsed = finiteNumber(value, label);
-  if (parsed < 0) throw new Error(`${label}不能为负数。`);
+const nonNegativeNumber = (value: string, label: string, t: Translate): number => {
+  const parsed = finiteNumber(value, label, t);
+  if (parsed < 0) throw new Error(t('validationNotNegative', { value: label }));
   return parsed;
 };
-const positiveInteger = (value: string, label: string): number => {
+const positiveInteger = (value: string, label: string, t: Translate): number => {
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${label}必须是正整数。`);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(t('validationPositiveInteger', { value: label }));
   return parsed;
 };
 
 export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
+  const { t, locale } = useI18n();
   const [page, setPage] = useState<Page>('overview');
   const [overview, setOverview] = useState<AnyRow | null>(null);
   const [records, setRecords] = useState<AnyRow[]>([]);
@@ -113,7 +121,7 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
       if (activePage === 'evidence') setEvidence(((results[1] as AnyRow)?.evidence || []) as AnyRow[]);
       if (activePage === 'audit') setAudit(results[1] as AnyRow);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'REAL 账本数据加载失败。');
+      setError(reason instanceof Error ? reason.message : t('p93LoadFailed'));
     } finally {
       setBusy(false);
     }
@@ -130,7 +138,7 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
       setNotice(message);
       await load(page, reloadOffset);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '操作失败。');
+      setError(reason instanceof Error ? reason.message : t('p93ActionFailed'));
     } finally {
       setBusy(false);
     }
@@ -140,29 +148,29 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
     const isCostAdjustment = recordForm.tradeKind === 'COST_ADJUSTMENT';
     const isTransfer = recordForm.tradeKind === 'INVENTORY_TRANSFER';
     if (isCostAdjustment && (!recordForm.targetLotId.trim() || !recordForm.adjustmentAmount.trim())) {
-      throw new Error('成本调整必须填写目标批次和调整金额。');
+      throw new Error(t('p93CostAdjNeedsTarget'));
     }
     if (isTransfer && (!recordForm.fromLocationId.trim() || !recordForm.toLocationId.trim())) {
-      throw new Error('库存转移必须填写调出和调入地点。');
+      throw new Error(t('p93TransferNeedsLocations'));
     }
-    const fromLocationId = isTransfer ? positiveInteger(recordForm.fromLocationId, '调出地点') : undefined;
-    const toLocationId = isTransfer ? positiveInteger(recordForm.toLocationId, '调入地点') : undefined;
-    if (isTransfer && fromLocationId === toLocationId) throw new Error('库存转移的调出和调入地点不能相同。');
+    const fromLocationId = isTransfer ? positiveInteger(recordForm.fromLocationId, t('p93SourceLocation'), t) : undefined;
+    const toLocationId = isTransfer ? positiveInteger(recordForm.toLocationId, t('p93TargetLocation'), t) : undefined;
+    if (isTransfer && fromLocationId === toLocationId) throw new Error(t('p93TransferSameLocation'));
     await webApi.p93.createRecord({
       ...recordForm,
-      typeId: positiveInteger(recordForm.typeId, 'Type ID'),
-      locationId: positiveInteger(recordForm.locationId, '地点 ID'),
-      quantity: isCostAdjustment ? 0 : positiveInteger(recordForm.quantity, '数量'),
-      unitPrice: nonNegativeNumber(recordForm.unitPrice, '单价'),
-      tradeTime: localInputToIso(recordForm.tradeTime, '成交时间'),
-      adjustmentAmount: isCostAdjustment ? nonNegativeNumber(recordForm.adjustmentAmount, '调整金额') : undefined,
+      typeId: positiveInteger(recordForm.typeId, 'Type ID', t),
+      locationId: positiveInteger(recordForm.locationId, t('colLocationId'), t),
+      quantity: isCostAdjustment ? 0 : positiveInteger(recordForm.quantity, t('marketQuantity'), t),
+      unitPrice: nonNegativeNumber(recordForm.unitPrice, t('profileUnitPrice'), t),
+      tradeTime: localInputToIso(recordForm.tradeTime, t('colTradeTime'), t),
+      adjustmentAmount: isCostAdjustment ? nonNegativeNumber(recordForm.adjustmentAmount, t('p93AdjustAmount'), t) : undefined,
       targetLotId: isCostAdjustment ? recordForm.targetLotId.trim() : undefined,
       fromLocationId,
       toLocationId,
       draft: true,
     }, csrfToken);
     setRecordForm((current) => ({ ...current, ledgerKey: `manual-${Date.now()}` }));
-  }, 'REAL 交易草稿已登记；必须关联证据并人工核实后才进入 FIFO。');
+  }, t('p93DraftRegistered'));
 
   const openRecord = (recordId: string) => action(async () => {
     const [record, evidencePayload] = await Promise.all([
@@ -170,7 +178,7 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
       webApi.p93.evidenceList() as Promise<AnyRow>,
     ]);
     const fact = record.record as AnyRow | undefined;
-    if (!fact?.recordId) throw new Error('交易详情缺失，请刷新后重试。');
+    if (!fact?.recordId) throw new Error(t('p93DetailMissing'));
     setSelected(record);
     setEvidence((evidencePayload.evidence || []) as AnyRow[]);
     setCorrectionForm({
@@ -180,45 +188,45 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
       tradeTime: String(fact.tradeTime).slice(0, 16),
       reason: '',
     });
-  }, '交易详情已加载。');
+  }, t('p93DetailLoaded'));
 
   const createEvidence = () => action(async () => {
     await webApi.p93.evidence({
       ...evidenceForm,
       sourceRef: evidenceForm.sourceRef || undefined,
-      capturedAt: localInputToIso(evidenceForm.capturedAt, '证据采集时间'),
+      capturedAt: localInputToIso(evidenceForm.capturedAt, t('p93EvidenceCapturedAt'), t),
     }, csrfToken);
-  }, '证据已登记。');
+  }, t('p93EvidenceRegistered'));
 
   const linkSelectedEvidence = () => action(async () => {
-    if (!selected?.record?.recordId || !evidenceLink.evidenceId) throw new Error('请选择交易和证据。');
+    if (!selected?.record?.recordId || !evidenceLink.evidenceId) throw new Error(t('p93PickTradeAndEvidence'));
     await webApi.p93.linkEvidence(selected.record.recordId, {
       evidenceId: evidenceLink.evidenceId,
       relation: evidenceLink.relation,
       confidence: 'HIGH',
     }, csrfToken);
     setSelected(await webApi.p93.record(selected.record.recordId) as AnyRow);
-  }, '证据已关联到交易。');
+  }, t('p93EvidenceLinked'));
 
   const correctSelectedRecord = () => action(async () => {
     const fact = selected?.record as AnyRow | undefined;
-    if (!fact?.recordId) throw new Error('请先打开要更正的交易。');
-    if (!correctionForm.reason.trim()) throw new Error('更正必须填写原因。');
-    if (!correctionForm.ledgerKey.trim()) throw new Error('更正必须使用新的幂等编号。');
+    if (!fact?.recordId) throw new Error(t('p93OpenTradeFirst'));
+    if (!correctionForm.reason.trim()) throw new Error(t('p93CorrectionNeedsReason'));
+    if (!correctionForm.ledgerKey.trim()) throw new Error(t('p93CorrectionNeedsNewKey'));
     await webApi.p93.correctRecord(fact.recordId, {
       reason: correctionForm.reason,
       record: {
         ...fact,
         ledgerKey: correctionForm.ledgerKey.trim(),
-        quantity: fact.tradeKind === 'COST_ADJUSTMENT' ? 0 : positiveInteger(correctionForm.quantity, '更正数量'),
-        unitPrice: nonNegativeNumber(correctionForm.unitPrice, '更正单价'),
-        tradeTime: localInputToIso(correctionForm.tradeTime, '更正时间'),
+        quantity: fact.tradeKind === 'COST_ADJUSTMENT' ? 0 : positiveInteger(correctionForm.quantity, t('p93CorrectionQuantity'), t),
+        unitPrice: nonNegativeNumber(correctionForm.unitPrice, t('p93CorrectionPrice'), t),
+        tradeTime: localInputToIso(correctionForm.tradeTime, t('p93CorrectionTime'), t),
         sourceHash: undefined,
         draft: true,
       },
     }, csrfToken);
     setSelected(null);
-  }, '更正记录已创建；原记录保留并标记为 CORRECTED。');
+  }, t('p93CorrectionCreated'));
 
   const metric = (label: string, value: ReactNode) => (
     <div className="metric-card"><span>{label}</span><strong>{value}</strong></div>
@@ -228,14 +236,14 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
     <section className="screen-section" aria-busy={busy}>
       <div className="section-heading">
         <div>
-          <h2>P9.3 真实交易账本与成本核算</h2>
-          <p>只记录可核实事实；用户申报、UNKNOWN 成本、资产变化不会自动进入已核实盈亏。</p>
+          <h2>{t('p93Title')}</h2>
+          <p>{t('p93Lead')}</p>
         </div>
-        <span className="status-pill">REAL_ACCOUNTING · AI 只读 · ESI GET-only</span>
+        <span className="status-pill">{t('p93ModePill')}</span>
       </div>
-      <nav className="market-tabs market-tabs--scroll" aria-label="P9.3 真实账本页面">
+      <nav className="market-tabs market-tabs--scroll" aria-label={t('p93Aria')}>
         {(Object.keys(pageLabels) as Page[]).map((item) => (
-          <button key={item} type="button" className={page === item ? 'active' : ''} aria-current={page === item ? 'page' : undefined} onClick={() => setPage(item)}>{pageLabels[item]}</button>
+          <button key={item} type="button" className={page === item ? 'active' : ''} aria-current={page === item ? 'page' : undefined} onClick={() => setPage(item)}>{pageLabels(t)[item]}</button>
         ))}
       </nav>
       {error ? <p className="screen-error" role="alert">{error}</p> : null}
@@ -244,49 +252,56 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
       {page === 'overview' ? (
         <div>
           <div className="metric-grid">
-            {metric('REAL 交易记录', num(overview?.summary?.rawRecordCount, 0))}
-            {metric('已实现盈亏', num(overview?.performance?.realizedPnl))}
-            {metric('未实现盈亏', num(overview?.performance?.unrealizedPnl))}
-            {metric('库存成本', num(overview?.performance?.inventoryCost))}
-            {metric('资金占用', num(overview?.performance?.capitalOccupied))}
-            {metric('UNKNOWN 成本项', num(overview?.performance?.unknownCostCount, 0))}
+            {metric(t('p93RecordsTitle'), num(overview?.summary?.rawRecordCount, 0))}
+            {metric(t('colCalcStatus'), freshnessPresentation(overview?.performance?.freshness, t).status)}
+            {metric(t('colRealizedCertain'), num(overview?.performance?.realizedPnl))}
+            {metric(t('colKnownPartial'), num(overview?.performance?.knownRealizedPnl))}
+            {metric(t('paperUnrealizedPnl'), num(overview?.performance?.unrealizedPnl))}
+            {metric(t('p93TabCosts'), num(overview?.performance?.inventoryCost))}
+            {metric(t('p93CapitalTied'), num(overview?.performance?.capitalOccupied))}
+            {metric(t('p93UnknownCostItems'), num(overview?.performance?.unknownCostCount, 0))}
           </div>
+          {freshnessPresentation(overview?.performance?.freshness, t).warning ? (
+            <p className="screen-warning" role="status">
+              {freshnessPresentation(overview?.performance?.freshness, t).warning}
+            </p>
+          ) : null}
           <div className="toolbar">
-            <button type="button" disabled={busy} onClick={() => void action(() => webApi.p93.syncEsiWallet(csrfToken), 'ESI 钱包成交证据同步完成。')}>同步 ESI 钱包成交</button>
-            <button type="button" disabled={busy} onClick={() => void action(() => webApi.p93.recalculate(csrfToken), 'FIFO 历史重算完成。')}>重算 FIFO / 盈亏</button>
-            <button type="button" disabled={busy} onClick={() => void action(() => webApi.p93.runReconciliation(csrfToken), '真实资产对账完成。')}>执行资产对账</button>
+            <button type="button" disabled={busy} onClick={() => void action(() => webApi.p93.syncEsiWallet(csrfToken), t('p93WalletSyncDone'))}>{t('p93SyncWalletTrades')}</button>
+            <button type="button" disabled={busy} onClick={() => void action(() => webApi.p93.recalculate(csrfToken), t('p93FifoRecalcDone'))}>{t('p93RecalcFifo')}</button>
+            <button type="button" disabled={busy} onClick={() => void action(() => webApi.p93.runReconciliation(csrfToken), t('p93ReconcileDone'))}>{t('p93RunReconcile')}</button>
           </div>
-          <p>估值口径相互独立：市场参考价值不是实际可变现价值；买单清算、卖单重置分别列示。</p>
+          <p>{t('p93ValuationNote')}</p>
         </div>
       ) : null}
 
       {page === 'records' ? (
         <div>
-          <h3>筛选交易记录</h3>
+          <h3>{t('p93FilterRecords')}</h3>
           <div className="form-grid">
-            <label>记录状态
+            <label>{t('p93LabelRecordState')}
               <select value={recordFilters.state} onChange={(event) => setRecordFilters((v) => ({ ...v, state: event.target.value }))}>
-                <option value="">全部</option><option value="DRAFT">草稿</option><option value="ACTIVE">活动</option>
-                <option value="VERIFIED">已核实</option><option value="REJECTED">已驳回</option>
-                <option value="REVERSED">已冲正</option><option value="CORRECTED">已更正</option>
+                <option value="">{t('marketChartRangeAll')}</option><option value="DRAFT">{t('p93StatusDraft')}</option><option value="ACTIVE">{t('p93StatusActive')}</option>
+                <option value="VERIFIED">{t('p93StatusVerified')}</option><option value="REJECTED">{t('p93StatusRejected')}</option>
+                <option value="REVERSED">{t('p93StatusReversed')}</option><option value="CORRECTED">{t('p93StatusCorrected')}</option>
               </select>
             </label>
-            <label>核实等级
+            <label>{t('p93LabelVerification')}
               <select value={recordFilters.verification} onChange={(event) => setRecordFilters((v) => ({ ...v, verification: event.target.value }))}>
-                <option value="">全部</option><option value="VERIFIED">已核实</option><option value="USER_REPORTED">用户申报</option>
-                <option value="PENDING">待核实</option><option value="CONFLICT">存在冲突</option><option value="REJECTED">已驳回</option>
+                <option value="">{t('marketChartRangeAll')}</option><option value="VERIFIED">{t('p93StatusVerified')}</option><option value="USER_REPORTED">{t('p93StatusClaimed')}</option>
+                <option value="PENDING">{t('p93StatusPending')}</option><option value="CONFLICT">{t('p93StatusConflict')}</option><option value="REJECTED">{t('p93StatusRejected')}</option>
               </select>
             </label>
-            <label>方向
+            <label>{t('marketAlertSide')}
               <select value={recordFilters.direction} onChange={(event) => setRecordFilters((v) => ({ ...v, direction: event.target.value }))}>
-                <option value="">全部</option><option value="BUY">买入</option><option value="SELL">卖出</option><option value="NONE">非买卖</option>
+                <option value="">{t('marketChartRangeAll')}</option><option value="BUY">{t('marketBuySide')}</option><option value="SELL">{t('marketSellSide')}</option><option value="NONE">{t('p93TypeNonTrade')}</option>
               </select>
             </label>
           </div>
-          <h3>登记真实成交或调整</h3>
+          <h3>{t('p93RecordTrade')}</h3>
           <div className="form-grid">
-            <label>幂等编号<input value={recordForm.ledgerKey} onChange={(event) => setRecordForm((v) => ({ ...v, ledgerKey: event.target.value }))} /></label>
-            <label>类型
+            <label>{t('p93IdempotencyKey')}<input value={recordForm.ledgerKey} onChange={(event) => setRecordForm((v) => ({ ...v, ledgerKey: event.target.value }))} /></label>
+            <label>{t('colType')}
               <select value={recordForm.tradeKind} onChange={(event) => {
                 const tradeKind = event.target.value;
                 setRecordForm((v) => ({
@@ -299,60 +314,60 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
                   unitPrice: tradeKind === 'COST_ADJUSTMENT' || tradeKind === 'INVENTORY_TRANSFER' ? '0' : v.unitPrice,
                 }));
               }}>
-                <option value="BUY">买入</option><option value="SELL">卖出</option><option value="PARTIAL_FILL">部分成交</option>
-                <option value="MULTI_BATCH_FILL">多批次成交</option><option value="COST_ADJUSTMENT">成本调整</option><option value="INVENTORY_TRANSFER">库存转移</option>
+                <option value="BUY">{t('marketBuySide')}</option><option value="SELL">{t('marketSellSide')}</option><option value="PARTIAL_FILL">{t('p93TypePartial')}</option>
+                <option value="MULTI_BATCH_FILL">{t('p93TypeMultiBatch')}</option><option value="COST_ADJUSTMENT">{t('p93TypeCostAdjust')}</option><option value="INVENTORY_TRANSFER">{t('p93TypeTransfer')}</option>
               </select>
             </label>
-            <label>方向
+            <label>{t('marketAlertSide')}
               <select value={recordForm.direction} onChange={(event) => setRecordForm((v) => ({ ...v, direction: event.target.value }))}>
-                <option value="BUY">买入</option><option value="SELL">卖出</option><option value="NONE">非买卖</option>
+                <option value="BUY">{t('marketBuySide')}</option><option value="SELL">{t('marketSellSide')}</option><option value="NONE">{t('p93TypeNonTrade')}</option>
               </select>
             </label>
             <label>Type ID<input value={recordForm.typeId} onChange={(event) => setRecordForm((v) => ({ ...v, typeId: event.target.value }))} /></label>
-            <label>地点 ID<input value={recordForm.locationId} onChange={(event) => setRecordForm((v) => ({ ...v, locationId: event.target.value }))} /></label>
-            <label>数量<input value={recordForm.quantity} onChange={(event) => setRecordForm((v) => ({ ...v, quantity: event.target.value }))} /></label>
-            <label>单价<input value={recordForm.unitPrice} onChange={(event) => setRecordForm((v) => ({ ...v, unitPrice: event.target.value }))} /></label>
-            <label>成交时间<input type="datetime-local" value={recordForm.tradeTime} onChange={(event) => setRecordForm((v) => ({ ...v, tradeTime: event.target.value }))} /></label>
-            <label>数据来源<input value={recordForm.sourceType} onChange={(event) => setRecordForm((v) => ({ ...v, sourceType: event.target.value }))} /></label>
-            <label>费用完整性
+            <label>{t('colLocationId')}<input value={recordForm.locationId} onChange={(event) => setRecordForm((v) => ({ ...v, locationId: event.target.value }))} /></label>
+            <label>{t('marketQuantity')}<input value={recordForm.quantity} onChange={(event) => setRecordForm((v) => ({ ...v, quantity: event.target.value }))} /></label>
+            <label>{t('profileUnitPrice')}<input value={recordForm.unitPrice} onChange={(event) => setRecordForm((v) => ({ ...v, unitPrice: event.target.value }))} /></label>
+            <label>{t('colTradeTime')}<input type="datetime-local" value={recordForm.tradeTime} onChange={(event) => setRecordForm((v) => ({ ...v, tradeTime: event.target.value }))} /></label>
+            <label>{t('colDataSource')}<input value={recordForm.sourceType} onChange={(event) => setRecordForm((v) => ({ ...v, sourceType: event.target.value }))} /></label>
+            <label>{t('p93LabelFeeCompleteness')}
               <select value={recordForm.feeStatus} onChange={(event) => setRecordForm((v) => ({ ...v, feeStatus: event.target.value }))}>
-                <option value="UNKNOWN">未知</option><option value="COMPLETE">完整</option>
+                <option value="UNKNOWN">{t('supportCostUnknownShort')}</option><option value="COMPLETE">{t('p93SourceComplete')}</option>
               </select>
             </label>
-            <label>备注<input value={recordForm.notes} onChange={(event) => setRecordForm((v) => ({ ...v, notes: event.target.value }))} /></label>
+            <label>{t('colNote')}<input value={recordForm.notes} onChange={(event) => setRecordForm((v) => ({ ...v, notes: event.target.value }))} /></label>
             {recordForm.tradeKind === 'COST_ADJUSTMENT' ? (
               <>
-                <label>目标批次<input value={recordForm.targetLotId} onChange={(event) => setRecordForm((v) => ({ ...v, targetLotId: event.target.value }))} placeholder="LOT-..." /></label>
-                <label>调整方向
+                <label>{t('p93TargetBatch')}<input value={recordForm.targetLotId} onChange={(event) => setRecordForm((v) => ({ ...v, targetLotId: event.target.value }))} placeholder="LOT-..." /></label>
+                <label>{t('p93LabelAdjustDirection')}
                   <select value={recordForm.adjustmentMode} onChange={(event) => setRecordForm((v) => ({ ...v, adjustmentMode: event.target.value }))}>
-                    <option value="INCREASE">增加成本</option><option value="DECREASE">减少成本</option>
+                    <option value="INCREASE">{t('p93CostIncrease')}</option><option value="DECREASE">{t('p93CostDecrease')}</option>
                   </select>
                 </label>
-                <label>调整金额<input value={recordForm.adjustmentAmount} onChange={(event) => setRecordForm((v) => ({ ...v, adjustmentAmount: event.target.value }))} /></label>
+                <label>{t('p93AdjustAmount')}<input value={recordForm.adjustmentAmount} onChange={(event) => setRecordForm((v) => ({ ...v, adjustmentAmount: event.target.value }))} /></label>
               </>
             ) : null}
             {recordForm.tradeKind === 'INVENTORY_TRANSFER' ? (
               <>
-                <label>调出地点 ID<input value={recordForm.fromLocationId} onChange={(event) => setRecordForm((v) => ({ ...v, fromLocationId: event.target.value }))} /></label>
-                <label>调入地点 ID<input value={recordForm.toLocationId} onChange={(event) => setRecordForm((v) => ({ ...v, toLocationId: event.target.value }))} /></label>
+                <label>{t('p93SourceLocationId')}<input value={recordForm.fromLocationId} onChange={(event) => setRecordForm((v) => ({ ...v, fromLocationId: event.target.value }))} /></label>
+                <label>{t('p93TargetLocationId')}<input value={recordForm.toLocationId} onChange={(event) => setRecordForm((v) => ({ ...v, toLocationId: event.target.value }))} /></label>
               </>
             ) : null}
           </div>
-          <div className="toolbar"><button type="button" disabled={busy} onClick={() => void createRecord()}>保存为待核实草稿</button></div>
+          <div className="toolbar"><button type="button" disabled={busy} onClick={() => void createRecord()}>{t('p93SaveDraft')}</button></div>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>时间</th><th>方向/类型</th><th>物品/地点</th><th>数量/价格</th><th>核实状态</th><th>操作</th></tr></thead>
+              <thead><tr><th>{t('colTime')}</th><th>{t('colDirectionType')}</th><th>{t('colItemLocation')}</th><th>{t('colQuantityPrice')}</th><th>{t('colVerificationStatus')}</th><th>{t('colAction')}</th></tr></thead>
             <tbody>{records.map((row) => (
               <tr key={row.recordId}>
                 <td>{dateTime(row.tradeTime)}</td><td>{row.direction} / {row.tradeKind}</td>
                 <td>{row.typeId} @ {row.locationId}</td><td>{num(row.quantity, 0)} × {num(row.unitPrice)}</td>
                 <td>{row.verificationStatus} / {row.recordState}</td>
                 <td>
-                  <button type="button" onClick={() => void openRecord(row.recordId)}>详情</button>
-                  <button type="button" disabled={busy || row.recordState !== 'DRAFT'} onClick={() => void action(() => webApi.p93.recordAction(row.recordId, 'submit', csrfToken), '草稿已提交为待核实申报。')}>提交申报</button>
-                  <button type="button" disabled={busy || row.recordState !== 'ACTIVE' || row.verificationStatus === 'VERIFIED'} onClick={() => void action(() => webApi.p93.recordAction(row.recordId, 'verify', csrfToken), '交易已核实。')}>核实</button>
-                  <button type="button" disabled={busy || ['VERIFIED', 'REJECTED', 'REVERSED', 'CORRECTED'].includes(row.recordState)} onClick={() => void action(() => webApi.p93.recordAction(row.recordId, 'reject', csrfToken, '人工驳回'), '交易已驳回。')}>驳回</button>
-                  <button type="button" disabled={busy || !['ACTIVE', 'VERIFIED'].includes(row.recordState)} onClick={() => void action(() => webApi.p93.recordAction(row.recordId, 'reverse', csrfToken, '人工冲正'), '交易已冲正。')}>冲正</button>
+                  <button type="button" onClick={() => void openRecord(row.recordId)}>{t('p93Detail')}</button>
+                  <button type="button" disabled={busy || row.recordState !== 'DRAFT'} onClick={() => void action(() => webApi.p93.recordAction(row.recordId, 'submit', csrfToken), t('p93DraftSubmitted'))}>{t('p93SubmitClaim')}</button>
+                  <button type="button" disabled={busy || row.recordState !== 'ACTIVE' || row.verificationStatus === 'VERIFIED'} onClick={() => void action(() => webApi.p93.recordAction(row.recordId, 'verify', csrfToken), t('p93TradeVerified'))}>{t('p93Verify')}</button>
+                  <button type="button" disabled={busy || ['VERIFIED', 'REJECTED', 'REVERSED', 'CORRECTED'].includes(row.recordState)} onClick={() => void action(() => webApi.p93.recordAction(row.recordId, 'reject', csrfToken, t('p93RejectManually')), t('p93TradeRejected'))}>{t('p93Reject')}</button>
+                  <button type="button" disabled={busy || !['ACTIVE', 'VERIFIED'].includes(row.recordState)} onClick={() => void action(() => webApi.p93.recordAction(row.recordId, 'reverse', csrfToken, t('p93ReverseManually')), t('p93TradeReversed'))}>{t('p93Reverse')}</button>
                 </td>
               </tr>
               ))}</tbody>
@@ -360,41 +375,41 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
           </div>
           {selected ? (
             <div className="detail-panel">
-              <h3>交易详情：{selected.record?.recordId}</h3>
+              <h3>{t('p93DetailTitle')}{selected.record?.recordId}</h3>
               <p>
-                状态：{selected.record?.verificationStatus} / {selected.record?.recordState}；
-                类型：{selected.record?.direction} / {selected.record?.tradeKind}；
-                数量：{num(selected.record?.quantity, 0)}；单价：{num(selected.record?.unitPrice)}
+                {t('p93DetailStatusLine', { a: selected.record?.verificationStatus ?? '', b: selected.record?.recordState ?? '' })}
+                {t('p93DetailTypeLine', { a: selected.record?.direction ?? '', b: selected.record?.tradeKind ?? '' })}
+                {t('p93DetailQtyLine', { a: num(selected.record?.quantity, 0), b: num(selected.record?.unitPrice) })}
               </p>
-              <h4>关联证据</h4>
+              <h4>{t('p93LinkEvidence')}</h4>
               <div className="form-grid">
-                <label>证据
+                <label>{t('p93LabelEvidence')}
                   <select value={evidenceLink.evidenceId} onChange={(event) => setEvidenceLink((v) => ({ ...v, evidenceId: event.target.value }))}>
-                    <option value="">请选择</option>
+                    <option value="">{t('p93SelectPlaceholder')}</option>
                     {evidence.map((row) => (
                       <option key={row.evidence_id} value={row.evidence_id}>{row.evidence_type} · {row.status} · {row.source_ref || row.evidence_id}</option>
                     ))}
                   </select>
                 </label>
-                <label>关系
+                <label>{t('p93LabelRelation')}
                   <select value={evidenceLink.relation} onChange={(event) => setEvidenceLink((v) => ({ ...v, relation: event.target.value }))}>
-                    <option value="PRIMARY">主证据</option><option value="CORROBORATING">佐证</option>
-                    <option value="CONFLICTING">冲突</option><option value="ADJUSTMENT">调整依据</option>
+                    <option value="PRIMARY">{t('p93EvidencePrimary')}</option><option value="CORROBORATING">{t('p93EvidenceSupporting')}</option>
+                    <option value="CONFLICTING">{t('p93EvidenceConflict')}</option><option value="ADJUSTMENT">{t('p93EvidenceAdjustBasis')}</option>
                   </select>
                 </label>
               </div>
-              <div className="toolbar"><button type="button" disabled={busy || !evidenceLink.evidenceId || ['VERIFIED', 'REVERSED', 'CORRECTED'].includes(selected.record?.recordState)} onClick={() => void linkSelectedEvidence()}>关联到当前交易</button></div>
-              <h4>发起更正</h4>
-              <p>更正是新建一条草稿并保留原记录，不能复用原幂等编号或原地覆盖事实。</p>
+              <div className="toolbar"><button type="button" disabled={busy || !evidenceLink.evidenceId || ['VERIFIED', 'REVERSED', 'CORRECTED'].includes(selected.record?.recordState)} onClick={() => void linkSelectedEvidence()}>{t('p93LinkToCurrent')}</button></div>
+              <h4>{t('p93StartCorrection')}</h4>
+              <p>{t('p93CorrectionHelp')}</p>
               <div className="form-grid">
-                <label>新幂等编号<input value={correctionForm.ledgerKey} onChange={(event) => setCorrectionForm((v) => ({ ...v, ledgerKey: event.target.value }))} /></label>
-                <label>更正数量<input value={correctionForm.quantity} onChange={(event) => setCorrectionForm((v) => ({ ...v, quantity: event.target.value }))} /></label>
-                <label>更正单价<input value={correctionForm.unitPrice} onChange={(event) => setCorrectionForm((v) => ({ ...v, unitPrice: event.target.value }))} /></label>
-                <label>更正时间<input type="datetime-local" value={correctionForm.tradeTime} onChange={(event) => setCorrectionForm((v) => ({ ...v, tradeTime: event.target.value }))} /></label>
-                <label>更正原因<input value={correctionForm.reason} onChange={(event) => setCorrectionForm((v) => ({ ...v, reason: event.target.value }))} /></label>
+                <label>{t('p93NewIdempotencyKey')}<input value={correctionForm.ledgerKey} onChange={(event) => setCorrectionForm((v) => ({ ...v, ledgerKey: event.target.value }))} /></label>
+                <label>{t('p93CorrectionQuantity')}<input value={correctionForm.quantity} onChange={(event) => setCorrectionForm((v) => ({ ...v, quantity: event.target.value }))} /></label>
+                <label>{t('p93CorrectionPrice')}<input value={correctionForm.unitPrice} onChange={(event) => setCorrectionForm((v) => ({ ...v, unitPrice: event.target.value }))} /></label>
+                <label>{t('p93CorrectionTime')}<input type="datetime-local" value={correctionForm.tradeTime} onChange={(event) => setCorrectionForm((v) => ({ ...v, tradeTime: event.target.value }))} /></label>
+                <label>{t('p93CorrectionReason')}<input value={correctionForm.reason} onChange={(event) => setCorrectionForm((v) => ({ ...v, reason: event.target.value }))} /></label>
               </div>
-              <div className="toolbar"><button type="button" disabled={busy || !['ACTIVE', 'VERIFIED'].includes(selected.record?.recordState)} onClick={() => void correctSelectedRecord()}>创建更正草稿</button></div>
-              <details><summary>原始详情与审计事件</summary><pre>{JSON.stringify(selected, null, 2)}</pre></details>
+              <div className="toolbar"><button type="button" disabled={busy || !['ACTIVE', 'VERIFIED'].includes(selected.record?.recordState)} onClick={() => void correctSelectedRecord()}>{t('p93CreateCorrection')}</button></div>
+              <details><summary>{t('p93OriginalAndAudit')}</summary><pre>{JSON.stringify(selected, null, 2)}</pre></details>
             </div>
           ) : null}
         </div>
@@ -402,10 +417,18 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
 
       {page === 'costs' ? (
         <div>
-          <h3>FIFO 成本批次</h3>
+          <h3>{t('p93FifoBatches')}</h3>
+          <div className="metric-grid">
+            {metric(t('colCalcStatus'), freshnessPresentation(costs?.freshness, t).status)}
+          </div>
+          {freshnessPresentation(costs?.freshness, t).warning ? (
+            <p className="screen-warning" role="status">
+              {freshnessPresentation(costs?.freshness, t).warning}
+            </p>
+          ) : null}
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>批次</th><th>物品/地点</th><th>原始/剩余</th><th>单位成本</th><th>剩余成本</th><th>成本状态</th></tr></thead>
+              <thead><tr><th>{t('colBatch')}</th><th>{t('colItemLocation')}</th><th>{t('colOriginalRemaining')}</th><th>{t('colUnitCost')}</th><th>{t('colRemainingCost')}</th><th>{t('colCostStatus')}</th></tr></thead>
             <tbody>{(costs?.lots || []).map((row: AnyRow) => (
               <tr key={row.lot_id}><td>{row.lot_id}</td><td>{row.type_id} @ {row.location_id}</td>
                 <td>{num(row.original_quantity, 0)} / {num(row.remaining_quantity, 0)}</td>
@@ -419,17 +442,27 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
       {page === 'pnl' ? (
         <div>
           <div className="metric-grid">
-            {metric('已实现盈亏', num(performance?.performance?.realizedPnl))}
-            {metric('未实现盈亏', num(performance?.performance?.unrealizedPnl))}
-            {metric('总交易费用', num(performance?.performance?.totalFees))}
-            {metric('累计买入', num(performance?.performance?.cumulativeBuyAmount))}
-            {metric('累计卖出', num(performance?.performance?.cumulativeSellAmount))}
-            {metric('平均持仓天数', num(performance?.performance?.averageHoldingDays))}
+            {metric(t('colCalcStatus'), freshnessPresentation(performance?.performance?.freshness, t).status)}
+            {metric(t('colRealizedCertain'), num(performance?.performance?.realizedPnl))}
+            {metric(t('colKnownPartial'), num(performance?.performance?.knownRealizedPnl))}
+            {metric(t('paperUnrealizedPnl'), num(performance?.performance?.unrealizedPnl))}
+            {metric(t('p93TotalFees'), num(performance?.performance?.totalFees))}
+            {metric(t('p93CumulativeBuy'), num(performance?.performance?.cumulativeBuyAmount))}
+            {metric(t('p93CumulativeSell'), num(performance?.performance?.cumulativeSellAmount))}
+            {metric(t('p93AvgHoldingDays'), num(performance?.performance?.averageHoldingDays))}
+            {metric(t('p93CertainSells'), num(performance?.performance?.deterministicSellCount, 0))}
+            {metric(t('p93UnknownCostSells'), num(performance?.performance?.unknownCostSellCount, 0))}
+            {metric(t('p93UnsoldUnknown'), num(performance?.performance?.unknownOpenLotCount, 0))}
           </div>
-          <h3>未实现盈亏估值口径</h3>
+          {freshnessPresentation(performance?.performance?.freshness, t).warning ? (
+            <p className="screen-warning" role="status">
+              {freshnessPresentation(performance?.performance?.freshness, t).warning}
+            </p>
+          ) : null}
+          <h3>{t('p93UnrealisedBasis')}</h3>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>口径</th><th>估值</th><th>库存成本</th><th>未实现盈亏</th><th>状态</th></tr></thead>
+              <thead><tr><th>{t('colBasis')}</th><th>{t('profileEstValue')}</th><th>{t('p93TabCosts')}</th><th>{t('paperUnrealizedPnl')}</th><th>{t('profileStatus')}</th></tr></thead>
             <tbody>{Object.entries(performance?.unrealized?.perspectives || {}).map(([key, value]: [string, any]) => (
               <tr key={key}><td>{value.label}</td><td>{num(value.valuation)}</td><td>{num(value.costBasis)}</td><td>{num(value.unrealizedPnl)}</td><td>{value.status}</td></tr>
               ))}</tbody>
@@ -452,26 +485,26 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
                 <div className="toolbar">
                   <button type="button" disabled={busy} onClick={() => {
                     setReconcileOffset(0);
-                    void action(() => webApi.p93.runReconciliation(csrfToken), '资产对账已重新执行。', 0);
-                  }}>执行资产对账</button>
-                  <button type="button" disabled={busy || reconcileOffset === 0} onClick={() => setReconcileOffset(Math.max(0, reconcileOffset - RECONCILE_PAGE_SIZE))}>上一页</button>
-                  <button type="button" disabled={busy || reconcileOffset + RECONCILE_PAGE_SIZE >= itemTotal} onClick={() => setReconcileOffset(reconcileOffset + RECONCILE_PAGE_SIZE)}>下一页</button>
-                  <span role="status" aria-live="polite">显示 {pageStart}-{pageEnd} / 共 {itemTotal.toLocaleString('zh-CN')} 条差异；复核案例 {caseTotal.toLocaleString('zh-CN')} 条</span>
+                    void action(() => webApi.p93.runReconciliation(csrfToken), t('p93ReconcileRerun'), 0);
+                  }}>{t('p93RunReconcile')}</button>
+                  <button type="button" disabled={busy || reconcileOffset === 0} onClick={() => setReconcileOffset(Math.max(0, reconcileOffset - RECONCILE_PAGE_SIZE))}>{t('p93PrevPage')}</button>
+                  <button type="button" disabled={busy || reconcileOffset + RECONCILE_PAGE_SIZE >= itemTotal} onClick={() => setReconcileOffset(reconcileOffset + RECONCILE_PAGE_SIZE)}>{t('p93NextPage')}</button>
+                  <span role="status" aria-live="polite">{t('p93ReconcileCountLine', { start: String(pageStart), end: String(pageEnd), total: itemTotal.toLocaleString(locale === 'zh' ? 'zh-CN' : locale === 'ru' ? 'ru-RU' : 'en-US'), cases: caseTotal.toLocaleString(locale === 'zh' ? 'zh-CN' : locale === 'ru' ? 'ru-RU' : 'en-US') })}</span>
                 </div>
                 {reconciliation ? (
                   <>
-                    <p>对账状态：<strong>{reconciliation.run?.status}</strong>；资产变化只会生成人工复核案例，不会自动生成已核实交易。</p>
+                    <p>{t('p93ReconcileStatusLabel')}<strong>{reconciliation.run?.status}</strong>{t('p93ReconcileStatusSuffix')}</p>
                     <div className="data-table-wrap">
                       <table className="data-table">
-                        <thead><tr><th>物品/地点</th><th>账本数量</th><th>资产数量</th><th>差异</th><th>状态</th><th>原因</th></tr></thead>
+                        <thead><tr><th>{t('colItemLocation')}</th><th>{t('p93LedgerQty')}</th><th>{t('p93AssetQty')}</th><th>{t('colDifference')}</th><th>{t('profileStatus')}</th><th>{t('colReason')}</th></tr></thead>
                         <tbody>{items.length ? items.map((row: AnyRow) => (
                           <tr key={row.reconcile_key}><td>{row.reconcile_key}</td><td>{num(row.ledger_quantity, 0)}</td><td>{num(row.asset_quantity, 0)}</td>
                             <td>{num(row.delta_quantity, 0)}</td><td>{row.status}</td><td>{row.reason}</td></tr>
-                        )) : <tr><td colSpan={6} className="data-table__empty">此页没有资产对账差异。</td></tr>}</tbody>
+                        )) : <tr><td colSpan={6} className="data-table__empty">{t('p93NoReconcileDiff')}</td></tr>}</tbody>
                       </table>
                     </div>
                   </>
-                ) : <p className="screen-empty">尚未执行资产对账。</p>}
+                ) : <p className="screen-empty">{t('p93ReconcileNeverRun')}</p>}
               </>
             );
           })()}
@@ -480,31 +513,31 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
 
       {page === 'evidence' ? (
         <div>
-          <h3>登记证据</h3>
+          <h3>{t('p93RecordEvidence')}</h3>
           <div className="form-grid">
-            <label>证据类型
+            <label>{t('p93LabelEvidenceType')}
               <select value={evidenceForm.evidenceType} onChange={(event) => setEvidenceForm((v) => ({ ...v, evidenceType: event.target.value }))}>
-                <option value="USER_ATTACHMENT">人工凭证</option><option value="USER_CONFIRMATION">用户确认</option>
+                <option value="USER_ATTACHMENT">{t('p93EvidenceManual')}</option><option value="USER_CONFIRMATION">{t('p93EvidenceUserConfirm')}</option>
               </select>
             </label>
-            <label>来源系统<input value={evidenceForm.sourceSystem} onChange={(event) => setEvidenceForm((v) => ({ ...v, sourceSystem: event.target.value }))} /></label>
-            <label>来源引用<input value={evidenceForm.sourceRef} onChange={(event) => setEvidenceForm((v) => ({ ...v, sourceRef: event.target.value }))} /></label>
-            <label>采集时间<input type="datetime-local" value={evidenceForm.capturedAt} onChange={(event) => setEvidenceForm((v) => ({ ...v, capturedAt: event.target.value }))} /></label>
-            <label>内容哈希<input value={evidenceForm.payloadHash} onChange={(event) => setEvidenceForm((v) => ({ ...v, payloadHash: event.target.value }))} /></label>
-            <label>摘要<input value={evidenceForm.summary} onChange={(event) => setEvidenceForm((v) => ({ ...v, summary: event.target.value }))} /></label>
+            <label>{t('colSourceSystem')}<input value={evidenceForm.sourceSystem} onChange={(event) => setEvidenceForm((v) => ({ ...v, sourceSystem: event.target.value }))} /></label>
+            <label>{t('colSourceRef')}<input value={evidenceForm.sourceRef} onChange={(event) => setEvidenceForm((v) => ({ ...v, sourceRef: event.target.value }))} /></label>
+            <label>{t('colCapturedAt')}<input type="datetime-local" value={evidenceForm.capturedAt} onChange={(event) => setEvidenceForm((v) => ({ ...v, capturedAt: event.target.value }))} /></label>
+            <label>{t('colContentHash')}<input value={evidenceForm.payloadHash} onChange={(event) => setEvidenceForm((v) => ({ ...v, payloadHash: event.target.value }))} /></label>
+            <label>{t('colSummary')}<input value={evidenceForm.summary} onChange={(event) => setEvidenceForm((v) => ({ ...v, summary: event.target.value }))} /></label>
           </div>
-          <p>新证据固定以 PENDING 登记；必须单独执行“核实证据”，再回到交易记录执行人工核实。</p>
-          <div className="toolbar"><button type="button" disabled={busy} onClick={() => void createEvidence()}>登记证据</button></div>
+          <p>{t('p93EvidencePendingNote')}</p>
+          <div className="toolbar"><button type="button" disabled={busy} onClick={() => void createEvidence()}>{t('p93RecordEvidence')}</button></div>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>采集时间</th><th>类型</th><th>来源</th><th>状态</th><th>摘要</th><th>操作</th></tr></thead>
+              <thead><tr><th>{t('colCapturedAt')}</th><th>{t('colType')}</th><th>{t('colSource')}</th><th>{t('profileStatus')}</th><th>{t('colSummary')}</th><th>{t('colAction')}</th></tr></thead>
             <tbody>{evidence.map((row) => (
               <tr key={row.evidence_id}>
                 <td>{dateTime(row.captured_at)}</td><td>{row.evidence_type}</td><td>{row.source_system} / {row.source_ref || '-'}</td>
                 <td>{row.status}</td><td>{row.summary || '-'}</td>
                 <td>
-                  <button type="button" disabled={busy || row.status === 'VERIFIED'} onClick={() => void action(() => webApi.p93.evidenceStatus(row.evidence_id, 'VERIFIED', csrfToken), '证据已核实。')}>核实证据</button>
-                  <button type="button" disabled={busy || row.status === 'REJECTED'} onClick={() => void action(() => webApi.p93.evidenceStatus(row.evidence_id, 'REJECTED', csrfToken, '人工驳回'), '证据已驳回。')}>驳回证据</button>
+                  <button type="button" disabled={busy || row.status === 'VERIFIED'} onClick={() => void action(() => webApi.p93.evidenceStatus(row.evidence_id, 'VERIFIED', csrfToken), t('p93EvidenceVerified'))}>{t('p93VerifyEvidence')}</button>
+                  <button type="button" disabled={busy || row.status === 'REJECTED'} onClick={() => void action(() => webApi.p93.evidenceStatus(row.evidence_id, 'REJECTED', csrfToken, t('p93RejectManually')), t('p93EvidenceRejected'))}>{t('p93RejectEvidence')}</button>
                 </td>
               </tr>
               ))}</tbody>
@@ -515,20 +548,20 @@ export function P93AccountingPanel({ csrfToken }: { csrfToken: string }) {
 
       {page === 'audit' ? (
         <div>
-          <p>完整性：{audit?.integrity?.ok ? '通过' : '存在异常'}；原始事件只追加，已核实记录不能直接删除。</p>
-          <h3>核算版本</h3>
+          <p>{t('p93IntegrityLabel')}{audit?.integrity?.ok ? t('p93Pass') : t('p93Anomaly')}{t('p93AuditAppendOnly')}</p>
+          <h3>{t('p93AccountingVersion')}</h3>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>版本</th><th>时间</th><th>状态</th><th>已实现已知盈亏</th><th>未知成本</th><th>差异</th></tr></thead>
+              <thead><tr><th>{t('colVersion')}</th><th>{t('colTime')}</th><th>{t('profileStatus')}</th><th>{t('p93RealisedKnown')}</th><th>{t('p93UnknownCost')}</th><th>{t('colDifference')}</th></tr></thead>
             <tbody>{(audit?.calculationRuns || []).map((row: AnyRow) => (
               <tr key={row.run_id}><td>{row.calculation_version}</td><td>{dateTime(row.completed_at || row.started_at)}</td><td>{row.status}</td><td>{num(row.realized_pnl)}</td><td>{num(row.unknown_cost_count, 0)}</td><td><pre>{JSON.stringify(row.differences)}</pre></td></tr>
               ))}</tbody>
             </table>
           </div>
-          <h3>审计事件</h3>
+          <h3>{t('p93AuditEvents')}</h3>
           <div className="data-table-wrap">
             <table className="data-table">
-              <thead><tr><th>时间</th><th>记录</th><th>事件</th><th>操作者</th><th>原因</th></tr></thead>
+              <thead><tr><th>{t('colTime')}</th><th>{t('colRecord')}</th><th>{t('colEvent')}</th><th>{t('colActor')}</th><th>{t('colReason')}</th></tr></thead>
             <tbody>{(audit?.events || []).map((row: AnyRow) => (
               <tr key={row.event_id}><td>{dateTime(row.created_at)}</td><td>{row.record_id}</td><td>{row.event_type}</td><td>{row.actor_type}/{row.actor_id}</td><td>{row.reason || '-'}</td></tr>
               ))}</tbody>

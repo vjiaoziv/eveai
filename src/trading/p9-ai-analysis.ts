@@ -3,6 +3,9 @@ import { runModelText } from '../agent/model.js';
 import type { NativeUsage } from '../agent/native-responses.js';
 import type { UserContext } from '../auth/user-resolver.js';
 import { P93FifoService } from './p9-3-fifo-service.js';
+import { resolveAssetLineage, type AssetLineage } from '../assets/asset-lineage.js';
+import { realLedgerLineagePredicate } from './p9-3-lineage.js';
+import { p9LineagePredicate } from './p9-control-plane-lineage.js';
 
 export type P9AnalysisMode = 'opportunity' | 'daily';
 
@@ -33,7 +36,12 @@ function safeJson(value: unknown, maxLength = 12_000): string {
   return raw.length > maxLength ? raw.slice(0, maxLength) + '\n...[truncated]' : raw;
 }
 
-export function buildP9AnalysisPrompt(db: Db, characterId: number, input: P9AnalysisInput): {
+export function buildP9AnalysisPrompt(
+  db: Db,
+  characterId: number,
+  lineage: AssetLineage,
+  input: P9AnalysisInput,
+): {
   prompt: string;
   opportunityIds: string[];
   snapshotIds: string[];
@@ -43,48 +51,76 @@ export function buildP9AnalysisPrompt(db: Db, characterId: number, input: P9Anal
   const where = ids.length > 0
     ? `AND opportunity_id IN (${ids.map(() => '?').join(', ')})`
     : '';
+  const tradeOwnership = realLedgerLineagePredicate('r', lineage);
+  const feeOwnership = realLedgerLineagePredicate('f', lineage);
+  const consumptionOwnership = realLedgerLineagePredicate('c', lineage);
+  const lotOwnership = realLedgerLineagePredicate('l', lineage);
+  const opportunityOwnership = p9LineagePredicate('o', lineage);
   const rows = ids.length > 0
     ? db.prepare(`
-        SELECT * FROM p9_real_opportunities
-        WHERE character_id = ? ${where}
-        ORDER BY fee_net_profit DESC
-      `).all(characterId, ...ids) as any[]
+        SELECT o.* FROM p9_real_opportunities o
+        WHERE o.character_id = ? AND ${opportunityOwnership.sql} ${where}
+        ORDER BY o.fee_net_profit DESC
+      `).all(characterId, ...opportunityOwnership.params, ...ids) as any[]
     : db.prepare(`
-        SELECT * FROM p9_real_opportunities
-        WHERE character_id = ? AND state IN ('ACTIONABLE', 'WATCHING', 'STALE', 'EXPIRED')
-        ORDER BY updated_at DESC LIMIT 8
-      `).all(characterId) as any[];
+        SELECT o.* FROM p9_real_opportunities o
+        WHERE o.character_id = ? AND ${opportunityOwnership.sql}
+          AND o.state IN ('ACTIONABLE', 'WATCHING', 'STALE', 'EXPIRED')
+        ORDER BY o.updated_at DESC LIMIT 8
+      `).all(characterId, ...opportunityOwnership.params) as any[];
 
   const trades = db.prepare(`
     SELECT r.record_id AS trade_id, lower(r.direction) AS direction, r.type_id, r.location_id,
            r.quantity, r.unit_price AS price,
-           (SELECT COALESCE(SUM(amount), 0) FROM real_trade_fees
-             WHERE record_id = r.record_id AND treatment <> 'UNRELATED') AS fee,
+           (SELECT COALESCE(SUM(f.amount), 0) FROM real_trade_fees f
+             WHERE f.record_id = r.record_id AND ${feeOwnership.sql}
+               AND f.treatment <> 'UNRELATED') AS fee,
            r.fee_status, r.trade_time, lower(r.source_type) AS source,
            r.verification_status, r.opportunity_id, r.plan_id,
            CASE WHEN r.direction = 'SELL' THEN (
              SELECT CASE WHEN SUM(CASE WHEN pnl_status = 'UNKNOWN_COST' THEN 1 ELSE 0 END) > 0 THEN NULL
                          ELSE ROUND(SUM(realized_pnl), 2) END
-             FROM real_fifo_consumptions WHERE sell_record_id = r.record_id
+             FROM real_fifo_consumptions c
+             WHERE c.sell_record_id = r.record_id AND ${consumptionOwnership.sql}
            ) ELSE NULL END AS realized_pnl,
            CASE WHEN r.direction = 'SELL' AND EXISTS (
-             SELECT 1 FROM real_fifo_consumptions WHERE sell_record_id = r.record_id AND pnl_status = 'UNKNOWN_COST'
+             SELECT 1 FROM real_fifo_consumptions c
+             WHERE c.sell_record_id = r.record_id AND ${consumptionOwnership.sql}
+               AND c.pnl_status = 'UNKNOWN_COST'
            ) THEN 'UNKNOWN_COST' WHEN r.direction = 'SELL' THEN 'CALCULATED' ELSE 'PENDING' END AS pnl_status
     FROM real_trade_records r
-    WHERE r.character_id = ? AND r.is_paper = 0
+    WHERE r.character_id = ? AND ${tradeOwnership.sql} AND r.is_paper = 0
       AND r.record_state = 'VERIFIED' AND r.verification_status = 'VERIFIED'
     ORDER BY r.trade_time DESC LIMIT 20
-  `).all(characterId) as any[];
+  `).all(
+    ...feeOwnership.params,
+    ...consumptionOwnership.params,
+    ...consumptionOwnership.params,
+    characterId,
+    ...tradeOwnership.params,
+  ) as any[];
   const portfolio = db.prepare(`
     SELECT
       (SELECT balance FROM character_wallet WHERE character_id = ?) AS wallet_balance,
-      (SELECT COUNT(*) FROM real_fifo_lots WHERE character_id = ? AND remaining_quantity > 0) AS active_lots,
-      (SELECT COUNT(*) FROM real_fifo_lots
-        WHERE character_id = ? AND remaining_quantity > 0 AND cost_status <> 'KNOWN') AS unknown_cost_lots,
-      (SELECT COUNT(*) FROM p9_real_opportunities WHERE character_id = ? AND state = 'ACTIONABLE') AS actionable_count
-  `).get(characterId, characterId, characterId, characterId) as any;
-  const realAccounting = P93FifoService.performance(db, characterId);
-  const unrealized = P93FifoService.unrealized(db, characterId);
+      (SELECT COUNT(*) FROM real_fifo_lots l
+        WHERE l.character_id = ? AND ${lotOwnership.sql} AND l.remaining_quantity > 0) AS active_lots,
+      (SELECT COUNT(*) FROM real_fifo_lots l
+        WHERE l.character_id = ? AND ${lotOwnership.sql}
+          AND l.remaining_quantity > 0 AND l.cost_status <> 'KNOWN') AS unknown_cost_lots,
+      (SELECT COUNT(*) FROM p9_real_opportunities o
+        WHERE o.character_id = ? AND ${opportunityOwnership.sql}
+          AND o.state = 'ACTIONABLE') AS actionable_count
+  `).get(
+    characterId,
+    characterId,
+    ...lotOwnership.params,
+    characterId,
+    ...lotOwnership.params,
+    characterId,
+    ...opportunityOwnership.params,
+  ) as any;
+  const realAccounting = P93FifoService.performance(db, characterId, lineage);
+  const unrealized = P93FifoService.unrealized(db, characterId, lineage);
 
   const payload = {
     mode: input.mode,
@@ -154,10 +190,11 @@ export async function runP9Analysis(
   db: Db,
   characterId: number,
   input: P9AnalysisInput,
-  ctx?: UserContext,
+  ctx: UserContext,
   signal?: AbortSignal,
 ): Promise<P9AnalysisOutcome> {
-  const built = buildP9AnalysisPrompt(db, characterId, input);
+  const lineage = resolveAssetLineage(db, characterId, ctx.userId, ctx.chatId);
+  const built = buildP9AnalysisPrompt(db, characterId, lineage, input);
   let capturedUsage: NativeUsage | undefined;
   try {
     const text = await runModelText(

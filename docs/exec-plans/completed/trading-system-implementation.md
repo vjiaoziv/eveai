@@ -48,10 +48,10 @@
 ### P0 阶段：仓库审计、架构设计与数据库设计【当前已完成】
 - **目标**：全面摸清系统现有 12 项能力存量，建立架构蓝图与风控基线。
 - **交付物**：
-  1. `TRADING_SYSTEM_AUDIT.md`
-  2. `EXISTING_CAPABILITIES.md`
-  3. `DATA_SOURCE_AUDIT.md`
-  4. `SECURITY_AUDIT.md`
+  1. `docs/audit/pre-P8/TRADING_SYSTEM_AUDIT.md`
+  2. `docs/audit/pre-P8/EXISTING_CAPABILITIES.md`
+  3. `docs/audit/pre-P8/DATA_SOURCE_AUDIT.md`
+  4. `docs/audit/pre-P8/SECURITY_AUDIT.md`
   5. `TRADING_IMPLEMENTATION_PLAN.md`
 - **验收标准**：通过代码与数据实证，向用户明确界定“哪些复用、哪些修改、哪些新增”。
 

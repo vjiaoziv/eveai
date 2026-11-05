@@ -30,13 +30,16 @@ describe('model-facing SDE schema hints', () => {
     expect(mismatches).toEqual([]);
   });
 
-  it('character schema hint lists the real columns (character_id is server-enforced and omitted)', () => {
+  it('character schema hint lists public columns (server-enforced lineage is omitted)', () => {
     const db = new Database(':memory:');
     db.exec(SCHEMA_SQL);
     const mismatches: string[] = [];
     for (const match of CHARACTER_SCHEMA.matchAll(/^(character_\w+) \(([^)]*)\)/gmu)) {
       const hinted = match[2].split(',').map((column) => column.trim().split(' ')[0]).sort();
-      const actual = realColumns(db, match[1]).filter((column) => column !== 'character_id').sort();
+      const internal = new Set([
+        'character_id', 'owner_user_id', 'owner_chat_id', 'binding_epoch', 'binding_digest',
+      ]);
+      const actual = realColumns(db, match[1]).filter((column) => !internal.has(column)).sort();
       if (JSON.stringify(hinted) !== JSON.stringify(actual)) {
         mismatches.push(`${match[1]}: hint=${hinted.join(',')} db=${actual.join(',')}`);
       }

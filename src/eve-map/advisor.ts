@@ -33,7 +33,7 @@ export type Advisory = {
   rule: AdvisoryRule;
   severity: AdvisorySeverity;
   /** Localized message keys with parameters; the web layer renders both locales. */
-  text: { ru: string; en: string };
+  text: { zh: string; ru: string; en: string };
   systemId: number | null;
   killmailId: number | null;
   /** Collapsed repeats of the same condition inside one cooldown window. */
@@ -322,6 +322,7 @@ function detectIdentityPursuit(state: AdvisorState, ctx: AdvisorContext): Adviso
     rule: 'pursuit',
     severity: 'danger',
     text: {
+      zh: `同一个袭击者在你身后的多个星系出现：${label}。疑似尾随追踪。`,
       ru: `Один и тот же стрелок засветился в нескольких системах у тебя за спиной: ${label}. Похоже на преследование.`,
       en: `The same attacker turned up in several systems behind you: ${label}. This looks like a pursuit.`,
     },
@@ -357,6 +358,7 @@ function detectCampAhead(
     rule: 'camp_next_hop',
     severity: 'danger',
     text: {
+      zh: `${worst.system.name}：过去一小时内在同一星门记录到 ${worst.camp} 起击杀。这是堵门，不是偶发。`,
       ru: `${worst.system.name}: ${worst.camp} труп(а) на одном гейте за последний час. Это кемп, а не случайность.`,
       en: `${worst.system.name}: ${worst.camp} kill(s) on a single gate in the last hour. That is a camp, not noise.`,
     },
@@ -379,10 +381,12 @@ function detectThreatRise(state: AdvisorState, ctx: AdvisorContext): Advisory | 
   const worst = ctx.bubble.systems.find((system) => system.systemId === ctx.bubble.verdict.worstSystemId);
   const where = worst ? ` Хуже всего в ${worst.name} (${worst.jumps} пр.).` : '';
   const whereEn = worst ? ` Worst is ${worst.name}, ${worst.jumps} jump(s) out.` : '';
+  const whereZh = worst ? ` 最严重的是 ${worst.name}（${worst.jumps} 跳）。` : '';
   return {
     rule: 'threat_rise',
     severity: rank(band) >= rank('hostile') ? 'danger' : 'warn',
     text: {
+      zh: `外围威胁升级：${translateBandZh(previous)} → ${translateBandZh(band)}。${whereZh}`,
       ru: `Периметр поднялся: ${translateBand(previous)} → ${translateBand(band)}.${where}`,
       en: `Perimeter threat rose: ${previous} → ${band}.${whereEn}`,
     },
@@ -412,6 +416,7 @@ function detectValueSpike(
     rule: 'value_spike',
     severity: 'warn',
     text: {
+      zh: `${name}（${jumps} 跳）：一艘价值 ${billions}B 的${biggest.victimShipName ?? "舰船"} 被击毁，很快会有人赶过去。`,
       ru: `В ${name} (${jumps} пр.) выбили ${biggest.victimShipName ?? 'корабль'} на ${billions} млрд. Туда сейчас слетится народ.`,
       en: `A ${biggest.victimShipName ?? 'ship'} worth ${billions}B just died in ${name} (${jumps} jumps). Expect a crowd.`,
     },
@@ -443,6 +448,7 @@ function detectCapabilityGap(
     rule: 'capability_gap',
     severity: 'danger',
     text: {
+      zh: `${ship.shipName} 对阵 ${worst.name} 的火力：生存概率「${ship.survivalChance.toLowerCase()}」。EHP ${Math.round(ship.ehp)}，对准 ${ship.alignTime.toFixed(1)} 秒。`,
       ru: `${ship.shipName} против того, что стреляет в ${worst.name}: шансы «${ship.survivalChance.toLowerCase()}». `
         + `EHP ${Math.round(ship.ehp)}, схождение ${ship.alignTime.toFixed(1)} с.`,
       en: `${ship.shipName} against what is shooting in ${worst.name}: survival ${ship.survivalChance.toLowerCase()}. `
@@ -477,6 +483,7 @@ function detectRouteDegraded(
     rule: 'route_degraded',
     severity: 'danger',
     text: {
+      zh: `航线在第 ${index} 跳变红：${worst.name}。我可以重新规划绕行。`,
       ru: `Маршрут покраснел на ${index}-м прыжке: ${worst.name}. Могу пересчитать в обход.`,
       en: `Your route went red at hop ${index}: ${worst.name}. I can reroute around it.`,
     },
@@ -506,6 +513,7 @@ function detectSecurityBand(
       rule: 'security_band',
       severity: 'warn',
       text: {
+        zh: `${current.name}：你已离开高安。CONCORD 不会来到这里。`,
         ru: `${current.name}: ты вышел из хайсека. CONCORD сюда не придёт.`,
         en: `${current.name}: you have left highsec. CONCORD will not come here.`,
       },
@@ -521,6 +529,7 @@ function detectSecurityBand(
       rule: 'security_band',
       severity: 'warn',
       text: {
+        zh: `${current.name}：00 星系。这里没有任何交战规则。`,
         ru: `${current.name}: нули. Здесь можно всё и всем.`,
         en: `${current.name}: nullsec. No rules of engagement at all.`,
       },
@@ -551,6 +560,7 @@ function detectAllClear(state: AdvisorState, ctx: AdvisorContext): Advisory | nu
     rule: 'all_clear',
     severity: 'info',
     text: {
+      zh: '安全。过去 15 分钟外围空域没有发生任何情况。',
       ru: 'Чисто. За последние 15 минут в периметре ничего не происходило.',
       en: 'All clear. Nothing has happened in the perimeter for fifteen minutes.',
     },
@@ -596,6 +606,17 @@ function rank(band: DangerBand): number {
     case 'elevated': return 2;
     case 'watch': return 1;
     default: return 0;
+  }
+}
+
+/** 中文危险度标签，与 i18n 的 perimeterBand_* 键取值一致。 */
+function translateBandZh(band: DangerBand): string {
+  switch (band) {
+    case 'lethal': return '致命';
+    case 'hostile': return '敌对';
+    case 'elevated': return '警惕';
+    case 'watch': return '关注';
+    default: return '平静';
   }
 }
 

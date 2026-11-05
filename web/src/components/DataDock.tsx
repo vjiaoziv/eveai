@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { webApi } from '../api';
 import { CloseIcon } from '../icons';
-import { useI18n } from '../i18n';
+import { LocaleSwitch, useI18n } from '../i18n';
 import type {
   ActivityStep,
   MarketAlertEvent,
@@ -49,6 +49,7 @@ export function DataDock({ tab, trace, profile, characterId, onTab, onClose, onA
         onClick={() => onTab(id)}
       >{label}</button>)}
     </div>
+    <LocaleSwitch />
     <button className="icon-button dock__close" type="button" onClick={onClose} aria-label={t('dockClose')}><CloseIcon size={18} /></button>
     <div className="dock__body" role="tabpanel">
       {tab === 'market' ? <MarketTab characterId={characterId} onAsk={onAsk} /> : null}

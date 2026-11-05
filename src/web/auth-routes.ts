@@ -44,6 +44,8 @@ interface TokenResponse {
   token_type: string;
 }
 
+const FOREIGN_SESSION_NOTICE = 'This login link belongs to a different browser session. Start the EVE login again from the app.';
+
 export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
   if (!app.hasContentTypeParser('application/x-www-form-urlencoded')) {
     app.addContentTypeParser(
@@ -65,7 +67,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
   // scope set and explicitly acknowledges how the data is used.
   app.get<{ Querystring: { state?: string; language?: string } }>('/auth/eve/login', async (req, reply) => {
     const state = typeof req.query.state === 'string' ? req.query.state : '';
-    const locale: ConsentLocale = req.query.language === 'en' ? 'en' : 'ru';
+    const locale: ConsentLocale = req.query.language === 'zh' ? 'zh' : req.query.language === 'en' ? 'en' : 'ru';
     if (!state) {
       return reply.status(400).type('text/html').send(buildNoticePage('Missing login token.'));
     }
@@ -92,7 +94,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
   app.post<{ Body: unknown }>('/auth/eve/consent', async (req, reply) => {
     const values = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
     const state = typeof values.state === 'string' ? values.state : '';
-    const locale: ConsentLocale = values.language === 'en' ? 'en' : 'ru';
+    const locale: ConsentLocale = values.language === 'zh' ? 'zh' : values.language === 'en' ? 'en' : 'ru';
     const pending = state ? findPendingAuthRequest(db, 'eve_sso', state) : null;
     if (!pending) {
       return reply.status(403).type('text/html').send(buildNoticePage('This login link has expired or was already used.'));
@@ -109,9 +111,11 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
         .send(buildLocalizedEveConsentPage(
           state,
           locale,
-          locale === 'ru'
-            ? 'Подтвердите согласие и используйте только доступные категории.'
-            : 'Confirm consent and use only the available categories.',
+          locale === 'zh'
+            ? '请确认授权，并仅使用可用的类别。'
+            : locale === 'ru'
+              ? 'Подтвердите согласие и используйте только доступные категории.'
+              : 'Confirm consent and use only the available categories.',
         ));
     }
     const recorded = recordAuthRequestConsent(db, 'eve_sso', state, {
@@ -139,21 +143,22 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
         const redirect = safeAppRedirect(deniedRequest.redirect_url);
         if (redirect) return reply.redirect(buildAppAuthRedirect(redirect, 'denied'));
       }
-      return reply.status(400).send({ error: `SSO error: ${error_description ?? error}` });
+      log.warn('SSO callback rejected category=sso_error detail=%s', error_description ?? error);
+      return reply.status(400).send({ error: 'sso_error' });
     }
     if (!code) {
-      return reply.status(400).send({ error: 'Missing authorization code' });
+      return reply.status(400).send({ error: 'missing_authorization_code' });
     }
     if (!state) {
-      return reply.status(400).send({ error: 'Missing state parameter' });
+      return reply.status(400).send({ error: 'missing_state_parameter' });
     }
 
     const authRequest = findPendingAuthRequest(db, 'eve_sso', state);
     if (!authRequest) {
-      return reply.status(403).send({ error: 'Invalid or expired state parameter. Please try again.' });
+      return reply.status(403).send({ error: 'invalid_or_expired_state' });
     }
     if (!authRequest.consented_at || !authRequest.requestedScopes || authRequest.consent_version !== EVE_CONSENT_VERSION) {
-      return reply.status(403).send({ error: 'EVE data access was not acknowledged. Please start the login flow again.' });
+      return reply.status(403).send({ error: 'consent_not_acknowledged' });
     }
     if (!isBoundToRequestSession(db, req, authRequest)) {
       // Not consumed: the finishing browser does not own this request, so it
@@ -161,7 +166,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
       log.warn('Browser SSO callback rejected category=session_mismatch');
       const redirect = safeAppRedirect(authRequest.redirect_url);
       if (redirect) return reply.redirect(buildAppAuthRedirect(redirect, 'error'));
-      return reply.status(403).send({ error: FOREIGN_SESSION_NOTICE });
+      return reply.status(403).send({ error: 'foreign_session_mismatch' });
     }
 
     markAuthRequestUsed(db, 'eve_sso', state);
@@ -190,7 +195,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
 
       if (!tokenRes.ok) {
         log.error('Token exchange failed category=upstream_http status=%d', tokenRes.status);
-        return reply.status(502).send({ error: 'Token exchange failed' });
+        return reply.status(502).send({ error: 'token_exchange_failed' });
       }
 
       const tokens = (await tokenRes.json()) as TokenResponse;
@@ -199,7 +204,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
       const scopes = Array.isArray(payload.scp) ? payload.scp : payload.scp ? [payload.scp] : [];
       const requestedScopeSet = new Set(authRequest.requestedScopes);
       if (scopes.some((scope) => !requestedScopeSet.has(scope))) {
-        return reply.status(403).send({ error: 'EVE SSO granted an unexpected scope. Please start the login flow again.' });
+        return reply.status(403).send({ error: 'unexpected_granted_scope' });
       }
       const ownerHash = typeof payload.owner === 'string' && payload.owner ? payload.owner : null;
       const ownerInput = {
@@ -295,7 +300,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
     } catch (err) {
       log.error('Callback error: %s', err instanceof Error ? err.message : String(err));
       if (appRedirect) return reply.redirect(buildAppAuthRedirect(appRedirect, 'error'));
-      return reply.status(500).send({ error: 'Authentication failed. Please try /eve_login again.' });
+      return reply.status(500).send({ error: 'authentication_failed' });
     }
   });
 
@@ -328,7 +333,6 @@ function isBoundToRequestSession(
   return session !== null && session.chatId === pending.chat_id;
 }
 
-const FOREIGN_SESSION_NOTICE = 'This login link belongs to a different browser session. Start the EVE login again from the app.';
 
 function safeAppRedirect(value: string | null): string | null {
   if (!value) return null;

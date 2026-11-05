@@ -31,10 +31,10 @@ export function registerP9AiRoutes(
     if (!session) return;
     if (!config.web.aiSearchEnabled) {
       reply.header('Retry-After', '60');
-      return reply.status(503).send({ error: 'AI 交易分析当前不可用。' });
+      return reply.status(503).send({ error: 'p9_ai_analysis_unavailable' });
     }
     const linked = getLinkedCharacter(db, { userId: session.userId, chatId: session.chatId });
-    if (!linked) return reply.status(404).send({ error: '尚未关联 EVE 角色。' });
+    if (!linked) return reply.status(404).send({ error: 'eve_character_not_linked' });
 
     const body = request.body && typeof request.body === 'object' && !Array.isArray(request.body)
       ? request.body as Record<string, unknown>
@@ -65,14 +65,14 @@ export function registerP9AiRoutes(
     } catch (error) {
       console.error('[p9-ai-analysis] runner failed: %s', error instanceof Error ? error.message : String(error));
       reply.header('Retry-After', '60');
-      return reply.status(503).send({ error: 'AI 分析暂时失败，请稍后重试。' });
+      return reply.status(503).send({ error: 'p9_ai_analysis_failed' });
     }
     if (outcome.usage) {
       recordModelUsageSafe(db, ctx, USAGE_THREAD_ID, toUsageCounts(outcome.usage), config.openai.model);
     }
     if (!outcome.ok) {
       reply.header('Retry-After', '60');
-      return reply.status(503).send({ error: 'AI 分析暂时失败，请稍后重试。' });
+      return reply.status(503).send({ error: 'p9_ai_analysis_failed' });
     }
     return {
       analysis: outcome.text,

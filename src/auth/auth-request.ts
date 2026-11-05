@@ -17,7 +17,7 @@ export interface AuthRequestRow {
   redirect_url: string | null;
   requestedScopes: string[] | null;
   consent_version: string | null;
-  consent_language: 'ru' | 'en' | null;
+  consent_language: 'zh' | 'ru' | 'en' | null;
   consented_at: string | null;
 }
 
@@ -87,7 +87,7 @@ export function recordAuthRequestConsent(
   token: string,
   consent: {
     version: string;
-    language: 'ru' | 'en';
+    language: 'zh' | 'ru' | 'en';
     scopes: readonly string[];
   },
 ): boolean {

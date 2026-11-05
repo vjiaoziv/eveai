@@ -1,37 +1,80 @@
 import type { Db } from '../db/sqlite.js';
 import { clampPositiveInteger } from '../util/query-bounds.js';
+import type { AssetLineage } from '../assets/asset-lineage.js';
+import {
+  realLedgerLineagePredicate,
+  resolveRealLedgerLineage,
+  type RealLedgerLineage,
+} from './p9-3-lineage.js';
+
+function ledgerPredicate(
+  alias: string,
+  lineage: RealLedgerLineage | null,
+): { sql: string; params: unknown[] } {
+  if (lineage) return realLedgerLineagePredicate(alias, lineage);
+  return {
+    sql: `${alias}.owner_user_id IS NULL AND ${alias}.owner_chat_id IS NULL AND ${alias}.binding_epoch = 0`,
+    params: [],
+  };
+}
 
 export class P93AuditService {
-  static events(db: Db, characterId: number, recordId?: string, limit = 200): any[] {
-    const where = ['character_id = ?'];
+  static events(
+    db: Db,
+    characterId: number,
+    recordId?: string,
+    limit = 200,
+    lineage?: RealLedgerLineage | null,
+  ): any[] {
+    const owner = resolveRealLedgerLineage(db, characterId, lineage);
+    const ownership = ledgerPredicate('e', owner);
+    const where = ['e.character_id = ?', ownership.sql];
     const params: unknown[] = [characterId];
-    if (recordId) { where.push('record_id = ?'); params.push(recordId); }
+    if (recordId) { where.push('e.record_id = ?'); params.push(recordId); }
+    params.push(...ownership.params);
     return db.prepare(`
-      SELECT * FROM real_trade_events
+      SELECT e.* FROM real_trade_events e
       WHERE ${where.join(' AND ')}
-      ORDER BY created_at DESC, event_id DESC LIMIT ?
+      ORDER BY e.created_at DESC, e.event_id DESC LIMIT ?
     `).all(...params, clampPositiveInteger(limit, 200, 1000));
   }
 
-  static calculationRuns(db: Db, characterId: number, limit = 50): any[] {
+  static calculationRuns(
+    db: Db,
+    characterId: number,
+    limit = 50,
+    lineage?: RealLedgerLineage | null,
+  ): any[] {
+    const owner = resolveRealLedgerLineage(db, characterId, lineage);
+    const ownership = ledgerPredicate('rr', owner);
     const rows = db.prepare(`
-      SELECT * FROM real_calculation_runs
-      WHERE character_id = ?
-      ORDER BY started_at DESC, run_id DESC LIMIT ?
-    `).all(characterId, clampPositiveInteger(limit, 50, 200)) as any[];
+      SELECT rr.* FROM real_calculation_runs rr
+      WHERE rr.character_id = ? AND ${ownership.sql}
+      ORDER BY rr.started_at DESC, rr.run_id DESC LIMIT ?
+    `).all(characterId, ...ownership.params, clampPositiveInteger(limit, 50, 200)) as any[];
     return rows.map((row) => ({ ...row, differences: JSON.parse(row.differences_json || '{}') }));
   }
 
-  static reconciliationRuns(db: Db, characterId: number, limit = 50): any[] {
+  static reconciliationRuns(
+    db: Db,
+    characterId: number,
+    lineage: AssetLineage,
+    limit = 50,
+  ): any[] {
+    const ownership = realLedgerLineagePredicate(null, lineage);
     const rows = db.prepare(`
       SELECT * FROM real_reconciliation_runs
-      WHERE character_id = ?
+      WHERE character_id = ? AND ${ownership.sql}
       ORDER BY created_at DESC, run_id DESC LIMIT ?
-    `).all(characterId, clampPositiveInteger(limit, 50, 200)) as any[];
+    `).all(characterId, ...ownership.params, clampPositiveInteger(limit, 50, 200)) as any[];
     return rows.map((row) => ({ ...row, summary: JSON.parse(row.summary_json || '{}') }));
   }
 
-  static integrityCheck(db: Db, characterId?: number): { ok: boolean; findings: string[] } {
+  static integrityCheck(
+    db: Db,
+    characterId?: number,
+    lineage?: RealLedgerLineage | null,
+  ): { ok: boolean; findings: string[] } {
     const findings: string[] = [];
     const integrity = db.pragma('integrity_check') as Array<{ integrity_check: string }>;
     if (integrity[0]?.integrity_check !== 'ok') findings.push(`SQLite integrity_check=${integrity[0]?.integrity_check ?? 'unknown'}`);
@@ -64,19 +107,39 @@ export class P93AuditService {
     const triggerNames = new Set(triggers.map((row) => row.name));
     const missingTriggers = requiredTriggers.filter((name) => !triggerNames.has(name));
     if (missingTriggers.length > 0) findings.push(`P9.3 财务审计触发器不完整：${missingTriggers.join(', ')}`);
-    const scope = characterId ?? null;
     const foreignKeyViolations = db.pragma('foreign_key_check') as unknown[];
     if (foreignKeyViolations.length > 0) findings.push(`SQLite foreign_key_check 发现 ${foreignKeyViolations.length} 条违规。`);
-    const paperRows = Number((db.prepare('SELECT COUNT(*) AS n FROM real_trade_records WHERE is_paper <> 0 AND (? IS NULL OR character_id = ?)').get(scope, scope) as any)?.n || 0);
+
+    const scoped = characterId !== undefined;
+    const owner = scoped ? resolveRealLedgerLineage(db, characterId, lineage) : null;
+    const ledgerScope = (alias: string): { sql: string; params: unknown[] } => {
+      if (!scoped) return { sql: '1 = 1', params: [] };
+      const ownership = ledgerPredicate(alias, owner);
+      return {
+        sql: `${alias}.character_id = ? AND ${ownership.sql}`,
+        params: [characterId, ...ownership.params],
+      };
+    };
+    const runCount = (sql: string, params: unknown[]): number =>
+      Number((db.prepare(sql).get(...params) as any)?.n || 0);
+
+    const recordScope = ledgerScope('r');
+    const paperRows = runCount(`
+      SELECT COUNT(*) AS n FROM real_trade_records r
+      WHERE r.is_paper <> 0 AND ${recordScope.sql}
+    `, recordScope.params);
     if (paperRows !== 0) findings.push('REAL 账本中发现 PAPER 标记记录。');
-    const verifiedFeeAdjustments = Number((db.prepare(`
-      SELECT COUNT(*) AS n FROM real_trade_records
-      WHERE trade_kind = 'FEE_ADJUSTMENT'
-        AND (record_state = 'VERIFIED' OR verification_status = 'VERIFIED')
-        AND (? IS NULL OR character_id = ?)
-    `).get(scope, scope) as any)?.n || 0);
+
+    const verifiedFeeAdjustments = runCount(`
+      SELECT COUNT(*) AS n FROM real_trade_records r
+      WHERE r.trade_kind = 'FEE_ADJUSTMENT'
+        AND (r.record_state = 'VERIFIED' OR r.verification_status = 'VERIFIED')
+        AND ${recordScope.sql}
+    `, recordScope.params);
     if (verifiedFeeAdjustments > 0) findings.push(`发现 ${verifiedFeeAdjustments} 条已核实 FEE_ADJUSTMENT；费用归属口径未定义，必须撤销核实状态。`);
-    const duplicateEsiSupport = Number((db.prepare(`
+
+    const evidenceScope = ledgerScope('e');
+    const duplicateEsiSupport = runCount(`
       SELECT COUNT(*) AS n FROM (
         SELECT l.evidence_id
         FROM real_trade_evidence_links l
@@ -84,20 +147,23 @@ export class P93AuditService {
         JOIN real_trade_records r ON r.record_id = l.record_id AND r.character_id = e.character_id
         WHERE e.evidence_type IN ('ESI_WALLET_LOG', 'ESI_MARKET_ORDER', 'ESI_ASSET_SNAPSHOT', 'ASSET_CHANGE')
           AND l.relation IN ('PRIMARY', 'CORROBORATING')
-          AND (? IS NULL OR e.character_id = ?)
+          AND ${evidenceScope.sql}
+          AND ${recordScope.sql}
         GROUP BY l.evidence_id
         HAVING COUNT(DISTINCT l.record_id) > 1
       )
-    `).get(scope, scope) as any)?.n || 0);
+    `, [...evidenceScope.params, ...recordScope.params]);
     if (duplicateEsiSupport > 0) findings.push(`发现 ${duplicateEsiSupport} 条 ESI 证据被重复用于支持多条交易。`);
-    const orphanVerified = Number((db.prepare(`
+
+    const orphanVerified = runCount(`
       SELECT COUNT(*) AS n FROM real_trade_records r
       WHERE r.record_state = 'VERIFIED' AND r.verification_status = 'VERIFIED'
-        AND (? IS NULL OR r.character_id = ?)
+        AND ${recordScope.sql}
         AND NOT EXISTS (
           SELECT 1 FROM real_trade_evidence_links l
           JOIN real_trade_evidence e ON e.evidence_id = l.evidence_id
           WHERE l.record_id = r.record_id AND e.character_id = r.character_id
+            AND ${evidenceScope.sql}
             AND e.status = 'VERIFIED' AND l.relation IN ('PRIMARY', 'CORROBORATING')
             AND (
               (
@@ -135,59 +201,67 @@ export class P93AuditService {
               )
             )
         )
-    `).get(scope, scope) as any)?.n || 0);
+    `, [...recordScope.params, ...evidenceScope.params]);
     if (orphanVerified > 0) findings.push(`发现 ${orphanVerified} 条无匹配已核实证据的 VERIFIED 交易。`);
-    const invalidLots = Number((db.prepare(`
-      SELECT COUNT(*) AS n FROM real_fifo_lots
-      WHERE (? IS NULL OR character_id = ?)
-        AND (
-          remaining_quantity > original_quantity
-          OR remaining_cost < 0
-          OR unit_cost < 0
-          OR (cost_status = 'KNOWN' AND remaining_quantity > 0 AND remaining_cost IS NULL)
-        )
-    `).get(scope, scope) as any)?.n || 0);
-    if (invalidLots > 0) findings.push(`FIFO 批次剩余数量或成本状态非法：${invalidLots} 条。`);
-    const orphanLots = Number((db.prepare(`
+
+    const lotScope = ledgerScope('l');
+    const invalidLots = runCount(`
       SELECT COUNT(*) AS n FROM real_fifo_lots l
-      WHERE (? IS NULL OR l.character_id = ?)
+      WHERE ${lotScope.sql}
+        AND (
+          l.remaining_quantity > l.original_quantity
+          OR l.remaining_cost < 0
+          OR l.unit_cost < 0
+          OR (l.cost_status = 'KNOWN' AND l.remaining_quantity > 0 AND l.remaining_cost IS NULL)
+        )
+    `, lotScope.params);
+    if (invalidLots > 0) findings.push(`FIFO 批次剩余数量或成本状态非法：${invalidLots} 条。`);
+
+    const orphanLots = runCount(`
+      SELECT COUNT(*) AS n FROM real_fifo_lots l
+      WHERE ${lotScope.sql}
         AND NOT EXISTS (
           SELECT 1 FROM real_trade_records r
-          WHERE r.record_id = l.source_record_id AND r.character_id = l.character_id
+          WHERE r.record_id = l.source_record_id AND ${recordScope.sql}
         )
-    `).get(scope, scope) as any)?.n || 0);
+    `, [...lotScope.params, ...recordScope.params]);
     if (orphanLots > 0) findings.push(`FIFO 批次缺少同角色来源交易：${orphanLots} 条。`);
-    const invalidConsumptions = Number((db.prepare(`
+
+    const consumptionScope = ledgerScope('c');
+    const invalidConsumptions = runCount(`
       SELECT COUNT(*) AS n FROM (
         SELECT c.sell_record_id
         FROM real_fifo_consumptions c
         LEFT JOIN real_trade_records r
           ON r.record_id = c.sell_record_id AND r.character_id = c.character_id
-        WHERE (? IS NULL OR c.character_id = ?)
+        WHERE ${consumptionScope.sql}
+          AND ${recordScope.sql}
         GROUP BY c.sell_record_id
         HAVING r.record_id IS NULL
           OR r.direction <> 'SELL'
           OR SUM(c.quantity) > r.quantity
       )
-    `).get(scope, scope) as any)?.n || 0);
+    `, [...consumptionScope.params, ...recordScope.params]);
     if (invalidConsumptions > 0) findings.push(`FIFO 消耗数量或卖出归属非法：${invalidConsumptions} 组。`);
-    const orphanConsumptions = Number((db.prepare(`
+
+    const orphanConsumptions = runCount(`
       SELECT COUNT(*) AS n FROM real_fifo_consumptions c
-      WHERE (? IS NULL OR c.character_id = ?)
+      WHERE ${consumptionScope.sql}
         AND c.lot_id <> 'UNKNOWN_SOURCE'
         AND NOT EXISTS (
           SELECT 1 FROM real_fifo_lots l
-          WHERE l.lot_id = c.lot_id AND l.character_id = c.character_id
+          WHERE l.lot_id = c.lot_id AND ${lotScope.sql}
         )
-    `).get(scope, scope) as any)?.n || 0);
+    `, [...consumptionScope.params, ...lotScope.params]);
     if (orphanConsumptions > 0) findings.push(`FIFO 消耗引用不存在或跨角色的批次：${orphanConsumptions} 条。`);
-    const duplicateConsumptions = Number((db.prepare(`
+
+    const duplicateConsumptions = runCount(`
       SELECT COUNT(*) AS n FROM (
-        SELECT sell_record_id, lot_id FROM real_fifo_consumptions
-        WHERE (? IS NULL OR character_id = ?)
-        GROUP BY sell_record_id, lot_id HAVING COUNT(*) > 1
+        SELECT c.sell_record_id, c.lot_id FROM real_fifo_consumptions c
+        WHERE ${consumptionScope.sql}
+        GROUP BY c.sell_record_id, c.lot_id HAVING COUNT(*) > 1
       )
-    `).get(scope, scope) as any)?.n || 0);
+    `, consumptionScope.params);
     if (duplicateConsumptions > 0) findings.push('FIFO 消耗记录存在重复扣减。');
     return { ok: findings.length === 0, findings };
   }

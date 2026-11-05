@@ -10,6 +10,7 @@ import {
   type CharacterDatasetStatus,
 } from '../eve/character-sync.js';
 import { getMarketSnapshotMeta } from '../eve/market-snapshot-loader.js';
+import { resolveAssetLineage, type AssetLineage } from '../assets/asset-lineage.js';
 import {
   accessSummary,
   activeOrders,
@@ -23,6 +24,20 @@ import {
 import { cleanExpiredWebSessions } from './web-session.js';
 import { requireMutationSession, requireSession } from './web-route-guards.js';
 import type { WebSession } from './web-session.js';
+
+function requireProfileAssetLineage(
+  db: Db,
+  session: WebSession,
+  reply: FastifyReply,
+  characterId: number,
+): AssetLineage | null {
+  try {
+    return resolveAssetLineage(db, characterId, session.userId, session.chatId);
+  } catch {
+    reply.status(403).send({ error: 'character_asset_context_invalid' });
+    return null;
+  }
+}
 
 /**
  * "Living profile" HTTP API: read-only projections of the materialized
@@ -47,10 +62,12 @@ export function registerProfileRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const linked = requireLinkedCharacter(db, session, reply);
     if (!linked) return;
+    const lineage = requireProfileAssetLineage(db, session, reply, linked.characterId);
+    if (!lineage) return;
     const pagination = parsePagination(request.query, reply);
     if (!pagination) return;
     const { locations, total } = assetLocations(
-      db, linked.characterId, pagination.limit, pagination.offset,
+      db, linked.characterId, pagination.limit, pagination.offset, lineage,
     );
     return {
       freshness: freshnessFor(db, linked.characterId, ['assets']),
@@ -67,18 +84,20 @@ export function registerProfileRoutes(app: FastifyInstance, db: Db): void {
     if (!session) return;
     const linked = requireLinkedCharacter(db, session, reply);
     if (!linked) return;
+    const lineage = requireProfileAssetLineage(db, session, reply, linked.characterId);
+    if (!lineage) return;
     const locationIdRaw = request.query.location_id;
     if (locationIdRaw === undefined || locationIdRaw === '') {
-      return reply.status(400).send({ error: 'Параметр location_id обязателен.' });
+      return reply.status(400).send({ error: 'location_id_required' });
     }
     const locationId = parsePositiveInteger(locationIdRaw);
     if (!locationId) {
-      return reply.status(400).send({ error: 'Некорректный идентификатор локации.' });
+      return reply.status(400).send({ error: 'invalid_location_id' });
     }
     const pagination = parsePagination(request.query, reply);
     if (!pagination) return;
     const { items, total } = locationItems(
-      db, linked.characterId, locationId, pagination.limit, pagination.offset,
+      db, linked.characterId, locationId, pagination.limit, pagination.offset, lineage,
     );
     return {
       freshness: freshnessFor(db, linked.characterId, ['assets']),
@@ -166,7 +185,7 @@ export function registerProfileRoutes(app: FastifyInstance, db: Db): void {
     if (!linked) return;
     const body = request.body;
     if (body !== undefined && (typeof body !== 'object' || body === null || Array.isArray(body))) {
-      return reply.status(400).send({ error: 'Некорректное тело запроса.' });
+      return reply.status(400).send({ error: 'invalid_request_body' });
     }
     const datasetsRaw = (body as Record<string, unknown> | undefined)?.datasets;
     let datasets: CharacterDatasetId[];
@@ -174,11 +193,11 @@ export function registerProfileRoutes(app: FastifyInstance, db: Db): void {
       datasets = ALL_DATASET_IDS;
     } else {
       if (!Array.isArray(datasetsRaw) || datasetsRaw.some((value) => typeof value !== 'string')) {
-        return reply.status(400).send({ error: 'Поле datasets должно быть массивом строк.' });
+        return reply.status(400).send({ error: 'datasets_must_be_string_array' });
       }
       const unknown = datasetsRaw.filter((value) => !DATASET_ID_SET.has(value as CharacterDatasetId));
       if (unknown.length > 0) {
-        return reply.status(400).send({ error: `Неизвестный набор данных: ${unknown.join(', ')}.` });
+        return reply.status(400).send({ error: 'unknown_dataset' });
       }
       datasets = [...new Set(datasetsRaw)] as CharacterDatasetId[];
     }
@@ -198,7 +217,7 @@ export function registerProfileRoutes(app: FastifyInstance, db: Db): void {
       if (signal.aborted) {
         reply.header('Retry-After', String(Math.ceil(MANUAL_SYNC_COOLDOWN_MS / 1000)));
         return reply.status(503).send({
-          error: 'Синхронизация не уложилась в отведённое время. Попробуйте позже.',
+          error: 'sync_timeout',
           statuses: getCharacterDatasetStatuses(db, linked.characterId, datasets).map(toSyncStatus),
         });
       }
@@ -231,7 +250,7 @@ function requireLinkedCharacter(
 ): { characterId: number; characterName: string; scopes: string[] } | null {
   const linked = getLinkedCharacter(db, sessionContext(session));
   if (!linked) {
-    void reply.status(404).send({ error: 'Персонаж не подключён.' });
+    void reply.status(404).send({ error: 'character_not_linked' });
     return null;
   }
   return linked;
@@ -316,12 +335,12 @@ function parsePagination(
 ): { limit: number; offset: number } | null {
   const limit = parseOptionalBoundedInteger(query.limit, 1, MAX_PAGE_LIMIT);
   if (limit === null) {
-    void reply.status(400).send({ error: `Лимит должен быть целым числом от 1 до ${MAX_PAGE_LIMIT}.` });
+    void reply.status(400).send({ error: 'invalid_limit' });
     return null;
   }
   const offset = parseOptionalBoundedInteger(query.offset, 0, Number.MAX_SAFE_INTEGER);
   if (offset === null) {
-    void reply.status(400).send({ error: 'Смещение (offset) должно быть неотрицательным целым числом.' });
+    void reply.status(400).send({ error: 'invalid_offset' });
     return null;
   }
   return { limit: limit ?? DEFAULT_PAGE_LIMIT, offset: offset ?? 0 };

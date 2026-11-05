@@ -108,12 +108,12 @@ describe('market ai-search route', () => {
   it('validates the body, query length and region', async () => {
     const session = browserSession();
     const cases: Array<{ payload: Record<string, unknown>; error: string }> = [
-      { payload: {}, error: 'Запрос должен содержать от 2 до 500 символов.' },
-      { payload: { query: 'ф' }, error: 'Запрос должен содержать от 2 до 500 символов.' },
-      { payload: { query: '  ' }, error: 'Запрос должен содержать от 2 до 500 символов.' },
-      { payload: { query: 'x'.repeat(501) }, error: 'Запрос должен содержать от 2 до 500 символов.' },
-      { payload: { query: 'фрегат', region_id: 'jita' }, error: 'Некорректный регион.' },
-      { payload: { query: 'фрегат', region_id: -5 }, error: 'Некорректный регион.' },
+      { payload: {}, error: 'query_length_out_of_range' },
+      { payload: { query: 'ф' }, error: 'query_length_out_of_range' },
+      { payload: { query: '  ' }, error: 'query_length_out_of_range' },
+      { payload: { query: 'x'.repeat(501) }, error: 'query_length_out_of_range' },
+      { payload: { query: 'фрегат', region_id: 'jita' }, error: 'invalid_region' },
+      { payload: { query: 'фрегат', region_id: -5 }, error: 'invalid_region' },
     ];
     for (const { payload, error } of cases) {
       const response = await app.inject({
@@ -201,7 +201,7 @@ describe('market ai-search route', () => {
       payload: { query: 'чем стрелять по армору' },
     });
     expect(response.statusCode).toBe(503);
-    expect(response.json()).toEqual({ error: 'Модель сейчас недоступна. Попробуйте повторить через минуту.' });
+    expect(response.json()).toEqual({ error: 'model_unavailable' });
     expect(db.prepare('SELECT COUNT(*) AS count FROM usage_events').get()).toEqual({ count: 0 });
   });
 
@@ -336,7 +336,7 @@ describe('market ai-search route', () => {
     const body = response.body;
     expect(body).not.toContain('admission');
     expect(body).not.toContain('provider.internal.example');
-    expect(response.json()).toEqual({ error: 'Модель сейчас недоступна. Попробуйте повторить через минуту.' });
+    expect(response.json()).toEqual({ error: 'model_unavailable' });
   });
 
   it('sets Retry-After on the plain degradation 503 as well', async () => {
@@ -387,7 +387,7 @@ describe('market ai-search route', () => {
       payload: { query: 'фрегат', region_id: FORGE },
     });
     expect(invalid.statusCode).toBe(400);
-    expect(invalid.json()).toEqual({ error: 'Некорректный регион.' });
+    expect(invalid.json()).toEqual({ error: 'invalid_region' });
     expect(runner).not.toHaveBeenCalled();
 
     const valid = await app.inject({

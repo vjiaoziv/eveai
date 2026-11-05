@@ -22,6 +22,8 @@ Read the smallest document that answers the current question. Start here, then d
 - [RELIABILITY.md](./RELIABILITY.md): runtime failure model and operational checks
 - [SECURITY.md](./SECURITY.md): auth, secret, and web protection rules
 - [deployment.md](./deployment.md): generic self-host deployment guide
+- [threat-model.md](./threat-model.md): trust boundaries, assets, entry points, and highest-value threat paths
+- [history/README.md](./history/README.md): chronological change history and superseded pre-P8 guides
 - [legal.md](./legal.md): CCP legal notices, Developer License Agreement, and Community Showcase readiness
 - [eve-sso-consent.md](./eve-sso-consent.md): bilingual player disclosure, optional ESI access groups, AI-provider data flow, and revocation
 - [open-source-release.md](./open-source-release.md): clean public release and history-safety checklist
@@ -43,6 +45,8 @@ Read the smallest document that answers the current question. Start here, then d
 - [exec-plans/active/index.md](./exec-plans/active/index.md): current substantial work
 - [exec-plans/completed/index.md](./exec-plans/completed/index.md): completed execution plans
 - [exec-plans/tech-debt-tracker.md](./exec-plans/tech-debt-tracker.md): cross-cutting debt not tied to one task
+- [trading/README.md](./trading/README.md): trading architecture, accounting, risk, data, strategy, backtest, and operator guides
+- [audit/README.md](./audit/README.md): historical phase audit reports and reading order
 
 ## Generated And Reference Artifacts
 
@@ -59,3 +63,6 @@ Read the smallest document that answers the current question. Start here, then d
 - "What are the hard safety or transport rules?" -> [SECURITY.md](./SECURITY.md), [RELIABILITY.md](./RELIABILITY.md)
 - "How should new work be planned and recorded?" -> [PLANS.md](./PLANS.md), [exec-plans/active/index.md](./exec-plans/active/index.md)
 - "How do background notifications work?" -> [heartbeat.md](./heartbeat.md)
+- "How does trading work?" -> [trading/README.md](./trading/README.md)
+- "What security threats are modeled?" -> [threat-model.md](./threat-model.md)
+- "Why did this branch diverge upstream?" -> [history/README.md](./history/README.md)

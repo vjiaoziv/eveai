@@ -32,6 +32,35 @@ afterEach(() => {
 });
 
 describe('durable web agent request coordinator', () => {
+  it('carries the request locale into the agent runner (V9)', async () => {
+    const locales: Array<string | undefined> = [];
+    const coordinator = new WebAgentRequestCoordinator(
+      db,
+      async (_db, _threadId, _ctx, _text, options) => {
+        locales.push(options?.locale);
+        return 'done';
+      },
+    );
+    coordinator.start();
+
+    const localized = coordinator.enqueue({ ...input('locale_en_00000001'), locale: 'en' });
+    expect(localized.ok).toBe(true);
+    if (localized.ok) {
+      await waitFor(() => coordinator.readOwned(owner(), localized.request.requestId)?.status === 'completed');
+    }
+
+    // Without a request locale the runner gets undefined and falls back to
+    // config.openai.responseLanguage (plan compatibility red line, 4.3).
+    const fallback = coordinator.enqueue(input('locale_default_0001'));
+    expect(fallback.ok).toBe(true);
+    if (fallback.ok) {
+      await waitFor(() => coordinator.readOwned(owner(), fallback.request.requestId)?.status === 'completed');
+    }
+
+    expect(locales).toEqual(['en', undefined]);
+    await coordinator.close();
+  });
+
   it('durably records cancellation and actively stops the running turn', async () => {
     const coordinator = new WebAgentRequestCoordinator(db, async () => {
       while (!isTurnAborted()) {
@@ -50,7 +79,7 @@ describe('durable web agent request coordinator', () => {
     await waitFor(() => coordinator.readOwned(owner(), accepted.request.requestId)?.status === 'cancelled');
     expect(coordinator.readOwned(owner(), accepted.request.requestId)).toMatchObject({
       status: 'cancelled',
-      error: 'Запрос отменён.',
+      error: 'cancelled',
     });
     expect(db.prepare(`
       SELECT COUNT(*) AS count FROM messages WHERE web_request_id = ?
@@ -153,7 +182,7 @@ describe('durable web agent request coordinator', () => {
     await waitFor(() => coordinator.readOwned(owner(), accepted.request.requestId)?.status === 'failed');
     expect(coordinator.readOwned(owner(), accepted.request.requestId)).toMatchObject({
       status: 'failed',
-      error: 'Запрос превысил безопасный лимит времени. Попробуйте разбить задачу.',
+      error: 'deadline_exceeded',
     });
     await coordinator.close();
   });
@@ -235,7 +264,7 @@ describe('durable web agent request coordinator', () => {
     expect(coordinator.readOwned(owner(), 'cancel-race')).toMatchObject({
       status: 'cancelled',
       result: null,
-      error: 'Запрос отменён.',
+      error: 'cancelled',
     });
     expect(db.prepare(`
       SELECT COUNT(*) AS count FROM messages
@@ -280,7 +309,7 @@ describe('durable web agent request coordinator', () => {
     coordinator.start();
     expect(coordinator.readOwned(owner(), 'stale-1')).toMatchObject({
       status: 'failed',
-      error: 'Сервис перезапустился во время запроса. Повторите запрос.',
+      error: 'service_restarted',
     });
     expect(executions).toBe(0);
     await coordinator.close();
@@ -362,7 +391,7 @@ describe('durable web agent request coordinator', () => {
     expect(rejected).toMatchObject({
       ok: false,
       statusCode: 429,
-      error: 'Исчерпан лимит вычислений. Попробуйте позже.',
+      error: 'compute_limit_exceeded',
     });
     expect(db.prepare('SELECT COUNT(*) AS count FROM web_agent_requests').get()).toEqual({ count: 0 });
     await coordinator.close();

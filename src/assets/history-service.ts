@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
+import { assetLineagePredicate, type AssetLineage } from './asset-lineage.js';
 
 /**
  * P9.2.5 immutable snapshot history and observed-change queries.
@@ -56,11 +57,16 @@ function changeLabel(changeType: string): string {
 }
 
 export class RealAssetHistoryService {
-  static listSnapshots(db: Db, query: SnapshotQuery): { rows: any[]; total: number; limit: number; offset: number } {
+  static listSnapshots(
+    db: Db,
+    query: SnapshotQuery,
+    lineage: AssetLineage,
+  ): { rows: any[]; total: number; limit: number; offset: number } {
     const limit = clampPositiveInteger(query.limit, 50, 200);
     const offset = clampNonNegativeInteger(query.offset);
-    const where = ['character_id = ?'];
-    const params: unknown[] = [query.characterId];
+    const ownership = assetLineagePredicate(null, lineage);
+    const where = ['character_id = ?', ownership.sql];
+    const params: unknown[] = [query.characterId, ...ownership.params];
     if (query.status) {
       where.push('status = ?');
       params.push(query.status);
@@ -91,11 +97,16 @@ export class RealAssetHistoryService {
     return { rows, total, limit, offset };
   }
 
-  static listChanges(db: Db, query: HistoryChangeQuery): { rows: any[]; total: number; limit: number; offset: number } {
+  static listChanges(
+    db: Db,
+    query: HistoryChangeQuery,
+    lineage: AssetLineage,
+  ): { rows: any[]; total: number; limit: number; offset: number } {
     const limit = clampPositiveInteger(query.limit, 100, 500);
     const offset = clampNonNegativeInteger(query.offset);
-    const where = ['c.character_id = ?'];
-    const params: unknown[] = [query.characterId];
+    const ownership = assetLineagePredicate('c', lineage);
+    const where = ['c.character_id = ?', ownership.sql];
+    const params: unknown[] = [query.characterId, ...ownership.params];
     if (query.changeType) {
       where.push('c.change_type = ?');
       params.push(query.changeType);
@@ -148,31 +159,34 @@ export class RealAssetHistoryService {
     };
   }
 
-  static itemHistory(db: Db, characterId: number, itemId: number): {
+  static itemHistory(db: Db, characterId: number, itemId: number, lineage: AssetLineage): {
     changes: any[];
     snapshots: any[];
     currentQuantity: number | null;
     currentLocationId: number | null;
   } {
+    const mirrorOwnership = assetLineagePredicate('a', lineage);
     const current = db.prepare(`
       SELECT quantity, location_id FROM character_assets
-      WHERE character_id = ? AND item_id = ?
-    `).get(characterId, itemId) as { quantity: number; location_id: number } | undefined;
+      a WHERE a.character_id = ? AND a.item_id = ? AND ${mirrorOwnership.sql}
+    `).get(characterId, itemId, ...mirrorOwnership.params) as { quantity: number; location_id: number } | undefined;
+    const changeOwnership = assetLineagePredicate(null, lineage);
     const changes = db.prepare(`
       SELECT * FROM real_asset_changes
-      WHERE character_id = ? AND item_id = ?
+      WHERE character_id = ? AND item_id = ? AND ${changeOwnership.sql}
       ORDER BY detected_at DESC, change_id DESC LIMIT 500
-    `).all(characterId, itemId) as any[];
+    `).all(characterId, itemId, ...changeOwnership.params) as any[];
+    const snapshotOwnership = assetLineagePredicate('s', lineage);
     const snapshots = db.prepare(`
       SELECT si.snapshot_id, s.completed_at, s.status, si.quantity, si.location_id,
              si.parent_item_id, loc.location_name, loc.solar_system_name, loc.region_name
       FROM real_asset_snapshot_items si
       JOIN real_asset_snapshots s ON s.snapshot_id = si.snapshot_id
       LEFT JOIN real_asset_locations loc ON loc.location_id = si.location_id
-      WHERE s.character_id = ? AND si.item_id = ?
+      WHERE s.character_id = ? AND si.item_id = ? AND ${snapshotOwnership.sql}
       ORDER BY COALESCE(s.completed_at, s.started_at) DESC, si.snapshot_id DESC
       LIMIT 500
-    `).all(characterId, itemId) as any[];
+    `).all(characterId, itemId, ...snapshotOwnership.params) as any[];
     return {
       changes: changes.map((row) => ({ ...row, changeLabelZh: changeLabel(row.change_type) })),
       snapshots,
@@ -182,15 +196,16 @@ export class RealAssetHistoryService {
   }
 
   /** Character asset totals over COMPLETE snapshots, with deterministic deltas. */
-  static totalsHistory(db: Db, characterId: number, limit = 100): any[] {
+  static totalsHistory(db: Db, characterId: number, lineage: AssetLineage, limit = 100): any[] {
+    const ownership = assetLineagePredicate(null, lineage);
     const rows = db.prepare(`
       SELECT snapshot_id, completed_at, status, total_items, total_unique_types,
              total_locations, total_quantity, data_hash, is_latest
       FROM real_asset_snapshots
-      WHERE character_id = ? AND status = 'COMPLETED'
+      WHERE character_id = ? AND status = 'COMPLETED' AND ${ownership.sql}
       ORDER BY COALESCE(completed_at, started_at) ASC, snapshot_id ASC
       LIMIT ?
-    `).all(characterId, clampPositiveInteger(limit, 100, 500)) as any[];
+    `).all(characterId, ...ownership.params, clampPositiveInteger(limit, 100, 500)) as any[];
     let previous: any = null;
     return rows.map((row) => {
       const enriched = {
@@ -210,20 +225,27 @@ export class RealAssetHistoryService {
    * Full-outer comparison of two COMPLETE snapshots for one character.
    * Returns each observed difference; no purchase/sale/loss attribution.
    */
-  static compare(db: Db, characterId: number, fromSnapshotId: string, toSnapshotId: string): {
+  static compare(
+    db: Db,
+    characterId: number,
+    fromSnapshotId: string,
+    toSnapshotId: string,
+    lineage: AssetLineage,
+  ): {
     from: any;
     to: any;
     summary: Record<string, number>;
     changes: any[];
   } {
+    const ownership = assetLineagePredicate(null, lineage);
     const from = db.prepare(`
       SELECT * FROM real_asset_snapshots
-      WHERE snapshot_id = ? AND character_id = ? AND status = 'COMPLETED'
-    `).get(fromSnapshotId, characterId) as any;
+      WHERE snapshot_id = ? AND character_id = ? AND status = 'COMPLETED' AND ${ownership.sql}
+    `).get(fromSnapshotId, characterId, ...ownership.params) as any;
     const to = db.prepare(`
       SELECT * FROM real_asset_snapshots
-      WHERE snapshot_id = ? AND character_id = ? AND status = 'COMPLETED'
-    `).get(toSnapshotId, characterId) as any;
+      WHERE snapshot_id = ? AND character_id = ? AND status = 'COMPLETED' AND ${ownership.sql}
+    `).get(toSnapshotId, characterId, ...ownership.params) as any;
     if (!from || !to) throw new Error('只能对比同一角色的两个完整资产快照。');
     if (from.snapshot_id === to.snapshot_id) throw new Error('不能将同一个快照与自身对比。');
 
@@ -242,8 +264,14 @@ export class RealAssetHistoryService {
       FROM real_asset_snapshot_items si
       JOIN real_asset_snapshots s ON s.snapshot_id = si.snapshot_id
       WHERE s.character_id = ? AND s.status = 'COMPLETED'
+        AND ${assetLineagePredicate('s', lineage).sql}
         AND s.snapshot_id NOT IN (?, ?)
-    `).all(characterId, fromSnapshotId, toSnapshotId) as Array<{ item_id: number }>)
+    `).all(
+      characterId,
+      ...assetLineagePredicate('s', lineage).params,
+      fromSnapshotId,
+      toSnapshotId,
+    ) as Array<{ item_id: number }>)
       .map((row) => Number(row.item_id)));
 
     const out: any[] = [];

@@ -47,7 +47,7 @@ function kill(extra: Partial<IndexedKill>): IndexedKill {
 
 const advisory: Advisory = {
   rule: 'camp_next_hop', severity: 'danger',
-  text: { ru: 'Кемп на следующем гейте: Uedama.', en: 'Camp on the next gate: Uedama.' },
+  text: { zh: '下一星门有堵门：Uedama。', ru: 'Кемп на следующем гейте: Uedama.', en: 'Camp on the next gate: Uedama.' },
   systemId: 2, killmailId: 1, repeats: 0, stateKey: 'camp:2', at: new Date(NOW).toISOString(),
 };
 

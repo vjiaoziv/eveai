@@ -81,6 +81,7 @@ import {
 export { resetActiveRoutesForTests } from '../eve-map/active-route.js';
 import type { WebAgentRequestCoordinator } from './agent-requests.js';
 import { requireMutationSession, requireSession } from './web-route-guards.js';
+import { readLocale } from './read-locale.js';
 import { buildWebClientIpKey } from './web-session.js';
 import type { WebSession } from './web-session.js';
 
@@ -194,7 +195,7 @@ export function registerMapRoutes(
     const session = requireSession(db, request, reply);
     if (!session) return;
     if (!getMapGraphMeta(db)) {
-      return reply.status(503).send({ error: 'Карта недоступна: граф систем не построен.' });
+      return reply.status(503).send({ error: 'map_unavailable' });
     }
 
     const origin = await resolveOrigin(db, session, request.query.system_id, reply);
@@ -217,7 +218,7 @@ export function registerMapRoutes(
     if (!session) return;
     const universe = getUniverseStatic(db);
     if (!universe) {
-      return reply.status(503).send({ error: 'Карта недоступна: граф систем не построен.' });
+      return reply.status(503).send({ error: 'map_unavailable' });
     }
     reply.header('Cache-Control', 'private, max-age=3600');
     return universe;
@@ -229,7 +230,7 @@ export function registerMapRoutes(
     const session = requireSession(db, request, reply);
     if (!session) return;
     if (!getMapGraphMeta(db)) {
-      return reply.status(503).send({ error: 'Карта недоступна: граф систем не построен.' });
+      return reply.status(503).send({ error: 'map_unavailable' });
     }
     return getUniverseIntel(db);
   });
@@ -242,7 +243,7 @@ export function registerMapRoutes(
     const session = requireSession(db, request, reply);
     if (!session) return;
     if (!getMapGraphMeta(db)) {
-      return reply.status(503).send({ error: 'Карта недоступна: граф систем не построен.' });
+      return reply.status(503).send({ error: 'map_unavailable' });
     }
     return getUniverseWormholes(db);
   });
@@ -253,10 +254,10 @@ export function registerMapRoutes(
     if (!session) return;
     const systemId = Number(request.query.system_id);
     if (!Number.isSafeInteger(systemId) || systemId <= 0) {
-      return reply.status(400).send({ error: 'system_id обязателен.' });
+      return reply.status(400).send({ error: 'system_id_required' });
     }
     const geometry = getMapSystem(db, systemId);
-    if (!geometry) return reply.status(404).send({ error: 'Система не найдена в графе карты.' });
+    if (!geometry) return reply.status(404).send({ error: 'system_not_in_graph' });
 
     // The full rollup, not just the geometry. The inspector opens from the whole
     // cluster map too, where the system is nowhere near the pilot's bubble and
@@ -301,18 +302,18 @@ export function registerMapRoutes(
     if (!session) return;
     const body = request.body ?? {};
     if (body.setAutopilot === true) {
-      return reply.status(405).send({ error: 'In-game autopilot writes are blocked in this read-only phase.' });
+      return reply.status(405).send({ error: 'autopilot_writes_blocked' });
     }
     const origin = Number(body.origin);
     const destination = Number(body.destination);
     if (!Number.isSafeInteger(origin) || !Number.isSafeInteger(destination)) {
-      return reply.status(400).send({ error: 'origin и destination должны быть числовыми ID систем.' });
+      return reply.status(400).send({ error: 'origin_destination_ids_required' });
     }
     const mode = parseMode(body.mode);
     const risk = parseRisk(body.risk);
     const avoid = parseAvoid(body.avoid);
     if (avoid === null) {
-      return reply.status(400).send({ error: `avoid не должен превышать ${MAX_ROUTE_AVOID} систем.` });
+      return reply.status(400).send({ error: 'route_avoid_limit_reached' });
     }
 
     // Unknown systems cannot produce a route. Fail before doing any bubble or
@@ -414,7 +415,7 @@ export function registerMapRoutes(
       if (!session) return;
       const systemId = Number(request.body?.systemId);
       if (!Number.isSafeInteger(systemId) || systemId <= 0) {
-        return reply.status(400).send({ error: 'systemId должен быть числовым ID системы.' });
+        return reply.status(400).send({ error: 'system_id_must_be_numeric' });
       }
       const note = typeof request.body?.note === 'string'
         ? request.body.note.trim().slice(0, 200)
@@ -432,7 +433,7 @@ export function registerMapRoutes(
       if (!session) return;
       const systemId = Number(request.params.systemId);
       if (!Number.isSafeInteger(systemId) || systemId <= 0) {
-        return reply.status(400).send({ error: 'systemId должен быть числовым ID системы.' });
+        return reply.status(400).send({ error: 'system_id_must_be_numeric' });
       }
       const removed = removeAvoided(db, session.userId, systemId);
       return { removed, systems: listAvoided(db, session.userId) };
@@ -473,8 +474,8 @@ export function registerMapRoutes(
     const session = requireMutationSession(db, request, reply);
     if (!session) return;
     const message = typeof request.body?.message === 'string' ? request.body.message.trim() : '';
-    if (!message) return reply.status(400).send({ error: 'Пустое сообщение.' });
-    if (message.length > 4000) return reply.status(400).send({ error: 'Слишком длинное сообщение.' });
+    if (!message) return reply.status(400).send({ error: 'empty_map_message' });
+    if (message.length > 4000) return reply.status(400).send({ error: 'message_too_long' });
 
     // Admission is charged exactly once, inside enqueue: the map uses the same
     // gate and the same budget as chat. Charging here as well halved the
@@ -535,7 +536,7 @@ export function registerMapRoutes(
     if (!session) return;
     const linked = getLinkedCharacter(db, sessionContext(session));
     if (!linked || !touchLiveSession(linked.characterId, session.userId)) {
-      return reply.status(404).send({ error: 'Живая сессия карты не найдена.' });
+      return reply.status(404).send({ error: 'live_session_not_found' });
     }
     return reply.status(204).send();
   });
@@ -546,11 +547,11 @@ export function registerMapRoutes(
     if (!session) return;
     const linked = getLinkedCharacter(db, sessionContext(session));
     if (!linked) {
-      return reply.status(403).send({ error: 'Свяжите персонажа EVE, чтобы видеть себя на карте.' });
+      return reply.status(403).send({ error: 'link_character_for_map' });
     }
     if (!linked.scopes.includes(LOCATION_SCOPE)) {
       return reply.status(403).send({
-        error: 'Нет доступа к позиции персонажа.',
+        error: 'position_access_denied',
         missingScope: LOCATION_SCOPE,
       });
     }
@@ -821,7 +822,7 @@ function publishAdvisory(
   threadId: string,
   characterId: number,
   advisory: Advisory,
-  locale: 'ru' | 'en',
+  locale: 'zh' | 'ru' | 'en',
   stream: SseStream,
 ): void {
   // The rule text is complete on its own; the model assessment, when it runs,
@@ -854,7 +855,7 @@ async function publishSituationAssessment(db: Db, input: {
   bubble: Awaited<ReturnType<typeof buildBubble>>;
   origin: number;
   routeAhead: number[];
-  locale: 'ru' | 'en';
+  locale: 'zh' | 'ru' | 'en';
   stream: SseStream;
 }): Promise<void> {
   try {
@@ -1003,11 +1004,11 @@ async function resolveOrigin(
   if (requested !== undefined) {
     const systemId = Number(requested);
     if (!Number.isSafeInteger(systemId) || systemId <= 0) {
-      void reply.status(400).send({ error: 'system_id должен быть числовым ID системы.' });
+      void reply.status(400).send({ error: 'system_id_numeric_required' });
       return null;
     }
     if (!getMapSystem(db, systemId)) {
-      void reply.status(404).send({ error: 'Система не найдена в графе карты.' });
+      void reply.status(404).send({ error: 'system_not_in_graph' });
       return null;
     }
     return { systemId, shipTypeId: null, source: 'explicit' };
@@ -1016,7 +1017,7 @@ async function resolveOrigin(
   const linked = getLinkedCharacter(db, sessionContext(session));
   if (!linked || !linked.scopes.includes(LOCATION_SCOPE)) {
     void reply.status(400).send({
-      error: 'Укажите system_id или свяжите персонажа с доступом к позиции.',
+      error: 'system_id_or_link_required',
       missingScope: linked ? LOCATION_SCOPE : null,
     });
     return null;
@@ -1031,7 +1032,7 @@ async function resolveOrigin(
     };
   }
   void reply.status(409).send({
-    error: 'Позиция ещё неизвестна. Откройте живой поток карты или укажите system_id.',
+    error: 'position_unknown',
   });
   return null;
 }
@@ -1068,12 +1069,6 @@ function parseAvoid(raw: unknown): number[] | null {
 
 function readIdempotencyKey(raw: unknown): string {
   return typeof raw === 'string' && /^[A-Za-z0-9_-]{16,96}$/.test(raw) ? raw : randomUUID();
-}
-
-function readLocale(request: FastifyRequest): 'ru' | 'en' {
-  const header = request.headers['accept-language'];
-  if (typeof header === 'string' && /^en/i.test(header.trim())) return 'en';
-  return 'ru';
 }
 
 function clientIp(request: FastifyRequest): string {

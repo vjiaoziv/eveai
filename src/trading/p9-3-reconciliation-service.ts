@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/sqlite.js';
 import type { P93ReconciliationStatus } from './p9-3-types.js';
 import { clampNonNegativeInteger, clampPositiveInteger } from '../util/query-bounds.js';
+import { assetLineagePredicate, type AssetLineage } from '../assets/asset-lineage.js';
+import { realLedgerLineagePredicate } from './p9-3-lineage.js';
 
 type ReconItem = {
   reconcile_key: string;
@@ -18,36 +20,49 @@ type ReconItem = {
 };
 
 export class P93ReconciliationService {
-  static run(db: Db, characterId: number): Record<string, unknown> {
+  static run(db: Db, characterId: number, lineage: AssetLineage): Record<string, unknown> {
+    const snapshotOwnership = assetLineagePredicate(null, lineage);
     const snapshot = db.prepare(`
       SELECT snapshot_id, completed_at FROM real_asset_snapshots
-      WHERE character_id = ? AND status = 'COMPLETED'
+      WHERE character_id = ? AND status = 'COMPLETED' AND ${snapshotOwnership.sql}
       ORDER BY completed_at DESC, snapshot_id DESC LIMIT 1
-    `).get(characterId) as any;
+    `).get(characterId, ...snapshotOwnership.params) as any;
     if (!snapshot) throw new Error('缺少完整 ESI 资产快照，不能执行真实资产对账。');
     if (!snapshot.completed_at) throw new Error('资产快照缺少完成时间，不能确定库存估值时点。');
+    const ledgerOwnership = realLedgerLineagePredicate(null, lineage);
     const calculation = db.prepare(`
       SELECT run_id, completed_at FROM real_calculation_runs
-      WHERE character_id = ? AND status = 'COMPLETED'
+      WHERE character_id = ? AND status = 'COMPLETED' AND ${ledgerOwnership.sql}
       ORDER BY completed_at DESC, run_id DESC LIMIT 1
-    `).get(characterId) as any;
+    `).get(characterId, ...ledgerOwnership.params) as any;
     if (!calculation) throw new Error('缺少已完成的 FIFO 计算，不能执行真实资产对账。');
     const laterVerified = db.prepare(`
       SELECT record_id, trade_time, trade_kind
       FROM real_trade_records
-      WHERE character_id = ? AND is_paper = 0
+      WHERE character_id = ? AND ${ledgerOwnership.sql} AND is_paper = 0
         AND record_state = 'VERIFIED' AND verification_status = 'VERIFIED'
         AND trade_kind IN ('BUY', 'SELL', 'PARTIAL_FILL', 'MULTI_BATCH_FILL',
                            'COST_ADJUSTMENT', 'INVENTORY_TRANSFER')
         AND julianday(trade_time) > julianday(?)
       ORDER BY trade_time, rowid
       LIMIT 1
-    `).get(characterId, snapshot.completed_at) as any;
+    `).get(characterId, ...ledgerOwnership.params, snapshot.completed_at) as any;
     const runId = 'RECON-' + randomUUID();
     db.prepare(`
-      INSERT INTO real_reconciliation_runs (run_id, character_id, snapshot_id, calculation_run_id, status, created_at)
-      VALUES (?, ?, ?, ?, 'RECONCILIATION_REQUIRED', datetime('now'))
-    `).run(runId, characterId, snapshot.snapshot_id, calculation.run_id);
+      INSERT INTO real_reconciliation_runs
+        (run_id, character_id, owner_user_id, owner_chat_id, binding_epoch, binding_digest,
+         snapshot_id, calculation_run_id, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RECONCILIATION_REQUIRED', datetime('now'))
+    `).run(
+      runId,
+      characterId,
+      lineage.ownerUserId,
+      lineage.ownerChatId,
+      lineage.bindingEpoch,
+      lineage.bindingDigest,
+      snapshot.snapshot_id,
+      calculation.run_id,
+    );
     if (laterVerified) {
       db.prepare(`
         UPDATE real_reconciliation_runs
@@ -64,7 +79,7 @@ export class P93ReconciliationService {
         firstLaterTradeKind: laterVerified.trade_kind,
         policy: '资产快照早于已核实交易时，当前 FIFO 库存不能代表快照时点；已拒绝数量对账，避免伪造差异。',
       }), runId);
-      return this.get(db, characterId, runId)!;
+      return this.get(db, characterId, lineage, runId)!;
     }
 
     const assetRows = db.prepare(`
@@ -78,20 +93,30 @@ export class P93ReconciliationService {
              SUM(COALESCE(remaining_cost, 0)) AS known_cost,
              SUM(CASE WHEN cost_status <> 'KNOWN' THEN 1 ELSE 0 END) AS unknown_cost_lots
       FROM real_fifo_lots
-      WHERE character_id = ? AND remaining_quantity > 0
+      WHERE character_id = ? AND ${ledgerOwnership.sql} AND remaining_quantity > 0
       GROUP BY type_id, location_id
-    `).all(characterId) as any[];
+    `).all(characterId, ...ledgerOwnership.params) as any[];
+    const valuationOwnership = assetLineagePredicate('v', lineage);
+    const latestValuationOwnership = assetLineagePredicate(null, lineage);
     const valuation = db.prepare(`
       SELECT si.type_id, si.location_id, SUM(vi.market_reference_value) AS value
       FROM real_asset_valuation_items vi
       JOIN real_asset_snapshot_items si ON si.item_id = vi.item_id AND si.snapshot_id = ?
       JOIN real_asset_valuations v ON v.valuation_id = vi.valuation_id
-      WHERE v.character_id = ? AND v.status = 'COMPLETED'
+      WHERE v.character_id = ? AND v.status = 'COMPLETED' AND ${valuationOwnership.sql}
         AND v.valuation_id = (SELECT valuation_id FROM real_asset_valuations
                               WHERE character_id = ? AND snapshot_id = ? AND status = 'COMPLETED'
+                                AND ${latestValuationOwnership.sql}
                               ORDER BY created_at DESC, valuation_id DESC LIMIT 1)
       GROUP BY si.type_id, si.location_id
-    `).all(snapshot.snapshot_id, characterId, characterId, snapshot.snapshot_id) as any[];
+    `).all(
+      snapshot.snapshot_id,
+      characterId,
+      ...valuationOwnership.params,
+      characterId,
+      snapshot.snapshot_id,
+      ...latestValuationOwnership.params,
+    ) as any[];
 
 
     const key = (row: any) => `${row.type_id}:${row.location_id}`;
@@ -173,11 +198,12 @@ export class P93ReconciliationService {
 
     // Asset changes remain observations. They create review cases and never
     // become verified trades automatically.
+    const changeOwnership = assetLineagePredicate(null, lineage);
     const changes = db.prepare(`
       SELECT * FROM real_asset_changes
-      WHERE character_id = ? AND source_class <> 'SOURCE_CONFIRMED'
+      WHERE character_id = ? AND source_class <> 'SOURCE_CONFIRMED' AND ${changeOwnership.sql}
       ORDER BY detected_at DESC LIMIT 500
-    `).all(characterId) as any[];
+    `).all(characterId, ...changeOwnership.params) as any[];
     const insertCase = db.prepare(`
       INSERT INTO real_reconciliation_cases
         (case_id, run_id, character_id, case_kind, status, linked_record_id, linked_change_id, details_json, created_at)
@@ -189,13 +215,14 @@ export class P93ReconciliationService {
       const locationId = change.new_location_id ?? change.prev_location_id ?? 0;
       const matchCount = Number((db.prepare(`
         SELECT COUNT(*) AS n FROM real_trade_records
-        WHERE character_id = ? AND type_id = ?
+        WHERE character_id = ? AND ${ledgerOwnership.sql} AND type_id = ?
           AND (location_id = ? OR from_location_id = ? OR to_location_id = ?)
           AND verification_status = 'VERIFIED'
           AND trade_time BETWEEN datetime(?, '-2 days') AND datetime(?, '+2 days')
           AND ((? = 1 AND direction = 'BUY') OR (? = 1 AND direction = 'SELL') OR trade_kind = 'INVENTORY_TRANSFER')
       `).get(
         characterId,
+        ...ledgerOwnership.params,
         change.type_id,
         locationId,
         locationId,
@@ -219,11 +246,11 @@ export class P93ReconciliationService {
     const duplicates = db.prepare(`
       SELECT source_type, source_ref, COUNT(*) AS count, GROUP_CONCAT(record_id) AS record_ids
       FROM real_trade_records
-      WHERE character_id = ? AND source_ref IS NOT NULL
+      WHERE character_id = ? AND ${ledgerOwnership.sql} AND source_ref IS NOT NULL
         AND record_state NOT IN ('REJECTED', 'REVERSED', 'CORRECTED')
       GROUP BY source_type, source_ref
       HAVING COUNT(*) > 1
-    `).all(characterId) as any[];
+    `).all(characterId, ...ledgerOwnership.params) as any[];
     for (const duplicate of duplicates) {
       insertCase.run(
         'CASE-' + randomUUID(),
@@ -256,16 +283,21 @@ export class P93ReconciliationService {
       policy: '资产变化不会自动生成已核实买卖交易。',
     }), runId);
 
-    return this.get(db, characterId, runId)!;
+    return this.get(db, characterId, lineage, runId)!;
   }
 
   static get(
     db: Db,
     characterId: number,
+    lineage: AssetLineage,
     runId: string,
     query: { limit?: unknown; offset?: unknown } = {},
   ): Record<string, unknown> | null {
-    const run = db.prepare('SELECT * FROM real_reconciliation_runs WHERE character_id = ? AND run_id = ?').get(characterId, runId) as any;
+    const ownership = realLedgerLineagePredicate(null, lineage);
+    const run = db.prepare(`
+      SELECT * FROM real_reconciliation_runs
+      WHERE character_id = ? AND run_id = ? AND ${ownership.sql}
+    `).get(characterId, runId, ...ownership.params) as any;
     if (!run) return null;
     const limit = clampPositiveInteger(query.limit, 200, 500);
     const offset = clampNonNegativeInteger(query.offset);
@@ -294,13 +326,15 @@ export class P93ReconciliationService {
   static latest(
     db: Db,
     characterId: number,
+    lineage: AssetLineage,
     query: { limit?: unknown; offset?: unknown } = {},
   ): Record<string, unknown> | null {
+    const ownership = realLedgerLineagePredicate(null, lineage);
     const run = db.prepare(`
       SELECT run_id FROM real_reconciliation_runs
-      WHERE character_id = ?
+      WHERE character_id = ? AND ${ownership.sql}
       ORDER BY created_at DESC, run_id DESC LIMIT 1
-    `).get(characterId) as any;
-    return run ? this.get(db, characterId, run.run_id, query) : null;
+    `).get(characterId, ...ownership.params) as any;
+    return run ? this.get(db, characterId, lineage, run.run_id, query) : null;
   }
 }
